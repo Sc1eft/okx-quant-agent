@@ -193,6 +193,11 @@ class HeartbeatDB:
         )
         df = df.set_index("datetime")
 
+        # Resample 对时区感知 DatetimeIndex 兼容性不一，先剥离时区（墙钟不变）
+        _idx = df.index
+        if _idx.tz is not None:
+            df.index = _idx.tz_localize(None)
+
         # Resample to 1-second OHLC + tick count as volume
         ohlc = df["price"].resample("1s").ohlc()
         vol = df["price"].resample("1s").count()

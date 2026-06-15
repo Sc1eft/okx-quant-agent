@@ -100,6 +100,10 @@ def fetch_klines_with_agg(
         )
         if df.empty:
             return df
+        # resample 对时区感知的 DatetimeIndex 兼容性不一，先剥离时区（墙钟不变）
+        _idx = df.index
+        if _idx.tz is not None:
+            df.index = _idx.tz_localize(None)
         df_agg = df.resample(agg["rule"]).agg({
             "open": "first",
             "high": "max",
