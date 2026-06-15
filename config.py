@@ -131,7 +131,7 @@ class AgentConfig:
     """DeepSeek Agent 配置"""
     enabled: bool = True
     api_key: str = ""
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-pro"
     base_url: str = "https://api.deepseek.com/v1"
     temperature: float = 0.3
     # Agent 范围：第一版只做回测后分析
@@ -139,6 +139,9 @@ class AgentConfig:
         default_factory=lambda: ["backtest_report"]
     )
     max_tokens: int = 2000
+
+    def __post_init__(self):
+        self.api_key = os.getenv("DEEPSEEK_API_KEY", self.api_key)
 
 
 # ──────────────────────────────────────────────
@@ -210,6 +213,17 @@ class Config:
                     setattr(cfg, k, v)
             else:
                 setattr(cfg, k, v)
+        # 环境变量覆盖配置文件中对应的值（最高优先级）
+        for _env_key, _cfg_path in [
+            ("OKX_API_KEY", ("exchange", "api_key")),
+            ("OKX_SECRET_KEY", ("exchange", "secret_key")),
+            ("OKX_PASSPHRASE", ("exchange", "passphrase")),
+            ("DEEPSEEK_API_KEY", ("agent", "api_key")),
+        ]:
+            _val = os.getenv(_env_key)
+            if _val:
+                _sub = getattr(cfg, _cfg_path[0])
+                setattr(_sub, _cfg_path[1], _val)
         return cfg
 
     @property

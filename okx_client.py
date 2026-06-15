@@ -8,13 +8,18 @@ from __future__ import annotations
 import hashlib
 import hmac
 import base64
+import logging
+import random
 import time
 from datetime import datetime
 from typing import Optional
 
 import httpx
+from httpx import RemoteProtocolError, ConnectError, TimeoutException
 
 from config import ExchangeConfig
+
+logger = logging.getLogger("okx_client")
 
 
 class OKXClient:
@@ -27,6 +32,56 @@ class OKXClient:
             timeout=config.timeout_seconds,
             follow_redirects=True,
         )
+
+    # ── 统一请求入口（带自动重试） ──
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        content: Optional[str] = None,
+    ) -> httpx.Response:
+        """
+        统一 HTTP 请求入口，自动重试 transient 网络错误。
+
+        重试策略：
+        - 指数退避: 1s → 2s → 4s ...（最多 retry_count 次）
+        - 每次退避加 ±20% jitter
+        - 只重试: RemoteProtocolError（连接重置）、ConnectError（连接失败）、TimeoutException（超时）
+        """
+        max_retries = max(1, getattr(self.config, "retry_count", 3))
+        last_exc = None
+
+        for attempt in range(1, max_retries + 2):  # 第一次不算重试
+            try:
+                resp = self._client.request(
+                    method=method, url=path, params=params,
+                    headers=headers, content=content,
+                )
+                resp.raise_for_status()
+                return resp
+
+            except (RemoteProtocolError, ConnectError, TimeoutException) as e:
+                last_exc = e
+                if attempt <= max_retries:
+                    sleep_sec = (2 ** (attempt - 1)) * random.uniform(0.8, 1.2)
+                    logger.warning(
+                        f"OKX 网络错误 ({type(e).__name__}), "
+                        f"{max_retries - attempt + 1} 次重试剩余, "
+                        f"等待 {sleep_sec:.1f}s..."
+                    )
+                    time.sleep(sleep_sec)
+                else:
+                    raise RuntimeError(
+                        f"OKX 请求失败 (已重试 {max_retries} 次): {e}"
+                    ) from e
+
+    def _check_api_response(self, data: dict):
+        """检查 OKX API 返回码"""
+        if data.get("code") != "0":
+            raise RuntimeError(f"OKX API error: {data.get('msg', data)}")
 
     # ── 公开行情 ──
 
@@ -52,20 +107,16 @@ class OKXClient:
         if before:
             params["before"] = str(before)
 
-        resp = self._client.get("/api/v5/market/candles", params=params)
-        resp.raise_for_status()
+        resp = self._request("GET", "/api/v5/market/candles", params=params)
         data = resp.json()
-        if data.get("code") != "0":
-            raise RuntimeError(f"OKX API error: {data.get('msg', data)}")
+        self._check_api_response(data)
         return self._parse_klines(data.get("data", []))
 
     def get_ticker(self, symbol: str) -> dict:
         """获取最新 ticker"""
-        resp = self._client.get("/api/v5/market/ticker", params={"instId": symbol})
-        resp.raise_for_status()
+        resp = self._request("GET", "/api/v5/market/ticker", params={"instId": symbol})
         data = resp.json()
-        if data.get("code") != "0":
-            raise RuntimeError(f"OKX API error: {data.get('msg', data)}")
+        self._check_api_response(data)
         return self._parse_ticker(data["data"][0])
 
     # ── 私有只读（阶段 9 启用） ──
@@ -73,29 +124,22 @@ class OKXClient:
     def get_balance(self) -> list[dict]:
         """查询账户余额（仅 Read 权限）"""
         ts = self._timestamp()
-        method = "GET"
-        path = "/api/v5/account/balance"
         body = ""
-        headers = self._sign(method, path, body, ts)
-        resp = self._client.get(path, headers=headers)
-        resp.raise_for_status()
+        headers = self._sign("GET", "/api/v5/account/balance", body, ts)
+        resp = self._request("GET", "/api/v5/account/balance", headers=headers)
         data = resp.json()
-        if data.get("code") != "0":
-            raise RuntimeError(f"OKX API error: {data.get('msg', data)}")
+        self._check_api_response(data)
         return data["data"]
 
     def get_positions(self, inst_type: str = "SPOT") -> list[dict]:
         """查询持仓"""
         ts = self._timestamp()
-        method = "GET"
         path = f"/api/v5/account/positions?instType={inst_type}"
         body = ""
-        headers = self._sign(method, path, body, ts)
-        resp = self._client.get(path, headers=headers)
-        resp.raise_for_status()
+        headers = self._sign("GET", path, body, ts)
+        resp = self._request("GET", path, headers=headers)
         data = resp.json()
-        if data.get("code") != "0":
-            raise RuntimeError(f"OKX API error: {data.get('msg', data)}")
+        self._check_api_response(data)
         return data["data"]
 
     # ── 订单（阶段 10 启用） ──
@@ -117,11 +161,9 @@ class OKXClient:
         json_body = str(body).replace("'", '"')
         headers = self._sign("POST", "/api/v5/trade/order", json_body, ts)
         headers["Content-Type"] = "application/json"
-        resp = self._client.post("/api/v5/trade/order", content=json_body, headers=headers)
-        resp.raise_for_status()
+        resp = self._request("POST", "/api/v5/trade/order", headers=headers, content=json_body)
         data = resp.json()
-        if data.get("code") != "0":
-            raise RuntimeError(f"OKX API error: {data.get('msg', data)}")
+        self._check_api_response(data)
         return data["data"]
 
     # ── 内部 ──
@@ -151,7 +193,7 @@ class OKXClient:
         mapping = {
             "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m",
             "30m": "30m", "1h": "1H", "2h": "2H", "4h": "4H",
-            "6h": "6H", "12h": "12H", "1d": "1D", "1w": "1W",
+            "6h": "6H", "12h": "12H", "1d": "1D", "2d": "2D", "1w": "1W",
         }
         return mapping.get(tf, "1H")
 
@@ -173,12 +215,18 @@ class OKXClient:
 
     @staticmethod
     def _parse_ticker(raw: dict) -> dict:
+        last = float(raw["last"])
+        open24h = float(raw.get("open24h", 0))
+        change_24h = ((last - open24h) / open24h * 100) if open24h else 0.0
         return {
             "timestamp": int(raw["ts"]),
-            "last": float(raw["last"]),
-            "bid": float(raw.get("bid", 0)),
-            "ask": float(raw.get("ask", 0)),
+            "last": last,
+            "bid": float(raw.get("bidPx", 0)),
+            "ask": float(raw.get("askPx", 0)),
             "volume_24h": float(raw.get("vol24h", 0)),
+            "high_24h": float(raw.get("high24h", 0)),
+            "low_24h": float(raw.get("low24h", 0)),
+            "change_24h": change_24h,
         }
 
     def close(self):

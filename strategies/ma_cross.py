@@ -25,43 +25,84 @@ class MACrossStrategy(BaseStrategy):
       - 持仓超过 N 根 K 线 → EXIT
     """
 
+    def __init__(self, name: str, params: dict):
+        super().__init__(name, params)
+        self._min_bars = max(params.get("short_window", 7), params.get("long_window", 25))
+
     @property
     def description(self) -> str:
         sw = self.params["short_window"]
         lw = self.params["long_window"]
         return f"MA 交叉 (MA{sw}/MA{lw}) + 止盈止损移动止损"
 
-    def generate_signals(self, df: pd.DataFrame) -> StrategyResult:
-        sw = self.params["short_window"]
-        lw = self.params["long_window"]
-        sl_pct = self.params.get("stop_loss_pct", 2.0) / 100
-        tp_pct = self.params.get("take_profit_pct", 6.0) / 100
-        ts_activation = self.params.get("trailing_stop_activation", 3.0) / 100
-        ts_distance = self.params.get("trailing_stop_distance", 1.5) / 100
-        timeout_bars = self.params.get("position_timeout_bars", 48)
+    # ── 私有参数读取 ──
 
+    def _get_params(self) -> tuple:
+        return (
+            self.params["short_window"],
+            self.params["long_window"],
+            self.params.get("stop_loss_pct", 2.0) / 100,
+            self.params.get("take_profit_pct", 6.0) / 100,
+            self.params.get("trailing_stop_activation", 3.0) / 100,
+            self.params.get("trailing_stop_distance", 1.5) / 100,
+            self.params.get("position_timeout_bars", 48),
+        )
+
+    # ── 指标计算 ──
+
+    def _compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        sw, lw, *_ = self._get_params()
         df = df.copy()
-
-        # 均线
-        df["ma_short"] = df["close"].rolling(window=sw).mean()
-        df["ma_long"] = df["close"].rolling(window=lw).mean()
-
-        # 交叉信号
+        df["ma_short"] = df["close"].rolling(window=sw, min_periods=sw).mean()
+        df["ma_long"] = df["close"].rolling(window=lw, min_periods=lw).mean()
         df["prev_short"] = df["ma_short"].shift(1)
         df["prev_long"] = df["ma_long"].shift(1)
+        return df
 
-        # BUY: 短上穿长（prev 短 < prev 长，当前短 > 当前长）
+    # ── 单步退出检查（用于 on_bar） ──
+
+    def _check_exit(self, close_price: float) -> tuple[Signal, str]:
+        """检查退出条件，返回 (signal, reason)"""
+        sl_pct, tp_pct, ts_activation, ts_distance, timeout_bars = self._get_params()[2:]
+        sig = Signal.HOLD
+        reason = ""
+
+        self.position.bars_held += 1
+        self.position.highest_price = max(self.position.highest_price, close_price)
+
+        if sl_pct > 0 and close_price <= self.position.entry_price * (1 - sl_pct):
+            return Signal.EXIT, f"止损 {sl_pct*100:.1f}% (入场 {self.position.entry_price:.1f}, 当前 {close_price:.1f})"
+
+        if tp_pct > 0 and close_price >= self.position.entry_price * (1 + tp_pct):
+            return Signal.EXIT, f"止盈 {tp_pct*100:.1f}% (入场 {self.position.entry_price:.1f}, 当前 {close_price:.1f})"
+
+        if ts_activation > 0 and ts_distance > 0:
+            profit_pct = (self.position.highest_price - self.position.entry_price) / self.position.entry_price
+            if profit_pct >= ts_activation:
+                trail_stop = self.position.highest_price * (1 - ts_distance)
+                if close_price <= trail_stop:
+                    return Signal.EXIT, f"移动止损 (最高 {self.position.highest_price:.1f}, 回落至 {close_price:.0f})"
+
+        if self.position.bars_held >= timeout_bars:
+            return Signal.EXIT, f"持仓超时 ({timeout_bars} 根)"
+
+        return Signal.HOLD, ""
+
+    # ── 批处理模式（回测用） ──
+
+    def generate_signals(self, df: pd.DataFrame) -> StrategyResult:
+        sw, lw, sl_pct, tp_pct, ts_activation, ts_distance, timeout_bars = self._get_params()
+        df = self._compute_indicators(df)
+
         buy_condition = (
             (df["prev_short"] < df["prev_long"]) &
             (df["ma_short"] > df["ma_long"])
         )
-        # SELL: 短下穿长
         sell_condition = (
             (df["prev_short"] > df["prev_long"]) &
             (df["ma_short"] < df["ma_long"])
         )
 
-        # ── 状态机执行（含持仓管理和退出逻辑） ──
         self.position = None
         signals = []
         exit_reasons = []
@@ -70,56 +111,24 @@ class MACrossStrategy(BaseStrategy):
             row = df.loc[idx]
             sig = Signal.HOLD
             reason = ""
-
             close_price = row["close"]
 
-            # 检查已有持仓的退出条件
             if self.position is not None:
-                self.position.bars_held += 1
-                # 更新持仓期间最高价（移动止损用）
-                self.position.highest_price = max(self.position.highest_price, close_price)
+                sig, reason = self._check_exit(close_price)
 
-                # 1) 止损
-                if sl_pct > 0 and close_price <= self.position.entry_price * (1 - sl_pct):
-                    sig = Signal.EXIT
-                    reason = f"止损 {sl_pct*100:.1f}% (入场 {self.position.entry_price:.1f}, 当前 {close_price:.1f})"
-                # 2) 止盈
-                elif tp_pct > 0 and close_price >= self.position.entry_price * (1 + tp_pct):
-                    sig = Signal.EXIT
-                    reason = f"止盈 {tp_pct*100:.1f}% (入场 {self.position.entry_price:.1f}, 当前 {close_price:.1f})"
-                # 3) 移动止损
-                elif ts_activation > 0 and ts_distance > 0:
-                    # 浮盈达到激活比例
-                    profit_pct = (self.position.highest_price - self.position.entry_price) / self.position.entry_price
-                    if profit_pct >= ts_activation:
-                        trail_stop = self.position.highest_price * (1 - ts_distance)
-                        if close_price <= trail_stop:
-                            sig = Signal.EXIT
-                            reason = f"移动止损触发 (最高 {self.position.highest_price:.1f}, 回落至 {close_price:.1f})"
-                # 4) 持仓超时
-                if sig == Signal.HOLD and self.position.bars_held >= timeout_bars:
-                    sig = Signal.EXIT
-                    reason = f"持仓超时 ({timeout_bars} 根 K 线)"
-
-            # 没有持仓 → 检查入场信号
             if self.position is None:
                 if buy_condition.loc[idx]:
                     sig = Signal.BUY
                     reason = f"MA{sw} 上穿 MA{lw}"
-                    # 开仓
                     self.position = PositionInfo(
-                        entry_price=close_price,
-                        entry_time=idx,
-                        size=1.0,
-                        highest_price=close_price,
+                        entry_price=close_price, entry_time=idx,
+                        size=1.0, highest_price=close_price,
                     )
             else:
-                # 有持仓 → 检查趋势反转信号
                 if sell_condition.loc[idx] and sig == Signal.HOLD:
                     sig = Signal.SELL
                     reason = f"MA{sw} 下穿 MA{lw}"
 
-            # 卖出/退出 → 清仓
             if sig in (Signal.SELL, Signal.EXIT):
                 self.position = None
 
@@ -131,10 +140,48 @@ class MACrossStrategy(BaseStrategy):
 
         return StrategyResult(
             signals=df,
-            metadata={
-                "strategy": self.name,
-                "short_window": sw,
-                "long_window": lw,
-                "params": dict(self.params),
-            },
+            metadata={"strategy": self.name, "short_window": sw, "long_window": lw, "params": dict(self.params)},
         )
+
+    # ── 增量模式（模拟盘用） ──
+
+    def on_bar(self, bar: pd.Series) -> Signal:
+        sw, lw, *_ = self._get_params()
+
+        # 追加到缓冲区
+        new_df = bar.to_frame().T.infer_objects(copy=False)
+        if self._bar_buffer is None:
+            self._bar_buffer = new_df
+        else:
+            self._bar_buffer = pd.concat([self._bar_buffer, new_df])
+
+        if len(self._bar_buffer) < self._min_bars:
+            return Signal.HOLD
+
+        # 计算指标
+        df = self._compute_indicators(self._bar_buffer)
+        current = df.iloc[-1]
+        close_price = float(current["close"])
+
+        # 有持仓 → 检查退出
+        sig = Signal.HOLD
+        if self.position is not None:
+            sig, _ = self._check_exit(close_price)
+
+        # 无持仓 → 检查入场
+        if self.position is None:
+            if current["prev_short"] < current["prev_long"] and current["ma_short"] > current["ma_long"]:
+                sig = Signal.BUY
+                self.position = PositionInfo(
+                    entry_price=close_price, entry_time=self._bar_buffer.index[-1],
+                    size=1.0, highest_price=close_price,
+                )
+        elif sig == Signal.HOLD:
+            # 有持仓 → 检查趋势反转
+            if current["prev_short"] > current["prev_long"] and current["ma_short"] < current["ma_long"]:
+                sig = Signal.SELL
+
+        if sig in (Signal.SELL, Signal.EXIT):
+            self.position = None
+
+        return sig

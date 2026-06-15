@@ -12,12 +12,21 @@ build/
 
 # Data / logs
 *.db
+*.db-shm
+*.db-wal
 logs/*.log
 configs/default.json
+data/*.json
+data/*.tmp
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+streamlit.err
+streamlit.log
 
 # Environment
 .env

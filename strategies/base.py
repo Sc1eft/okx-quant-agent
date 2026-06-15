@@ -53,23 +53,49 @@ class BaseStrategy(ABC):
         self.name = name
         self.params = params
         self.position: Optional[PositionInfo] = None
+        # 增量模式（模拟盘/实盘）的 K 线缓冲区
+        self._bar_buffer: Optional[pd.DataFrame] = None
+        # 策略需要的最少 K 线数（用于指标预热）
+        self._min_bars: int = 1
 
     @abstractmethod
     def generate_signals(self, df: pd.DataFrame) -> StrategyResult:
         """
-        生成交易信号
+        生成交易信号（批处理模式 — 用于回测）
         df: K 线 DataFrame (index=datetime, columns=[open, high, low, close, volume])
         返回: StrategyResult
         """
         ...
 
-    @property
-    def description(self) -> str:
-        return ""
+    def on_bar(self, bar: pd.Series) -> Signal:
+        """
+        增量模式：逐根 K 线处理，返回单根 K 线的信号。
+        策略内部维护 self.position 跨调用持久化。
+
+        bar: 一根 K 线的 Series (index=[open, high, low, close, volume], name=timestamp)
+        返回: Signal
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 不支持增量模式，请实现 on_bar()"
+        )
+
+    def get_bar_buffer(self) -> pd.DataFrame:
+        """获取当前 K 线缓冲区（用于指标计算）"""
+        if self._bar_buffer is None:
+            return pd.DataFrame()
+        return self._bar_buffer
+
+    def reset_buffer(self):
+        """重置 K 线缓冲区（切换策略或重新开始时调用）"""
+        self._bar_buffer = None
 
     def reset_position(self):
         """重置持仓状态"""
         self.position = None
+
+    @property
+    def description(self) -> str:
+        return ""
 
 
 def get_available_strategies() -> dict:
