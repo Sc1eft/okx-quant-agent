@@ -186,7 +186,11 @@ class HeartbeatDB:
             return pd.DataFrame()
 
         df = pd.DataFrame(rows)
-        df["datetime"] = pd.to_datetime(df["ts_ms"], unit="ms")
+        # ts_ms 是 UTC 毫秒时间戳 → 转为 Asia/Shanghai 时区
+        df["datetime"] = (
+            pd.to_datetime(df["ts_ms"], unit="ms", utc=True)
+            .tz_convert("Asia/Shanghai")
+        )
         df = df.set_index("datetime")
 
         # Resample to 1-second OHLC + tick count as volume
