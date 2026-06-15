@@ -52,7 +52,11 @@ def fetch_okx_data(
         raise RuntimeError("OKX 返回了空数据")
 
     df = pd.DataFrame(raw)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    # OKX 返回的时间戳是 UTC 毫秒 → 转为 Asia/Shanghai 时区
+    df["timestamp"] = (
+        pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        .tz_convert("Asia/Shanghai")
+    )
     df = df.set_index("timestamp")
     df = df.rename(columns={"vol": "volume"})
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
