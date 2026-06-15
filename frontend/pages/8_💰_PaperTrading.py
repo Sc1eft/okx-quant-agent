@@ -612,7 +612,7 @@ if df is not None and paper_state is not None:
                 bordercolor="#334155",
             ),
             xaxis_rangeslider_visible=False,
-            height=500,
+            height=380,
             margin=dict(l=40, r=20, t=50, b=40),
         )
         fig.update_xaxes(

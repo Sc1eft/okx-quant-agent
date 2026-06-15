@@ -274,6 +274,19 @@ st.markdown("""
     padding: 0.5rem;
     margin-bottom: 1rem;
 }
+
+/* ── Mobile responsive ── */
+@media (max-width: 767px) {
+    .price-value { font-size: 2rem !important; }
+    .price-card { padding: 1rem 0.5rem !important; }
+    .price-bba { flex-wrap: wrap; gap: 0.4rem; }
+    .price-bba span { flex: 1 1 calc(50% - 0.4rem); text-align: center; }
+    .price-sub { flex-wrap: wrap; gap: 0.5rem; }
+    .hb-status-bar { gap: 0.4rem; font-size: 0.78rem; }
+}
+@media (max-width: 479px) {
+    .price-value { font-size: 1.6rem !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 

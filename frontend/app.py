@@ -21,7 +21,7 @@ st.set_page_config(
     page_title="OKX Quant Agent",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Load custom CSS
@@ -29,6 +29,12 @@ css_path = Path(__file__).parent / "assets" / "style.css"
 if css_path.exists():
     with open(css_path, encoding="utf-8") as f:
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+# ── Viewport meta tag for mobile responsiveness ──
+st.markdown(
+    "<meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0'>",
+    unsafe_allow_html=True,
+)
 
 # ── Load Streamlit secrets into environment variables ──
 # 本地开发: .streamlit/secrets.toml

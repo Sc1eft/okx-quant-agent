@@ -163,7 +163,7 @@ def _build_candlestick_fig(
     df: pd.DataFrame,
     ticker_data: dict | None = None,
     tf_key: str = "1h",
-    height: int = 520,
+    height: int = 400,
     is_seconds: bool = False,
 ) -> go.Figure:
     """Interactive candlestick chart with volume subplot & SMA overlays."""
@@ -701,7 +701,7 @@ if not is_seconds_mode:
         <script type="text/javascript">
         new TradingView.widget({{
             "width": "100%",
-            "height": 540,
+            "height": 420,
             "symbol": "OKX:ETHUSDT",
             "interval": "{tv_interval}",
             "timezone": "Asia/Shanghai",
@@ -721,7 +721,7 @@ if not is_seconds_mode:
         </script>
     </div>
     """
-    components.html(tv_html, height=570)
+    components.html(tv_html, height=450)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════
