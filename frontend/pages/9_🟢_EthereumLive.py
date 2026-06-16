@@ -734,7 +734,6 @@ refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
 @st.fragment(run_every=refresh_interval_s)
 def _data_fragment():
     """数据获取 + 显示 + AI 喂数据 —— fragment 内刷新，不出蒙版"""
-    import time as _time
 
     # 从 session_state 读取当前参数（让 fragment 的自动刷新拿到最新值）
     _tf_label = st.session_state.eth_timeframe
@@ -1068,11 +1067,7 @@ def _data_fragment():
         else:
             st.info(
                 "⏳ 正在获取数据，请稍候…")
-            if auto:
-                _time.sleep(
-                    1)
-                st.rerun(
-                    scope="fragment")
+            # 不手动 rerun：@st.fragment(run_every=…) 会自动刷新
             return
 
         # KPI — 优先使用 ticker 实时数据，回退到 K 线收盘价
