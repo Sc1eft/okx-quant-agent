@@ -53,9 +53,10 @@ def fetch_okx_data(
 
     df = pd.DataFrame(raw)
     # OKX 返回的时间戳是 UTC 毫秒 → 转为 Asia/Shanghai 时区
+    # pandas ≥3.0 中 Series.tz_convert() 需要 DatetimeIndex，用 .dt.tz_convert() 操作值
     df["timestamp"] = (
         pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        .tz_convert("Asia/Shanghai")
+        .dt.tz_convert("Asia/Shanghai")
     )
     df = df.set_index("timestamp")
     df = df.rename(columns={"vol": "volume"})
@@ -86,7 +87,7 @@ def fetch_klines_with_agg(
     从最近的底层周期 fetch 并 pandas resample 聚合。
     """
     AGG_MAP = {
-        "2m": {"base": "1m", "rule": "2T"},
+        "2m": {"base": "1m", "rule": "2min"},
         "15d": {"base": "1d", "rule": "15D"},
     }
 

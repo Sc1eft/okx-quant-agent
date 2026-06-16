@@ -187,9 +187,10 @@ class HeartbeatDB:
 
         df = pd.DataFrame(rows)
         # ts_ms 是 UTC 毫秒时间戳 → 转为 Asia/Shanghai 时区
+        # pandas ≥3.0 中 Series.tz_convert() 需要 DatetimeIndex 索引，用 .dt.tz_convert()
         df["datetime"] = (
             pd.to_datetime(df["ts_ms"], unit="ms", utc=True)
-            .tz_convert("Asia/Shanghai")
+            .dt.tz_convert("Asia/Shanghai")
         )
         df = df.set_index("datetime")
 
