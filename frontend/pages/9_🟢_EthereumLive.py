@@ -316,11 +316,6 @@ def _ticker_summary(symbol: str, tk: dict | None) -> str:
     )
 
 
-_NEWS_FEEDS = [
-    ("PANews", "https://www.panewslab.com/zh/rss.aspx"),
-    ("Foresight News", "https://foresightnews.pro/rss/news"),
-]
-
 _READER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -328,9 +323,9 @@ _READER_AGENT = (
 
 
 def _fetch_crypto_news(max_items: int = 5) -> list[dict]:
-    """从公开 RSS 源获取近期加密货币新闻及政策。
+    """获取近期加密货币新闻及政策。
 
-    尝试多个中文加密新闻 RSS 源，无需 API Key。
+    尝试多个源（sitemap / RSS），无需 API Key。
     全部失败时返回空列表——调用方自行降级。
     """
     import xml.etree.ElementTree as _ET
@@ -339,23 +334,53 @@ def _fetch_crypto_news(max_items: int = 5) -> list[dict]:
     pool: list[dict] = []
     seen: set[str] = set()
 
-    for name, url in _NEWS_FEEDS:
-        try:
-            resp = _req.get(url, timeout=8, headers={"User-Agent": _READER_AGENT})
-            if resp.status_code != 200:
-                continue
+    def _add(title: str, source: str) -> bool:
+        """添加到 pool（去重），返回 True 表示已满。"""
+        title = title.strip()
+        if title and title not in seen and len(title) > 5:
+            seen.add(title)
+            pool.append({"title": title, "source": source})
+            return len(pool) >= max_items
+        return False
+
+    # ── 1. PANews sitemap.xml（Google News 标准 XML，稳定）──
+    # RSS 已失效（404），sitemap 含 news:title 可直接取标题
+    try:
+        resp = _req.get(
+            "https://www.panewslab.com/sitemap.xml",
+            timeout=8,
+            headers={"User-Agent": _READER_AGENT},
+        )
+        if resp.status_code == 200:
             root = _ET.fromstring(resp.content)
-            for item in root.findall(".//item"):
-                title = (item.findtext("title") or "").strip()
-                if title and title not in seen:
-                    seen.add(title)
-                    pool.append({"title": title, "source": name})
-                if len(pool) >= max_items:
-                    break
+            _ns = {
+                "s": "http://www.sitemaps.org/schemas/sitemap/0.9",
+                "news": "http://www.google.com/schemas/sitemap-news/0.9",
+            }
+            for url_elem in root.findall(".//s:url", _ns):
+                title_elem = url_elem.find("news:news/news:title", _ns)
+                if title_elem is not None and title_elem.text:
+                    if _add(title_elem.text, "PANews"):
+                        return pool[:max_items]
+    except Exception:
+        pass
+
+    # ── 2. CoinDesk RSS（英文备份）──
+    if len(pool) < max_items:
+        try:
+            resp = _req.get(
+                "https://www.coindesk.com/arc/outboundfeeds/rss/",
+                timeout=8,
+                headers={"User-Agent": _READER_AGENT},
+            )
+            if resp.status_code == 200:
+                root = _ET.fromstring(resp.content)
+                for item in root.findall(".//item"):
+                    title = item.findtext("title") or ""
+                    if _add(title, "CoinDesk"):
+                        return pool[:max_items]
         except Exception:
-            continue
-        if len(pool) >= max_items:
-            break
+            pass
 
     return pool[:max_items]
 
