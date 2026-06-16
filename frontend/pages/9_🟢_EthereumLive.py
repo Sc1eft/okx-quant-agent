@@ -12,6 +12,7 @@ from frontend.components.metrics_display import render_metric_card
 from frontend.utils.data_provider import fetch_klines_with_agg, fetch_ticker
 from frontend.utils.session_state import get_config
 
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -157,6 +158,51 @@ def _fmt_uptime(started_at_str: str | None) -> str:
         return f"{s}s"
     except Exception:
         return "-"
+
+
+def _sanitize_ai_text(text: str) -> str:
+    """Cleanse markdown code formatting from AI response text for safe display."""
+    if not text:
+        return ""
+    # Remove markdown code fences (```...``` with optional language tag)
+    text = re.sub(r'```(?:\w+)?\s*\n?', '', text)
+    text = text.replace('```', '')
+    # Replace inline code (`...`) with plain text
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    return text.strip()
+
+
+def _fmt_relative_time(ts_str: str) -> str:
+    """将 ISO / RFC 2822 时间戳转为相对时间（"2小时前"）。"""
+    if not ts_str:
+        return ""
+    dt = None
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        try:
+            from email.utils import parsedate_to_datetime as _pdt
+            dt = _pdt(ts_str)
+        except Exception:
+            return ""
+    if dt is None:
+        return ""
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    diff = now - dt
+    hours = diff.total_seconds() / 3600
+    if hours < 0:
+        return "刚刚"
+    if hours < 1:
+        mins = int(diff.total_seconds() / 60)
+        return f"{mins}分钟前" if mins > 0 else "刚刚"
+    if hours < 24:
+        return f"{int(hours)}小时前"
+    days = int(hours / 24)
+    if days < 30:
+        return f"{days}天前"
+    return dt.strftime("%m-%d")
 
 
 def _build_candlestick_fig(
@@ -327,6 +373,7 @@ def _fetch_crypto_news(max_items: int = 5) -> list[dict]:
 
     尝试多个源（sitemap / RSS），无需 API Key。
     全部失败时返回空列表——调用方自行降级。
+    每条新闻附 timestamp 字段供动态权重计算。
     """
     import xml.etree.ElementTree as _ET
     import requests as _req
@@ -334,17 +381,17 @@ def _fetch_crypto_news(max_items: int = 5) -> list[dict]:
     pool: list[dict] = []
     seen: set[str] = set()
 
-    def _add(title: str, source: str) -> bool:
+    def _add(title: str, source: str, timestamp: str = "") -> bool:
         """添加到 pool（去重），返回 True 表示已满。"""
         title = title.strip()
         if title and title not in seen and len(title) > 5:
             seen.add(title)
-            pool.append({"title": title, "source": source})
+            pool.append({"title": title, "source": source, "timestamp": timestamp})
             return len(pool) >= max_items
         return False
 
     # ── 1. PANews sitemap.xml（Google News 标准 XML，稳定）──
-    # RSS 已失效（404），sitemap 含 news:title 可直接取标题
+    # RSS 已失效（404），sitemap 含 news:title + news:publication_date
     try:
         resp = _req.get(
             "https://www.panewslab.com/sitemap.xml",
@@ -360,7 +407,9 @@ def _fetch_crypto_news(max_items: int = 5) -> list[dict]:
             for url_elem in root.findall(".//s:url", _ns):
                 title_elem = url_elem.find("news:news/news:title", _ns)
                 if title_elem is not None and title_elem.text:
-                    if _add(title_elem.text, "PANews"):
+                    pub_elem = url_elem.find("news:news/news:publication_date", _ns)
+                    pub_date = pub_elem.text.strip() if pub_elem is not None and pub_elem.text else ""
+                    if _add(title_elem.text, "PANews", timestamp=pub_date):
                         return pool[:max_items]
     except Exception:
         pass
@@ -377,7 +426,8 @@ def _fetch_crypto_news(max_items: int = 5) -> list[dict]:
                 root = _ET.fromstring(resp.content)
                 for item in root.findall(".//item"):
                     title = item.findtext("title") or ""
-                    if _add(title, "CoinDesk"):
+                    pub_date = item.findtext("pubDate") or ""
+                    if _add(title, "CoinDesk", timestamp=pub_date):
                         return pool[:max_items]
         except Exception:
             pass
@@ -417,16 +467,21 @@ def _build_ai_analysis_prompt(
     lines.append(_ticker_summary("DOGE", doge_ticker))
     lines.append("")
 
-    # ── 新闻与政策基本面 ──
+    # ── 新闻与政策基本面（含时效性标记）──
     if news:
-        lines.append("### 近期新闻与政策")
-        for item in news:
-            lines.append(f"- [{item['source']}] {item['title']}")
+        lines.append("### 近期新闻与政策（按时效排序）")
+        for i, item in enumerate(news, 1):
+            ts = item.get("timestamp", "")
+            recency = _fmt_relative_time(ts) if ts else ""
+            time_tag = f" [{recency}]" if recency else ""
+            lines.append(f"{i}. [{item['source']}]{time_tag} {item['title']}")
         lines.append("")
 
     lines.append("---")
     lines.append(
         "请基于以上技术面数据 + 新闻基本面，给出 ETH 的综合多空分析。"
+    )
+    lines.append(
         "注意评估新闻事件对 ETH 价格的潜在多空影响。"
     )
     return "\n".join(lines)
@@ -436,6 +491,33 @@ _AI_SYSTEM_PROMPT = """你是专业的加密货币交易分析师，综合技术
 
 技术面依据：K线形态、量价关系、多周期趋势、关联币种联动。
 基本面依据：最新新闻事件、政策动向、行业动态、市场叙事。
+
+## 动态权重策略（不同维度按以下权重加权）
+
+1. **短期技术面（15分钟 K 线）** — 权重高
+   - 短线走势直接决定入场时机，近期量价信号最敏感
+
+2. **中期技术面（1小时 K 线）** — 权重中高
+   - 确认趋势方向，过滤短期噪音
+
+3. **长期技术面（日线）** — 权重中
+   - 提供大方向背景，但不作为短线决策主依据
+
+4. **关联币种（BTC/SOL/DOGE）** — 权重中
+   - BTC 强相关时提高权重，脱离联动时降低
+
+5. **新闻基本面** — 动态权重（按时效和冲击力调整）：
+   - 🚨 **6 小时内 + 高冲击主题**（监管政策 / 安全事件 / ETF /
+        协议升级等）→ **最高权重**，可能完全改变短期方向
+   - **6~24 小时** → 高权重，尚未完全 priced in
+   - **>24 小时** → 低权重，市场已充分消化
+   - **常规新闻**（合作、生态发展、观点评论）→ 正常权重
+   - 无新闻时，fundamental_analysis 返回空字符串
+
+## 分析原则
+- 所有 wind 权重已在上方数据中体现，请综合判断
+- 高冲击新闻出现时，technical_analysis 权重相应降低
+- 市场情绪应与价格行为相互印证，不一致时优先参考价格行为
 
 请以JSON格式返回，不要包含其他文字：
 
@@ -454,7 +536,7 @@ _AI_SYSTEM_PROMPT = """你是专业的加密货币交易分析师，综合技术
 - direction 只能为 "long"、"short" 或 "neutral"
 - confidence 为0-100的整数
 - key_evidence 至少3条，至多5条，综合技术面和基本面各维度
-- 所有文本字段使用中文
+- 所有文本字段使用中文，不要使用代码格式（反引号、代码块等）
 - 只返回JSON，不要包含其他文字"""
 
 
@@ -492,10 +574,16 @@ def _call_ai_analysis(
             max_tokens=2000,
         )
         content = resp.choices[0].message.content or ""
-        # 尝试提取 JSON
+        # 尝试提取 JSON（先找 ```json 围栏，再找首尾 { }）
         json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
         if json_match:
             content = json_match.group(1)
+        else:
+            # Fallback: 找第一个 { 和最后一个 }
+            start = content.find('{')
+            end = content.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                content = content[start:end + 1]
         result = json.loads(content)
         # 验证必要字段
         if "direction" not in result:
@@ -559,7 +647,7 @@ def _call_ai_chat(
         news = context.get("news", [])
         if news:
             ctx_parts.append("### 参考新闻\n" + "\n".join(
-                f"- [{n['source']}] {n['title']}" for n in news
+                f"- [{n['source']}] {n['title']}" + (f" ({_fmt_relative_time(n.get('timestamp', ''))})" if n.get('timestamp') else "") for n in news
             ))
 
     context_text = "\n".join(ctx_parts)
@@ -604,12 +692,26 @@ st.markdown("""
 st.markdown("""
 <style>
 /* ── 隐藏自动刷新的加载蒙版 ── */
-div[data-testid="stStatusWidget"],
-div[data-testid="stSpinner"] {
+/* 覆盖所有已知 Streamlit 加载指示器 */
+div[data-testid*="Status"],
+div[data-testid*="Spinner"],
+div[data-testid*="Loading" i],
+div[data-testid*="loading" i],
+div[class*="stStatus"],
+div[class*="stSpinner"],
+div[class*="stLoading"],
+div.stAppLoading,
+div[class*="stFragment"] > div[class*="loading"],
+div[class*="StyledThumb"],
+aside[class*="stStatus"] {
     display: none !important;
     visibility: hidden !important;
     opacity: 0 !important;
     pointer-events: none !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    z-index: -9999 !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -618,15 +720,37 @@ div[data-testid="stSpinner"] {
 _comps.html("""
 <script>
 (function() {
+    var SELECTORS = [
+        '[data-testid*="Status"]',
+        '[data-testid*="Spinner"]',
+        '[data-testid*="Loading" i]',
+        '[data-testid*="loading" i]',
+        '[class*="stStatus"]',
+        '[class*="stSpinner"]',
+        '[class*="stLoading"]',
+        '.stAppLoading',
+    ];
     function hide() {
-        parent.document.querySelectorAll(
-            '[data-testid="stStatusWidget"],[data-testid="stSpinner"]'
-        ).forEach(function(el) {
+        var doc = parent.document;
+        var els = doc.querySelectorAll(SELECTORS.join(','));
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
             el.style.setProperty('display', 'none', 'important');
-        });
+            el.style.setProperty('visibility', 'hidden', 'important');
+            el.style.setProperty('opacity', '0', 'important');
+            el.style.setProperty('pointer-events', 'none', 'important');
+            el.style.setProperty('z-index', '-9999', 'important');
+        }
     }
     hide();
-    setInterval(hide, 200);
+    setInterval(hide, 150);
+    // 额外保险：MutationObserver 监听 DOM 变化立即处理
+    var observer = new MutationObserver(function() { hide(); });
+    if (parent.document.body) {
+        observer.observe(parent.document.body, {
+            childList: true, subtree: true, attributes: false
+        });
+    }
 })();
 </script>
 """, height=0)
@@ -1231,16 +1355,24 @@ with st.container():
         st.session_state.ai_analysis_error = None
         st.session_state.ai_chat_loading = False
         try:
-            with st.spinner("📡 正在收集市场数据和新闻…"):
+            with st.status("🤖 正在分析…", expanded=True) as _status:
+                _status.update(label="📡 获取 ETH 行情数据…")
                 _tk = fetch_ticker(cfg, symbol="ETH-USDT")
+
+                _status.update(label="📊 获取技术指标数据…")
                 _k15 = fetch_klines_with_agg(cfg, limit=30, timeframe="15m", symbol="ETH-USDT")
                 _k1h = fetch_klines_with_agg(cfg, limit=20, timeframe="1h", symbol="ETH-USDT")
                 _k1d = fetch_klines_with_agg(cfg, limit=7, timeframe="1d", symbol="ETH-USDT")
+
+                _status.update(label="🔄 获取关联币种行情…")
                 _btc = fetch_ticker(cfg, symbol="BTC-USDT")
                 _sol = fetch_ticker(cfg, symbol="SOL-USDT")
                 _doge = fetch_ticker(cfg, symbol="DOGE-USDT")
+
+                _status.update(label="📰 采集新闻与政策信息…")
                 _news = _fetch_crypto_news()
                 st.session_state.ai_news = _news
+
                 # 保存对话上下文（市场数据快照）
                 _mk = (
                     f"### 实时行情\n{_ticker_summary('ETH', _tk)}\n\n"
@@ -1256,9 +1388,9 @@ with st.container():
                     "news": _news,
                     "analysis_result": None,
                 }
-                st.session_state.ai_chat_messages = []  # 新分析，清空历史
+                st.session_state.ai_chat_messages = []
 
-            with st.spinner("🤖 AI 正在综合分析（技术面+基本面）…"):
+                _status.update(label="🧠 AI 正在综合分析（技术面+基本面）…")
                 _result = _call_ai_analysis(
                     ticker=_tk,
                     klines_15m=_k15,
@@ -1271,9 +1403,10 @@ with st.container():
                     news=_news,
                 )
                 st.session_state.ai_analysis_result = _result
-                # 更新对话上下文中的分析结果
                 if st.session_state.get("ai_chat_context"):
                     st.session_state.ai_chat_context["analysis_result"] = _result
+
+                _status.update(label="✅ 分析完成", state="complete")
         except Exception as e:
             st.session_state.ai_analysis_error = str(e)
         st.rerun()
@@ -1303,24 +1436,27 @@ with st.container():
             _dir_text = "中性"
         _conf_color = "#059669" if _conf >= 70 else "#f59e0b" if _conf >= 40 else "#94a3b8"
         _ev_html = "".join(
-            f'<li style="margin-bottom:0.3rem;">{e}</li>' for e in _res.get("key_evidence", []))
+            f'<li style="margin-bottom:0.3rem;">{_sanitize_ai_text(e)}</li>' for e in _res.get("key_evidence", []))
         _risk_html = "".join(
-            f'<li style="margin-bottom:0.3rem;">{r}</li>' for r in _res.get("risk_warnings", []))
+            f'<li style="margin-bottom:0.3rem;">{_sanitize_ai_text(r)}</li>' for r in _res.get("risk_warnings", []))
 
         _fund_news_html = ""
         if _raw_news:
             _news_items = "".join(
                 f'<li style="margin-bottom:0.25rem;color:#64748b;font-size:0.85rem;">'
-                f'<span style="color:#0f172a;font-weight:500;">[{n["source"]}]</span> {n["title"]}</li>'
+                f'<span style="color:#0f172a;font-weight:500;">[{_sanitize_ai_text(n["source"])}]</span>'
+                f'<span style="color:#94a3b8;font-size:0.75rem;">{_fmt_relative_time(n.get("timestamp", ""))}</span> '
+                f'{_sanitize_ai_text(n["title"])}</li>'
                 for n in _raw_news
             )
-            _fund_news_html = f"""
-            <details style="margin-top:0.75rem;">
-                <summary style="color:#64748b;font-size:0.85rem;cursor:pointer;">
-                    📡 参考新闻（{len(_raw_news)}条）
-                </summary>
-                <ul style="margin:0.5rem 0 0 0;padding-left:1.2rem;">{_news_items}</ul>
-            </details>"""
+            _fund_news_html = "\n".join([
+                '<details style="margin-top:0.75rem;">',
+                '<summary style="color:#64748b;font-size:0.85rem;cursor:pointer;">',
+                f'  📡 参考新闻（{len(_raw_news)}条）',
+                '</summary>',
+                f'<ul style="margin:0.5rem 0 0 0;padding-left:1.2rem;">{_news_items}</ul>',
+                '</details>',
+            ])
 
         st.markdown(f"""
         <div style="border:1px solid #e2e8f0;border-radius:12px;padding:1.25rem;background:white;margin-top:0.5rem;">
@@ -1332,7 +1468,7 @@ with st.container():
                     <span style="font-size:1.3rem;font-weight:700;color:{_conf_color};">{_conf}%</span>
                 </div>
             </div>
-            <p style="color:#475569;font-size:0.95rem;margin-bottom:1rem;">{_res.get("summary", "")}</p>
+            <p style="color:#475569;font-size:0.95rem;margin-bottom:1rem;">{_sanitize_ai_text(_res.get("summary", ""))}</p>
             <div style="margin-bottom:1rem;">
                 <p style="font-weight:600;color:#0f172a;margin-bottom:0.4rem;">📌 关键依据</p>
                 <ul style="margin:0;padding-left:1.2rem;color:#475569;font-size:0.9rem;">{_ev_html}</ul>
@@ -1344,15 +1480,15 @@ with st.container():
             <div style="display:flex;gap:1rem;flex-wrap:wrap;">
                 <div style="flex:1;min-width:200px;background:#f8fafc;border-radius:8px;padding:0.75rem;">
                     <p style="font-weight:600;color:#0f172a;font-size:0.85rem;margin-bottom:0.3rem;">🔬 技术面</p>
-                    <p style="color:#475569;font-size:0.85rem;margin:0;">{_res.get("technical_analysis", "") or "—"}</p>
+                    <p style="color:#475569;font-size:0.85rem;margin:0;">{_sanitize_ai_text(_res.get("technical_analysis", "")) or "—"}</p>
                 </div>
                 <div style="flex:1;min-width:200px;background:#f8fafc;border-radius:8px;padding:0.75rem;">
                     <p style="font-weight:600;color:#0f172a;font-size:0.85rem;margin-bottom:0.3rem;">🌊 市场情绪</p>
-                    <p style="color:#475569;font-size:0.85rem;margin:0;">{_res.get("market_sentiment", "") or "—"}</p>
+                    <p style="color:#475569;font-size:0.85rem;margin:0;">{_sanitize_ai_text(_res.get("market_sentiment", "")) or "—"}</p>
                 </div>
                 <div style="flex:1;min-width:200px;background:#f8fafc;border-radius:8px;padding:0.75rem;">
                     <p style="font-weight:600;color:#0f172a;font-size:0.85rem;margin-bottom:0.3rem;">📰 基本面</p>
-                    <p style="color:#475569;font-size:0.85rem;margin:0;">{_res.get("fundamental_analysis", "") or "—"}</p>
+                    <p style="color:#475569;font-size:0.85rem;margin:0;">{_sanitize_ai_text(_res.get("fundamental_analysis", "")) or "—"}</p>
                 </div>
             </div>
             {_fund_news_html}
@@ -1397,7 +1533,7 @@ with st.container():
         with chat_container:
             for msg in st.session_state.ai_chat_messages:
                 with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
+                    st.markdown(_sanitize_ai_text(msg["content"]))
 
         if st.session_state.ai_chat_loading:
             with st.chat_message("assistant"):
