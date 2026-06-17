@@ -21,8 +21,20 @@ AMBER = "#d97706"
 PURPLE = "#7c3aed"
 
 
-def _default_layout(title: str = "", **kwargs) -> dict:
+def _default_layout(title: str = "", theme: str = "light", **kwargs) -> dict:
     """Base layout configuration for all charts."""
+    if theme == "dark":
+        CHART_BG = "#1e293b"
+        PAPER_BG = "#1e293b"
+        GRID_COLOR = "#334155"
+        FONT_COLOR = "#94a3b8"
+        TITLE_COLOR = "#f1f5f9"
+    else:
+        CHART_BG = "#ffffff"
+        PAPER_BG = "#f8fafc"
+        GRID_COLOR = "#e2e8f0"
+        FONT_COLOR = "#475569"
+        TITLE_COLOR = "#0f172a"
     return dict(
         title=dict(text=title, font=dict(size=15, color=TITLE_COLOR), x=0, xanchor="left"),
         plot_bgcolor=CHART_BG,
@@ -49,23 +61,29 @@ def _default_layout(title: str = "", **kwargs) -> dict:
     )
 
 
-def _update_axes(fig: go.Figure) -> None:
+def _update_axes(fig: go.Figure, theme: str = "light") -> None:
     """Apply consistent axis styling."""
+    if theme == "dark":
+        GC = "#334155"
+        FC = "#94a3b8"
+    else:
+        GC = "#e2e8f0"
+        FC = "#475569"
     fig.update_xaxes(
-        gridcolor=GRID_COLOR,
+        gridcolor=GC,
         zeroline=False,
         showgrid=True,
-        linecolor=GRID_COLOR,
-        tickfont=dict(size=11, color=FONT_COLOR),
-        title_font=dict(size=12, color=FONT_COLOR),
+        linecolor=GC,
+        tickfont=dict(size=11, color=FC),
+        title_font=dict(size=12, color=FC),
     )
     fig.update_yaxes(
-        gridcolor=GRID_COLOR,
+        gridcolor=GC,
         zeroline=False,
         showgrid=True,
-        linecolor=GRID_COLOR,
-        tickfont=dict(size=11, color=FONT_COLOR),
-        title_font=dict(size=12, color=FONT_COLOR),
+        linecolor=GC,
+        tickfont=dict(size=11, color=FC),
+        title_font=dict(size=12, color=FC),
     )
 
 
@@ -73,6 +91,7 @@ def equity_curve_chart(
     equity_curve: List[Dict[str, float]],
     benchmark_curve: Optional[List[Dict[str, float]]] = None,
     title: str = "权益曲线",
+    theme: str = "light",
 ) -> go.Figure:
     """Plot equity curve with optional benchmark overlay."""
     fig = go.Figure()
@@ -97,14 +116,15 @@ def equity_curve_chart(
             line=dict(color="#94a3b8", width=1.5, dash="dash"),
         ))
 
-    fig.update_layout(**_default_layout(title=title))
-    _update_axes(fig)
+    fig.update_layout(**_default_layout(title=title, theme=theme))
+    _update_axes(fig, theme=theme)
     return fig
 
 
 def drawdown_chart(
     equity_curve: List[Dict[str, float]],
     title: str = "回撤曲线",
+    theme: str = "light",
 ) -> go.Figure:
     """Plot drawdown from peak."""
     if not equity_curve:
@@ -124,16 +144,13 @@ def drawdown_chart(
         fillcolor="rgba(220, 38, 38, 0.08)",
     ))
 
-    fig.update_layout(**_default_layout(title=title))
+    fig.update_layout(**_default_layout(title=title, theme=theme))
+    _update_axes(fig, theme=theme)
     fig.update_yaxes(
-        gridcolor=GRID_COLOR,
         zeroline=True,
-        zerolinecolor=GRID_COLOR,
         showgrid=True,
-        tickfont=dict(size=11, color=FONT_COLOR),
-        title_font=dict(size=12, color=FONT_COLOR),
     )
-    fig.update_xaxes(gridcolor=GRID_COLOR, tickfont=dict(size=11, color=FONT_COLOR))
+    fig.update_xaxes()
     return fig
 
 
@@ -141,6 +158,7 @@ def signal_price_chart(
     price_data: List[Dict[str, float]],
     signals: List[Dict],
     title: str = "价格与信号",
+    theme: str = "light",
 ) -> go.Figure:
     """Plot price line with BUY/SELL markers."""
     fig = go.Figure()
@@ -177,14 +195,15 @@ def signal_price_chart(
                                 line=dict(color="white", width=1.5)),
                 ))
 
-    fig.update_layout(**_default_layout(title=title))
-    _update_axes(fig)
+    fig.update_layout(**_default_layout(title=title, theme=theme))
+    _update_axes(fig, theme=theme)
     return fig
 
 
 def pnl_distribution_chart(
     trades: List[Dict],
     title: str = "盈亏分布",
+    theme: str = "light",
 ) -> go.Figure:
     """Histogram of trade PnL percentages."""
     if not trades:
@@ -207,18 +226,18 @@ def pnl_distribution_chart(
     fig.update_layout(
         **_default_layout(
             title=title,
+            theme=theme,
             bargap=0.05,
         )
     )
-    _update_axes(fig)
-    fig.update_yaxes(gridcolor=GRID_COLOR, tickfont=dict(size=11, color=FONT_COLOR))
-    fig.update_xaxes(gridcolor=GRID_COLOR, tickfont=dict(size=11, color=FONT_COLOR))
+    _update_axes(fig, theme=theme)
     return fig
 
 
 def sharpe_drop_chart(
     windows: List[Dict],
     title: str = "Train / Test Sharpe 对比",
+    theme: str = "light",
 ) -> go.Figure:
     """Bar chart comparing train vs test Sharpe per window."""
     if not windows:
@@ -243,16 +262,16 @@ def sharpe_drop_chart(
     ))
 
     fig.update_layout(
-        **_default_layout(title=title, barmode="group"),
+        **_default_layout(title=title, theme=theme, barmode="group"),
     )
-    fig.update_xaxes(gridcolor=GRID_COLOR, tickfont=dict(size=11, color=FONT_COLOR))
-    fig.update_yaxes(gridcolor=GRID_COLOR, tickfont=dict(size=11, color=FONT_COLOR))
+    _update_axes(fig, theme=theme)
     return fig
 
 
 def cumulative_pnl_chart(
     trades: List[Dict],
     title: str = "累计盈亏",
+    theme: str = "light",
 ) -> go.Figure:
     """Cumulative PnL line chart."""
     if not trades:
@@ -272,6 +291,6 @@ def cumulative_pnl_chart(
         fillcolor="rgba(37, 99, 235, 0.08)",
     ))
 
-    fig.update_layout(**_default_layout(title=title))
-    _update_axes(fig)
+    fig.update_layout(**_default_layout(title=title, theme=theme))
+    _update_axes(fig, theme=theme)
     return fig

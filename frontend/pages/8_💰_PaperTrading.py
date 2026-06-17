@@ -632,7 +632,7 @@ if df is not None and paper_state is not None:
     with chart_tab2:
         eq_hist = account.get("equity_history", [])
         if eq_hist:
-            fig = equity_curve_chart(eq_hist, title="模拟盘权益曲线")
+            fig = equity_curve_chart(eq_hist, title="模拟盘权益曲线", theme=st.session_state.get("theme_mode", "light"))
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("尚无权益历史数据")

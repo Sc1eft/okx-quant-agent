@@ -185,14 +185,14 @@ else:
     with tab1:
         equity_curve = result.get("equity_curve", [])
         if equity_curve:
-            fig = equity_curve_chart(equity_curve, title=f"{selected_strategy} - 权益曲线")
+            fig = equity_curve_chart(equity_curve, title=f"{selected_strategy} - 权益曲线", theme=st.session_state.get("theme_mode", "light"))
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("暂无权益曲线数据")
 
     with tab2:
         if equity_curve:
-            fig = drawdown_chart(equity_curve)
+            fig = drawdown_chart(equity_curve, theme=st.session_state.get("theme_mode", "light"))
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("暂无回撤数据")
@@ -202,7 +202,7 @@ else:
         if signals:
             # Build price data from equity curve times
             price_data = [{"time": p["time"], "close": p["equity"]} for p in equity_curve] if equity_curve else []
-            fig = signal_price_chart(price_data, signals, title=f"{selected_strategy} - 信号标记")
+            fig = signal_price_chart(price_data, signals, title=f"{selected_strategy} - 信号标记", theme=st.session_state.get("theme_mode", "light"))
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("暂无信号数据")
@@ -210,9 +210,9 @@ else:
     with tab4:
         trades = result.get("trades", [])
         if trades:
-            fig1 = pnl_distribution_chart(trades)
+            fig1 = pnl_distribution_chart(trades, theme=st.session_state.get("theme_mode", "light"))
             st.plotly_chart(fig1, use_container_width=True)
-            fig2 = cumulative_pnl_chart(trades)
+            fig2 = cumulative_pnl_chart(trades, theme=st.session_state.get("theme_mode", "light"))
             st.plotly_chart(fig2, use_container_width=True)
         else:
             st.info("暂无交易记录")

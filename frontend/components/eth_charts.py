@@ -90,8 +90,11 @@ def _fmt_uptime(started_at_str: str | None) -> str:
 # ════════════════════════════════════════════════════════════════
 
 
-def _build_sparkline(ticks: list[dict], height: int = 100) -> go.Figure:
+def _build_sparkline(ticks: list[dict], height: int = 100, theme: str = "light") -> go.Figure:
     """Mini price chart from tick data."""
+    bg_transparent = "rgba(0,0,0,0)"
+    grid_color = "rgba(148, 163, 184, 0.2)"
+
     if not ticks:
         fig = go.Figure()
         fig.update_layout(height=height)
@@ -104,6 +107,8 @@ def _build_sparkline(ticks: list[dict], height: int = 100) -> go.Figure:
 
     color = COLORS["green"] if prices[-1] >= prices[0] else COLORS["red"]
     fill_color = "rgba(98, 126, 234, 0.15)"
+
+    annot_bg = "rgba(30, 41, 59, 0.9)" if theme == "dark" else "rgba(255,255,255,0.9)"
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -121,7 +126,7 @@ def _build_sparkline(ticks: list[dict], height: int = 100) -> go.Figure:
         showarrow=True, arrowhead=0,
         ax=0, ay=-30,
         font=dict(size=11, color=color),
-        bgcolor="rgba(255,255,255,0.9)",
+        bgcolor=annot_bg,
         bordercolor=color, borderwidth=1,
     )
 
@@ -130,12 +135,13 @@ def _build_sparkline(ticks: list[dict], height: int = 100) -> go.Figure:
     fig.update_layout(
         height=height,
         margin=dict(l=0, r=0, t=0, b=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor=bg_transparent,
+        plot_bgcolor=bg_transparent,
+        font=dict(color=grid_color),
         xaxis=dict(showgrid=False, visible=False, showticklabels=False),
         yaxis=dict(
             range=[y_min - y_pad, y_max + y_pad],
-            showgrid=True, gridcolor="rgba(148, 163, 184, 0.2)",
+            showgrid=True, gridcolor=grid_color,
             zeroline=False, tickformat="$,.0f", side="right",
         ),
         hovermode="x unified",
@@ -150,8 +156,24 @@ def _build_candlestick_fig(
     tf_key: str = "1h",
     height: int = 400,
     is_seconds: bool = False,
+    theme: str = "light",
 ) -> go.Figure:
     """Interactive candlestick chart with volume subplot & SMA overlays."""
+    is_dark = theme == "dark"
+    # Theme colors
+    if is_dark:
+        bg_plot = "#1e293b"
+        bg_paper = "#1e293b"
+        font_color = "#94a3b8"
+        title_color = "#f1f5f9"
+        grid_color = "#334155"
+    else:
+        bg_plot = "#ffffff"
+        bg_paper = "#f8fafc"
+        font_color = "#475569"
+        title_color = "#0f172a"
+        grid_color = "#e2e8f0"
+
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
@@ -216,12 +238,12 @@ def _build_candlestick_fig(
     fig.update_layout(
         title=dict(
             text=f"🟢 ETH-USDT — {_friendly_tf(tf_key)} 图",
-            font=dict(size=15, color="#0f172a"),
+            font=dict(size=15, color=title_color),
             x=0, xanchor="left",
         ),
-        plot_bgcolor="#ffffff",
-        paper_bgcolor="#f8fafc",
-        font=dict(color="#475569", family="-apple-system, BlinkMacSystemFont, sans-serif"),
+        plot_bgcolor=bg_plot,
+        paper_bgcolor=bg_paper,
+        font=dict(color=font_color, family="-apple-system, BlinkMacSystemFont, sans-serif"),
         hovermode="x unified",
         hoverlabel=dict(
             bgcolor="#1e293b", font=dict(color="white", size=12),
@@ -238,23 +260,23 @@ def _build_candlestick_fig(
     )
 
     fig.update_xaxes(
-        gridcolor="#e2e8f0", zeroline=False,
-        showgrid=True, linecolor="#e2e8f0",
+        gridcolor=grid_color, zeroline=False,
+        showgrid=True, linecolor=grid_color,
         row=1, col=1,
     )
     fig.update_xaxes(
-        gridcolor="#e2e8f0", zeroline=False,
-        showgrid=True, linecolor="#e2e8f0",
+        gridcolor=grid_color, zeroline=False,
+        showgrid=True, linecolor=grid_color,
         row=2, col=1,
     )
     fig.update_yaxes(
-        gridcolor="#e2e8f0", zeroline=False,
-        showgrid=True, linecolor="#e2e8f0",
+        gridcolor=grid_color, zeroline=False,
+        showgrid=True, linecolor=grid_color,
         row=1, col=1,
     )
     fig.update_yaxes(
-        gridcolor="#e2e8f0", zeroline=False,
-        showgrid=False, linecolor="#e2e8f0",
+        gridcolor=grid_color, zeroline=False,
+        showgrid=False, linecolor=grid_color,
         title_text=vol_label,
         row=2, col=1,
     )

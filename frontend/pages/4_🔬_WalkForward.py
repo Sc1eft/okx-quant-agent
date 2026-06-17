@@ -111,7 +111,7 @@ with tab1:
         if windows:
             st.divider()
             st.subheader("各窗口 Train/Test Sharpe 对比")
-            fig = sharpe_drop_chart(windows)
+            fig = sharpe_drop_chart(windows, theme=st.session_state.get("theme_mode", "light"))
             st.plotly_chart(fig, use_container_width=True)
 
             # Window details table

@@ -113,6 +113,84 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
+# ── 隐藏自动刷新的加载蒙版（Streamlit 1.58 兼容） ──
+import streamlit.components.v1 as _comps
+_comps.html("""
+<script>
+(function() {
+    'use strict';
+    var doc;
+    try { doc = parent.document; } catch(e) { doc = document; }
+    if (!doc) return;
+    var style = doc.createElement('style');
+    style.setAttribute('data-mask-killer', '');
+    style.textContent = [
+        '[data-testid*="Status"], [data-testid*="status"],',
+        '[data-testid*="Loading" i], [data-testid*="loading" i],',
+        '[data-testid*="Spinner"], [data-testid*="spinner"],',
+        '[data-testid*="Blocking"], [data-testid*="blocking"],',
+        '[data-testid*="stStatusWidget"],',
+        'div[class*="stAppLoading"],',
+        'div[class*="stBlock"],',
+        'div[class*="stStatus"],',
+        'div[class*="stSpinner"],',
+        'div[class*="stLoading"],',
+        'aside[data-testid*="stStatus"],',
+        'aside[class*="stStatus"],',
+        'iframe[title*="stStatus"],',
+        'iframe[title*="loading" i],',
+        'div[class*="stAppViewBlocking"],',
+        'div[data-testid*="stFragment"] > div[class*="loading"]',
+    ].join('') + ' {' +
+        'display: none !important;' +
+        'visibility: hidden !important;' +
+        'opacity: 0 !important;' +
+        'pointer-events: none !important;' +
+        'z-index: -9999 !important;' +
+        'width: 0 !important;' +
+        'height: 0 !important;' +
+        'overflow: hidden !important;' +
+        'position: fixed !important;' +
+    '}';
+    doc.head.appendChild(style);
+    var TARGETS = [
+        '[data-testid*="Status"]', '[data-testid*="status"]',
+        '[data-testid*="Loading" i]', '[data-testid*="loading" i]',
+        '[data-testid*="Spinner"]', '[data-testid*="spinner"]',
+        '[data-testid*="Blocking"]', '[data-testid*="blocking"]',
+    ];
+    var combined = TARGETS.join(',');
+    function kill() {
+        var els = doc.querySelectorAll(combined);
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            if (el.style.display !== 'none') {
+                el.style.setProperty('display', 'none', 'important');
+                el.style.setProperty('z-index', '-9999', 'important');
+            }
+        }
+    }
+    var observer = new MutationObserver(function(muts) {
+        for (var m = 0; m < muts.length; m++) {
+            if (muts[m].type === 'attributes' ||
+                (muts[m].addedNodes && muts[m].addedNodes.length > 0)) {
+                kill(); break;
+            }
+        }
+    });
+    var target = doc.body || doc.documentElement;
+    if (target) {
+        observer.observe(target, {
+            childList: true, subtree: true, attributes: true,
+            attributeFilter: ['style', 'class', 'data-testid'],
+        });
+    }
+    setInterval(kill, 300);
+    kill();
+})();
+</script>
+""", height=0)
+
 cfg = get_config()
 _init_state()
 
@@ -391,7 +469,68 @@ if running and state:
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════
-# DATA FRAGMENT — 自动刷新 + 喂数据给 Executor
+# DISPLAY — 读 session_state 渲染，不在 fragment 内，刷新不闪烁
+# ════════════════════════════════════════════════════════════════
+
+_ticker_d = st.session_state.get("ai_ticker")
+_df_d = st.session_state.get("ai_data")
+_tf_d = st.session_state.get("ai_timeframe", "15分钟")
+_tk_d = TIMEFRAMES.get(_tf_d, "1d")
+
+if _ticker_d:
+    _ch24 = _ticker_d.get("change_24h", 0) or 0
+    _pc = "green" if _ch24 >= 0 else "red"
+    _lp = _ticker_d.get("last", 0) or 0
+    st.markdown(f"""
+    <div class="ticker-bar">
+    <div class="ticker-item"><span class="ticker-label">ETH-USDT</span><span class="ticker-value {_pc}">${_lp:,.2f} {_fmt_change(_ch24)}</span></div>
+    <div class="ticker-item"><span class="ticker-label">买一 / 卖一</span><span class="ticker-value">{f'${_ticker_d.get("bid", 0):,.2f}' if _ticker_d.get("bid") else "N/A"} / {f'${_ticker_d.get("ask", 0):,.2f}' if _ticker_d.get("ask") else "N/A"}</span></div>
+    <div class="ticker-item"><span class="ticker-label">24h 最高 / 最低</span><span class="ticker-value">{f'${_ticker_d.get("high_24h", 0):,.2f}' if _ticker_d.get("high_24h") else "N/A"} / {f'${_ticker_d.get("low_24h", 0):,.2f}' if _ticker_d.get("low_24h") else "N/A"}</span></div>
+    <div class="ticker-item"><span class="ticker-label">24h 成交量</span><span class="ticker-value">{f'{_ticker_d.get("volume_24h", 0):,.0f} ETH'}</span></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# K 线图 + 交易标记
+if _df_d is not None and not _df_d.empty:
+    _fig = _build_candlestick_fig(_df_d, ticker_data=_ticker_d, tf_key=_tk_d, height=450)
+
+    _entry_markers = st.session_state.get("ai_entry_markers") or []
+    if _entry_markers:
+        _entry_df = pd.DataFrame(_entry_markers)
+        _entry_df["time"] = pd.to_datetime(_entry_df["time"])
+        _fig.add_trace(go.Scatter(
+            x=_entry_df["time"], y=_entry_df["price"],
+            mode="markers", name="入场",
+            marker=dict(color="#059669", size=14, symbol="triangle-up", line=dict(color="white", width=2)),
+        ))
+
+    _exit_markers = st.session_state.get("ai_exit_markers") or []
+    if _exit_markers:
+        _exit_df = pd.DataFrame(_exit_markers)
+        _exit_df["time"] = pd.to_datetime(_exit_df["time"])
+        _fig.add_trace(go.Scatter(
+            x=_exit_df["time"], y=_exit_df["price"],
+            mode="markers", name="出场",
+            marker=dict(color="#dc2626", size=14, symbol="triangle-down", line=dict(color="white", width=2)),
+        ))
+
+    st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
+
+    # KPI row
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    _kpi_sub = st.columns(4)
+    with _kpi_sub[0]: st.metric("当前价", f"${float(_df_d['close'].iloc[-1]):,.2f}")
+    with _kpi_sub[1]: st.metric("时段最高", f"${float(_df_d['high'].max()):,.2f}")
+    with _kpi_sub[2]: st.metric("时段最低", f"${float(_df_d['low'].min()):,.2f}")
+    with _kpi_sub[3]:
+        _vol = float(_df_d['volume'].sum())
+        st.metric("时段成交量", f"{_vol:,.0f}")
+    st.markdown('</div>', unsafe_allow_html=True)
+elif _ticker_d is None:
+    st.info("⏳ 加载K线数据…")
+
+# ════════════════════════════════════════════════════════════════
+# DATA FRAGMENT — 仅获取数据 + 喂 Executor，无显示，全页刷新更新
 # ════════════════════════════════════════════════════════════════
 
 refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
@@ -399,38 +538,34 @@ refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
 
 @st.fragment(run_every=refresh_interval_s)
 def _data_fragment():
-    """数据获取 + 喂给 Executor + 更新 UI"""
+    """仅获取数据 + 喂 Executor，显示在 fragment 外，刷新不闪烁。"""
+    if st.session_state.get("_ai_rerun_guard"):
+        st.session_state._ai_rerun_guard = False
+        return
 
     _tf_label = st.session_state.ai_timeframe
     _t_key = TIMEFRAMES.get(_tf_label, "1d")
     _d_count = st.session_state.ai_data_count
 
-    _cached_df = st.session_state.get("ai_data")
-
     # Ticker
     try:
-        _ticker_data = fetch_ticker(cfg, symbol=ETH_SYMBOL)
-        st.session_state.ai_ticker = _ticker_data
-    except Exception as e:
-        _ticker_data = st.session_state.get("ai_ticker")
-        if _cached_df is None:
-            st.warning(f"获取 ticker 失败: {e}")
+        st.session_state.ai_ticker = fetch_ticker(cfg, symbol=ETH_SYMBOL)
+    except Exception:
+        if st.session_state.get("ai_data") is None:
+            st.warning("获取 ticker 失败")
 
     # K 线
     try:
-        _new_df = fetch_klines_with_agg(
-            cfg, limit=_d_count, timeframe=_t_key, symbol=ETH_SYMBOL,
-        )
+        _new_df = fetch_klines_with_agg(cfg, limit=_d_count, timeframe=_t_key, symbol=ETH_SYMBOL)
         if _new_df is not None and not _new_df.empty:
             st.session_state.ai_data = _new_df
-            _cached_df = _new_df
     except Exception as e:
-        if _cached_df is None:
+        if st.session_state.get("ai_data") is None:
             st.error(f"获取数据失败: {e}")
 
-    _df = _cached_df
+    _df = st.session_state.get("ai_data")
 
-    # ── 喂数据给 Executor ──
+    # 喂数据给 Executor
     if st.session_state.get("ai_running") and _df is not None and not _df.empty:
         _executor = st.session_state.get("ai_executor")
         if _executor is not None:
@@ -444,118 +579,25 @@ def _data_fragment():
                 for _, _bar in _new_bars.iterrows():
                     _executor.on_bar(_bar)
                 st.session_state.ai_trade_state = _executor.get_state()
-
-                # 收集交易记录和权益曲线
                 _acc = _executor.account
                 if _acc.trades:
                     st.session_state.ai_trades = _acc.trades
-
-                # 权益曲线点
-                _eq = {
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "equity": _acc.equity,
-                }
+                _eq = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "equity": _acc.equity}
                 _curve = st.session_state.get("ai_equity_curve") or []
                 _curve.append(_eq)
                 st.session_state.ai_equity_curve = _curve
-
-                # 入场/出场标记
                 if _executor.in_position:
                     _entry_markers = st.session_state.get("ai_entry_markers") or []
                     _ep = _executor.entry_price
                     _et = _executor.entry_time or ""
-                    # 避免重复标记
                     if not _entry_markers or _entry_markers[-1].get("price") != _ep:
                         _entry_markers.append({"time": _et, "price": _ep, "side": _executor.position_side})
                         st.session_state.ai_entry_markers = _entry_markers
 
-    # ── Ticker bar ──
-    if _ticker_data:
-        _ch24 = _ticker_data.get("change_24h", 0) or 0
-        _pc = "green" if _ch24 >= 0 else "red"
-        _lp = _ticker_data.get("last", 0) or 0
-
-        st.markdown(f"""
-        <div class="ticker-bar">
-        <div class="ticker-item">
-        <span class="ticker-label">ETH-USDT</span>
-        <span class="ticker-value {_pc}">${_lp:,.2f} {_fmt_change(_ch24)}</span>
-        </div>
-        <div class="ticker-item">
-        <span class="ticker-label">买一 / 卖一</span>
-        <span class="ticker-value">{f'${_ticker_data.get("bid", 0):,.2f}' if _ticker_data.get("bid") else "N/A"} / {f'${_ticker_data.get("ask", 0):,.2f}' if _ticker_data.get("ask") else "N/A"}</span>
-        </div>
-        <div class="ticker-item">
-        <span class="ticker-label">24h 最高 / 最低</span>
-        <span class="ticker-value">{f'${_ticker_data.get("high_24h", 0):,.2f}' if _ticker_data.get("high_24h") else "N/A"} / {f'${_ticker_data.get("low_24h", 0):,.2f}' if _ticker_data.get("low_24h") else "N/A"}</span>
-        </div>
-        <div class="ticker-item">
-        <span class="ticker-label">24h 成交量</span>
-        <span class="ticker-value">{f'{_ticker_data.get("volume_24h", 0):,.0f} ETH'}</span>
-        </div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.info("💡 加载后将显示实时行情")
-
-    # ════════════════════════════════════════════════════════════════
-    # K 线图 + 交易标记
-    # ════════════════════════════════════════════════════════════════
-
-    if _df is not None and not _df.empty:
-        _fig = _build_candlestick_fig(
-            _df, ticker_data=_ticker_data, tf_key=_t_key, height=450,
-        )
-
-        # 叠加入场标记
-        _entry_markers = st.session_state.get("ai_entry_markers") or []
-        if _entry_markers:
-            _entry_df = pd.DataFrame(_entry_markers)
-            _entry_df["time"] = pd.to_datetime(_entry_df["time"])
-            _fig.add_trace(go.Scatter(
-                x=_entry_df["time"], y=_entry_df["price"],
-                mode="markers",
-                name="入场",
-                marker=dict(
-                    color="#059669", size=14,
-                    symbol="triangle-up",
-                    line=dict(color="white", width=2),
-                ),
-            ))
-
-        # 叠加出场标记
-        _exit_markers = st.session_state.get("ai_exit_markers") or []
-        if _exit_markers:
-            _exit_df = pd.DataFrame(_exit_markers)
-            _exit_df["time"] = pd.to_datetime(_exit_df["time"])
-            _fig.add_trace(go.Scatter(
-                x=_exit_df["time"], y=_exit_df["price"],
-                mode="markers",
-                name="出场",
-                marker=dict(
-                    color="#dc2626", size=14,
-                    symbol="triangle-down",
-                    line=dict(color="white", width=2),
-                ),
-            ))
-
-        st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
-
-        # KPI row
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        _kpi_sub = st.columns(4)
-        with _kpi_sub[0]:
-            st.metric("当前价", f"${float(_df['close'].iloc[-1]):,.2f}")
-        with _kpi_sub[1]:
-            st.metric("时段最高", f"${float(_df['high'].max()):,.2f}")
-        with _kpi_sub[2]:
-            st.metric("时段最低", f"${float(_df['low'].min()):,.2f}")
-        with _kpi_sub[3]:
-            vol = float(_df['volume'].sum())
-            st.metric("时段成交量", f"{vol:,.0f}")
-        st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        st.info("⏳ 加载K线数据…")
+    # 触发全页重跑 → 更新 fragment 外的显示
+    if auto:
+        st.session_state._ai_rerun_guard = True
+        st.rerun()
 
 
 _data_fragment()
@@ -659,22 +701,44 @@ if _res:
 
     chat_container = st.container()
     with chat_container:
-        for msg in st.session_state.ai_chat_messages:
+        for i, msg in enumerate(st.session_state.ai_chat_messages):
             with st.chat_message(msg["role"]):
-                st.markdown(_sanitize_ai_text(msg["content"]))
+                if msg["role"] == "assistant" and i == len(st.session_state.ai_chat_messages) - 1:
+                    # 最新回答 — 带滑入动效
+                    st.markdown(
+                        f'<div class="fade-in-answer">{_sanitize_ai_text(msg["content"])}</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(_sanitize_ai_text(msg["content"]))
 
     if st.session_state.get("ai_chat_loading"):
         with st.chat_message("assistant"):
-            st.markdown("🤔 思考中…")
+            st.markdown(
+                '<div style="display:flex;align-items:center;gap:8px;">'
+                '<span>🤔</span>'
+                '<span class="typing-indicator">'
+                '<span class="dot"></span>'
+                '<span class="dot"></span>'
+                '<span class="dot"></span>'
+                '</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
 
     user_input = st.chat_input("对当前市场分析提问…（例如：为什么看空？ETH支撑位在哪？）",
                                disabled=st.session_state.get("ai_chat_loading", False))
     if user_input and not st.session_state.get("ai_chat_loading", False):
         st.session_state.ai_chat_messages.append({"role": "user", "content": user_input})
-        context = st.session_state.get("ai_chat_context")
         st.session_state.ai_chat_loading = True
+        st.rerun()
+
+    # 两步渲染：问题先展示，回答好了再滑入
+    if st.session_state.get("ai_chat_loading") and st.session_state.get("ai_chat_messages") and st.session_state.ai_chat_messages[-1]["role"] == "user":
+        pending_question = st.session_state.ai_chat_messages[-1]["content"]
+        context = st.session_state.get("ai_chat_context")
         answer = _call_ai_chat(
-            user_input, context,
+            pending_question, context,
             st.session_state.ai_chat_messages, cfg,
         )
         st.session_state.ai_chat_messages.append({"role": "assistant", "content": answer})
@@ -723,5 +787,5 @@ _curve = st.session_state.get("ai_equity_curve") or []
 if len(_curve) >= 2:
     st.markdown("---")
     st.markdown("### 📈 权益曲线")
-    fig_eq = equity_curve_chart(_curve, title="AI 交易权益曲线")
+    fig_eq = equity_curve_chart(_curve, title="AI 交易权益曲线", theme=st.session_state.get("theme_mode", "light"))
     st.plotly_chart(fig_eq, use_container_width=True, config={"displayModeBar": False})

@@ -24,9 +24,12 @@ data/*.tmp
 Thumbs.db
 
 # Streamlit
-.streamlit/secrets.toml
+.streamlit/
 streamlit.err
 streamlit.log
+
+# Temp
+syntax_check.txt
 
 # Environment
 .env

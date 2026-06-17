@@ -52,6 +52,10 @@ for _key in ("OKX_API_KEY", "OKX_SECRET_KEY", "OKX_PASSPHRASE", "DEEPSEEK_API_KE
 # Initialize session state
 init_all()
 
+# ── Theme mode (light/dark only, no system) ──
+if "theme_mode" not in st.session_state:
+    st.session_state.theme_mode = "light"
+
 # Sidebar navigation
 st.sidebar.markdown("""
     <div class="sidebar-header">
@@ -59,6 +63,17 @@ st.sidebar.markdown("""
         <p>虚拟币量化交易系统</p>
     </div>
 """, unsafe_allow_html=True)
+
+# ── Theme toggle (light / dark only, no system) ──
+theme_mode = st.sidebar.radio(
+    "主题",
+    ["☀️ 亮色", "🌙 暗色"],
+    horizontal=True,
+    index=0 if st.session_state.theme_mode == "light" else 1,
+    key="theme_radio",
+    label_visibility="collapsed",
+)
+st.session_state.theme_mode = "light" if "亮" in theme_mode else "dark"
 
 # Navigation pages
 pages = [
@@ -72,6 +87,7 @@ pages = [
     ("💰 模拟交易", "pages/8_💰_PaperTrading.py"),
     ("🟢 以太坊", "pages/9_🟢_EthereumLive.py"),
     ("💓 ETH 心跳", "pages/10_💓_ETHHeartbeat.py"),
+    ("🤖 AI 交易", "pages/11_🤖_AI_Trading.py"),
 ]
 
 # Use page navigation
@@ -98,3 +114,11 @@ with st.sidebar:
         f"</div>",
         unsafe_allow_html=True,
     )
+
+# ── Apply theme class to body (after sidebar so theme_mode is set) ──
+_theme = st.session_state.get("theme_mode", "light")
+st.markdown(
+    f"<script>document.body.classList.remove('light-mode','dark-mode');"
+    f"document.body.classList.add('{_theme}-mode');</script>",
+    unsafe_allow_html=True,
+)

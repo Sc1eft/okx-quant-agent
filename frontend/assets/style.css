@@ -122,6 +122,13 @@ section[data-testid="stSidebar"] > div:first-child {
 
 /* ── Sidebar Navigation ── */
 
+/* Hide Streamlit's built-in "Navigation" section label */
+div[data-testid="stSidebarNav"]::before,
+div[data-testid="stSidebarNav"] > label,
+div[data-testid="stSidebarNav"] > div:first-child:not(:has(a)) {
+  display: none !important;
+}
+
 /* Hide the separate emoji icon — Streamlit renders it as a standalone
    block inside each nav link, duplicating the emoji that's already in the text */
 a[data-testid="stSidebarNavLink"] [data-testid="stIconEmoji"] {
@@ -802,4 +809,216 @@ div[data-baseweb="toast"] {
     flex: 1 1 calc(33.33% - 0.5rem) !important;
     min-width: 180px !important;
   }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   DARK MODE — explicit only, no "system" option
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── CSS Variable overrides ── */
+body.dark-mode {
+  --bg-page: #0f172a;
+  --bg-card: #1e293b;
+  --bg-card-hover: #253349;
+  --bg-input: #1e293b;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --border: #334155;
+  --border-light: #1e293b;
+  --primary-light: #1e3a5f;
+  --primary-ring: rgba(37, 99, 235, 0.4);
+  --green-bg: #064e3b;
+  --green-border: #065f46;
+  --red-bg: #7f1d1d;
+  --red-border: #991b1b;
+  --amber-bg: #78350f;
+  --amber-border: #92400e;
+  --purple-bg: #3b0764;
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Hardcoded overrides ── */
+
+body.dark-mode .stDataFrame thead tr th {
+  background: #1e293b !important;
+  border-color: var(--border) !important;
+}
+
+body.dark-mode .stDataFrame tbody tr:hover {
+  background: #253349 !important;
+}
+
+body.dark-mode div[data-baseweb="tag"] {
+  background: #334155 !important;
+}
+
+body.dark-mode code {
+  background: #1e293b;
+  color: #f87171;
+}
+
+body.dark-mode .stProgress > div > div {
+  background-color: #334155 !important;
+}
+
+body.dark-mode .sidebar-footer {
+  color: #64748b;
+  border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+body.dark-mode .sidebar-footer-mode { color: #64748b; }
+body.dark-mode .sidebar-footer-ver { color: #334155; }
+
+body.dark-mode .stAlert[data-baseweb="notification"][kind="info"] {
+  background: rgba(37, 99, 235, 0.15);
+}
+body.dark-mode .stAlert[data-baseweb="notification"][kind="success"] {
+  background: rgba(5, 150, 105, 0.15);
+}
+body.dark-mode .stAlert[data-baseweb="notification"][kind="warning"] {
+  background: rgba(217, 119, 6, 0.15);
+}
+body.dark-mode .stAlert[data-baseweb="notification"][kind="error"] {
+  background: rgba(220, 38, 38, 0.15);
+}
+
+/* ── Sidebar theme toggle ── */
+body.dark-mode section[data-testid="stSidebar"] .theme-toggle-label {
+  color: var(--sidebar-text) !important;
+  font-size: 0.78rem !important;
+  font-weight: 500 !important;
+  padding: 0 0.85rem;
+  margin-bottom: 0.25rem;
+}
+
+/* ── Status bar dark mode ── */
+body.dark-mode .status-bar {
+  background: #064e3b;
+  border-color: #065f46;
+}
+
+/* ── Cards that use inline white background ── */
+body.dark-mode div[style*="background: white"],
+body.dark-mode div[style*="background:white"],
+body.dark-mode div[style*="background:#fff"],
+body.dark-mode div[style*="background-color: white"],
+body.dark-mode div[style*="background-color:white"] {
+  background: var(--bg-card) !important;
+}
+
+/* ── Plotly charts in dark mode ── */
+/* Provide a dark background for charts not yet programmatically themed */
+body.dark-mode .stPlotlyChart svg {
+  background: #1e293b;
+}
+body.dark-mode .stPlotlyChart .bg {
+  fill: #1e293b !important;
+}
+
+/* ── Hardcoded inline color overrides for dark mode ── */
+/* Catch inline styles that hardcode light-mode colors and become unreadable
+   in dark mode. These use CSS attribute selectors to match common patterns. */
+
+/* Inline text colors: dark navy text (#0f172a) becomes invisible on dark bg */
+body.dark-mode *[style*="color: #0f172a"],
+body.dark-mode *[style*="color:#0f172a"] {
+  color: var(--text-primary) !important;
+}
+body.dark-mode *[style*="color: #475569"],
+body.dark-mode *[style*="color:#475569"] {
+  color: var(--text-secondary) !important;
+}
+body.dark-mode *[style*="color: #1e293b"],
+body.dark-mode *[style*="color:#1e293b"] {
+  color: var(--text-primary) !important;
+}
+
+/* Inline backgrounds: light grays should become card bg */
+body.dark-mode *[style*="background: #f1f5f9"],
+body.dark-mode *[style*="background:#f1f5f9"] {
+  background: var(--bg-card) !important;
+}
+body.dark-mode *[style*="background: #f8fafc"],
+body.dark-mode *[style*="background:#f8fafc"] {
+  background: var(--bg-card-hover) !important;
+}
+
+/* Inline borders */
+body.dark-mode *[style*="border-color: #e2e8f0"],
+body.dark-mode *[style*="border-color:#e2e8f0"] {
+  border-color: var(--border) !important;
+}
+body.dark-mode *[style*="border: 1px solid #e2e8f0"] {
+  background: var(--bg-card) !important;
+  border-color: var(--border) !important;
+}
+body.dark-mode *[style*="border:1px solid #e2e8f0"] {
+  background: var(--bg-card) !important;
+  border-color: var(--border) !important;
+}
+
+/* Price cards with white background — also fix border and text inside them */
+body.dark-mode div[style*="text-align:center"][style*="background"] {
+  background: var(--bg-card) !important;
+  border-color: var(--border) !important;
+}
+
+/* Dark theme improvements: Metric container value text */
+body.dark-mode div[data-testid="metric-container"] div[data-testid="metric-value"] {
+  color: var(--text-primary) !important;
+}
+
+/* Price change labels in heartbeat card */
+body.dark-mode div[style*="margin-top:0.75rem"] span[style*="background"],
+body.dark-mode span[style*="background: #f1f5f9"] {
+  background: var(--bg-input) !important;
+}
+
+/* ═══════════════════════════════════════════════════════
+   Chat message animations — question first, answer slides in
+   ═══════════════════════════════════════════════════════ */
+
+/* Answer fades in and slides up from below */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in-answer {
+  animation: fadeInUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Typing indicator (thinking dots) */
+.typing-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 4px;
+}
+
+.typing-indicator .dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: typing-bounce 1.4s infinite both;
+}
+
+.typing-indicator .dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-indicator .dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.25; }
+  30% { transform: translateY(-7px); opacity: 1; }
 }

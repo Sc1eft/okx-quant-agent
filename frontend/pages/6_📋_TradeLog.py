@@ -155,11 +155,11 @@ if not filtered.empty:
 
     with chart_tabs[0]:
         trades_list = filtered.to_dict("records")
-        fig = pnl_distribution_chart(trades_list)
+        fig = pnl_distribution_chart(trades_list, theme=st.session_state.get("theme_mode", "light"))
         st.plotly_chart(fig, use_container_width=True)
 
     with chart_tabs[1]:
-        fig = cumulative_pnl_chart(trades_list)
+        fig = cumulative_pnl_chart(trades_list, theme=st.session_state.get("theme_mode", "light"))
         st.plotly_chart(fig, use_container_width=True)
 
     with chart_tabs[2]:

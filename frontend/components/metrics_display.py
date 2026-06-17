@@ -7,14 +7,14 @@ import streamlit as st
 from typing import Dict, Any, Optional, Tuple
 
 
-# ── Color palette ──
-GREEN = "#059669"
-RED = "#dc2626"
-BLUE = "#2563eb"
-AMBER = "#d97706"
-PURPLE = "#7c3aed"
-GRAY = "#64748b"
-DARK = "#0f172a"
+# ── Color palette (use CSS variable names for theme support) ──
+GREEN = "var(--green)"
+RED = "var(--red)"
+BLUE = "var(--primary)"
+AMBER = "var(--amber)"
+PURPLE = "var(--purple)"
+GRAY = "var(--text-muted)"
+DARK = "var(--text-primary)"
 
 # ── Friendly label mapping ──
 _LABELS: Dict[str, str] = {
@@ -151,31 +151,11 @@ def render_metric_card(
 
     html = f"""
     <div class="metric-card metric-card--{card_type}" style="
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
         border-left: 4px solid {accent_color};
-        border-radius: 10px;
-        padding: 0.85rem 1.1rem;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-        transition: all 0.2s ease;
         margin-bottom: 0.5rem;
     ">
-        <div style="
-            color: #94a3b8;
-            font-size: 0.72rem;
-            font-weight: 500;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-            margin-bottom: 0.2rem;
-        ">{friendly}</div>
-        <div style="
-            color: {color};
-            font-size: 1.35rem;
-            font-weight: 700;
-            font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', monospace;
-            letter-spacing: -0.02em;
-            line-height: 1.3;
-        ">{display_value}</div>
+        <div class="label">{friendly}</div>
+        <div class="value" style="color: {color};">{display_value}</div>
     </div>
     """
 
