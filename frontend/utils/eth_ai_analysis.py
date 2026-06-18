@@ -19,6 +19,12 @@ __all__ = [
     "_sanitize_ai_text",
     "_ticker_summary",
     "_summarize_klines",
+    "_calc_macd",
+    "_calc_kdj",
+    "_calc_boll",
+    "_summarize_macd",
+    "_summarize_kdj",
+    "_summarize_boll",
 ]
 
 
@@ -42,10 +48,25 @@ _AI_SYSTEM_PROMPT = """你是专业的加密货币交易分析师，综合技术
 3. **长期技术面（日线）** — 权重中
    - 提供大方向背景，但不作为短线决策主依据
 
-4. **关联币种（BTC/SOL/DOGE）** — 权重中
+4. **MACD 指标（多周期）** — 权重高
+   - 关注 MACD 金叉/死叉信号、柱线方向（扩大/缩小）、零轴位置
+   - 多周期共振（如 15m + 1h 同时金叉）增强信号可信度
+   - 顶背离 / 底背离是强转折信号
+
+5. **KDJ 随机指标（多周期）** — 权重中高
+   - K 线穿越 D 线（金叉/死叉）提供短期买卖信号
+   - J 值超买（>=100）或超卖（<=0）预示拐点风险
+   - 多周期 KDJ 方向一致时趋势可靠
+
+6. **布林带（多周期）** — 权重中高
+   - 价格触及上轨/下轨预示反转或延续信号
+   - 布林收口（squeeze）预示大幅波动即将到来
+   - 价格沿上轨/下轨运行说明趋势强劲
+
+7. **关联币种（BTC/SOL/DOGE）** — 权重中
    - BTC 强相关时提高权重，脱离联动时降低
 
-5. **新闻基本面** — 动态权重（按时效和冲击力调整）：
+8. **新闻基本面** — 动态权重（按时效和冲击力调整）：
    - 🚨 **6 小时内 + 高冲击主题**（监管政策 / 安全事件 / ETF /
         协议升级等）→ **最高权重**，可能完全改变短期方向
    - **6~24 小时** → 高权重，尚未完全 priced in
@@ -122,6 +143,245 @@ def _summarize_klines(df: pd.DataFrame | None, label: str) -> str:
     )
 
 
+# ════════════════════════════════════════════════════════════════
+# MACD / KDJ / BOLL CALCULATION
+# ════════════════════════════════════════════════════════════════
+
+
+def _calc_macd(
+    df: pd.DataFrame,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> dict | None:
+    """计算 MACD 指标，返回最新值摘要。
+
+    Returns:
+        {"macd": float, "signal": float, "histogram": float,
+         "hist_direction": "rising"|"falling", "crossover": "bullish"|"bearish"|None}
+         数据不足时返回 None。
+    """
+    if df is None or df.empty or len(df) < slow:
+        return None
+    close = df["close"].astype(float)
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+
+    # 最新值和前值判断方向
+    macd_val = float(macd_line.iloc[-1])
+    sig_val = float(signal_line.iloc[-1])
+    hist_val = float(histogram.iloc[-1])
+
+    hist_direction = "rising" if len(histogram) >= 2 and histogram.iloc[-1] > histogram.iloc[-2] else "falling"
+
+    # 金叉/死叉判断：macd 穿越 signal
+    crossover = None
+    if len(macd_line) >= 2:
+        prev_macd = macd_line.iloc[-2]
+        prev_sig = signal_line.iloc[-2]
+        if prev_macd <= prev_sig and macd_val > sig_val:
+            crossover = "bullish"  # 金叉
+        elif prev_macd >= prev_sig and macd_val < sig_val:
+            crossover = "bearish"  # 死叉
+
+    return {
+        "macd": round(macd_val, 4),
+        "signal": round(sig_val, 4),
+        "histogram": round(hist_val, 4),
+        "hist_direction": hist_direction,
+        "crossover": crossover,
+    }
+
+
+def _calc_kdj(
+    df: pd.DataFrame,
+    n: int = 9,
+    k_period: int = 3,
+    d_period: int = 3,
+) -> dict | None:
+    """计算 KDJ 随机指标，返回最新值摘要。
+
+    Returns:
+        {"k": float, "d": float, "j": float,
+         "k_cross_d": "bullish"|"bearish"|None,
+         "zone": "overbought"|"oversold"|"normal"}
+         数据不足时返回 None。
+    """
+    if df is None or df.empty or len(df) < n:
+        return None
+
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+
+    low_n = low.rolling(n).min()
+    high_n = high.rolling(n).max()
+    rsv = (close - low_n) / (high_n - low_n + 1e-10) * 100
+
+    k = rsv.ewm(span=k_period, adjust=False).mean()
+    d = k.ewm(span=d_period, adjust=False).mean()
+    j = 3 * k - 2 * d
+
+    k_val = float(k.iloc[-1])
+    d_val = float(d.iloc[-1])
+    j_val = float(j.iloc[-1])
+
+    # K 穿越 D 判断
+    k_cross = None
+    if len(k) >= 2:
+        if k.iloc[-2] <= d.iloc[-2] and k_val > d_val:
+            k_cross = "bullish"
+        elif k.iloc[-2] >= d.iloc[-2] and k_val < d_val:
+            k_cross = "bearish"
+
+    zone = "normal"
+    if j_val >= 100:
+        zone = "overbought"
+    elif j_val <= 0:
+        zone = "oversold"
+
+    return {
+        "k": round(k_val, 2),
+        "d": round(d_val, 2),
+        "j": round(j_val, 2),
+        "k_cross_d": k_cross,
+        "zone": zone,
+    }
+
+
+def _summarize_macd(macd: dict | None, label: str) -> str:
+    """将 MACD 计算结果压缩为一行文字摘要。"""
+    if macd is None:
+        return f"{label} MACD: 数据不足"
+    emoji = macd.get("crossover") or ("" if macd.get("histogram", 0) >= 0 else "")
+    if macd["crossover"] == "bullish":
+        emoji = "🐂"
+    elif macd["crossover"] == "bearish":
+        emoji = "🐻"
+    elif macd["histogram"] >= 0:
+        emoji = "📈"
+    else:
+        emoji = "📉"
+
+    cross_str = ""
+    if macd["crossover"]:
+        cross_str = {"bullish": "金叉↑", "bearish": "死叉↓"}.get(macd["crossover"], "")
+    dir_str = macd["hist_direction"] == "rising" and "柱线扩大" or "柱线缩小"
+
+    return (
+        f"{label} MACD: MACD {macd['macd']:+.2f} / SIG {macd['signal']:+.2f} / "
+        f"HIST {macd['histogram']:+.2f} {emoji} "
+        f"{cross_str} {dir_str}"
+    )
+
+
+def _summarize_kdj(kdj: dict | None, label: str) -> str:
+    """将 KDJ 计算结果压缩为一行文字摘要。"""
+    if kdj is None:
+        return f"{label} KDJ: 数据不足"
+    zone_emoji = {"overbought": "⚠️超买", "oversold": "🔻超卖", "normal": ""}.get(kdj["zone"], "")
+    cross_str = ""
+    if kdj["k_cross_d"] == "bullish":
+        cross_str = "K↑D金叉"
+    elif kdj["k_cross_d"] == "bearish":
+        cross_str = "K↓D死叉"
+
+    return (
+        f"{label} KDJ: K {kdj['k']:.1f} / D {kdj['d']:.1f} / J {kdj['j']:.1f} "
+        f"{cross_str} {zone_emoji}"
+    )
+
+
+def _calc_boll(
+    df: pd.DataFrame,
+    period: int = 20,
+    std_dev: float = 2.0,
+) -> dict | None:
+    """计算布林带（Bollinger Bands）指标，返回最新值摘要。
+
+    Returns:
+        {"upper": float, "middle": float, "lower": float,
+         "bandwidth": float, "position": float,
+         "position_label": "above"|"below"|"inside"|"touch_upper"|"touch_lower",
+         "squeeze": bool}
+         数据不足时返回 None。
+    """
+    if df is None or df.empty or len(df) < period:
+        return None
+
+    close = df["close"].astype(float)
+    middle = close.rolling(period).mean()
+    std = close.rolling(period).std()
+
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+
+    mid_val = float(middle.iloc[-1])
+    up_val = float(upper.iloc[-1])
+    low_val = float(lower.iloc[-1])
+    price = float(close.iloc[-1])
+
+    # 带宽缩小（squeeze）判断：带宽低于近期中位数的 70%
+    bw_series = (upper - lower) / middle
+    bw = float(bw_series.iloc[-1]) if len(bw_series) > 0 else 0.0
+    squeeze = False
+    if len(bw_series) >= period:
+        hist_bw = float(bw_series.iloc[-period:].median())
+        squeeze = bw < hist_bw * 0.7
+
+    # 价格在布林带中的位置
+    if price >= up_val:
+        position_label = "touch_upper"
+    elif price <= low_val:
+        position_label = "touch_lower"
+    else:
+        position_label = "inside"
+
+    # 计算价格在带宽中的百分比位置 (0~100)
+    if up_val - low_val > 1e-10:
+        pos_pct = (price - low_val) / (up_val - low_val) * 100
+    else:
+        pos_pct = 50.0
+
+    return {
+        "upper": round(up_val, 2),
+        "middle": round(mid_val, 2),
+        "lower": round(low_val, 2),
+        "bandwidth": round(bw, 4),
+        "position_pct": round(pos_pct, 1),
+        "position_label": position_label,
+        "squeeze": squeeze,
+    }
+
+
+def _summarize_boll(boll: dict | None, label: str) -> str:
+    """将布林带计算结果压缩为一行文字摘要。"""
+    if boll is None:
+        return f"{label} 布林带: 数据不足"
+
+    pos = boll.get("position_label", "inside")
+    pos_pct = boll.get("position_pct", 50)
+    squeeze = boll.get("squeeze", False)
+
+    pos_str_map = {
+        "touch_upper": "触及上轨 🔺",
+        "touch_lower": "触及下轨 🔻",
+        "inside": f"轨内 {pos_pct:.0f}% 位置",
+    }
+    pos_str = pos_str_map.get(pos, f"轨内 {pos_pct:.0f}% 位置")
+
+    squeeze_str = " 🌀布林收口" if squeeze else ""
+
+    return (
+        f"{label} 布林带: 上轨 {boll['upper']:.2f} / 中轨 {boll['middle']:.2f} / "
+        f"下轨 {boll['lower']:.2f} 带宽 {boll['bandwidth']:.2%} "
+        f"价格{pos_str}{squeeze_str}"
+    )
+
+
 def _ticker_summary(symbol: str, tk: dict | None) -> str:
     """将 ticker 数据压缩为一行摘要"""
     if not tk:
@@ -170,6 +430,28 @@ def _build_ai_analysis_prompt(
     lines.append(_summarize_klines(klines_1h, "中期(1小时)"))
     lines.append(_summarize_klines(klines_1d, "长期(日线)"))
     lines.append("")
+
+    # ── MACD 指标 ──
+    lines.append("### MACD 指标")
+    lines.append(_summarize_macd(_calc_macd(klines_15m), "短期(15分钟)"))
+    lines.append(_summarize_macd(_calc_macd(klines_1h), "中期(1小时)"))
+    lines.append(_summarize_macd(_calc_macd(klines_1d), "长期(日线)"))
+    lines.append("")
+
+    # ── KDJ 指标 ──
+    lines.append("### KDJ 随机指标")
+    lines.append(_summarize_kdj(_calc_kdj(klines_15m), "短期(15分钟)"))
+    lines.append(_summarize_kdj(_calc_kdj(klines_1h), "中期(1小时)"))
+    lines.append(_summarize_kdj(_calc_kdj(klines_1d), "长期(日线)"))
+    lines.append("")
+
+    # ── 布林带指标 ──
+    lines.append("### 布林带")
+    lines.append(_summarize_boll(_calc_boll(klines_15m), "短期(15分钟)"))
+    lines.append(_summarize_boll(_calc_boll(klines_1h), "中期(1小时)"))
+    lines.append(_summarize_boll(_calc_boll(klines_1d), "长期(日线)"))
+    lines.append("")
+
     lines.append("### 关联币种行情")
     lines.append(_ticker_summary("BTC", btc_ticker))
     lines.append(_ticker_summary("SOL", sol_ticker))
