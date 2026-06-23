@@ -120,6 +120,7 @@ class OKXWebSocketClient:
 
     async def _subscribe_all(self):
         """订阅所有已注册的频道"""
+        self._subscribed_channels.clear()
         for symbol in self.symbols:
             await self.subscribe("tickers", symbol)
             # 后续可扩展订阅 candles / books
@@ -137,6 +138,13 @@ class OKXWebSocketClient:
         # 数据消息
         if "data" in msg and self._on_message:
             self._on_message(msg)
+
+    async def __aenter__(self):
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *args):
+        await self.disconnect()
 
     @staticmethod
     def _sign(secret_key: str, timestamp: str) -> str:
