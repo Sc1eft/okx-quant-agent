@@ -117,7 +117,10 @@ class Agent2:
     async def _fetch_and_score(self):
         """抓取新闻 → 评分 → 推送"""
         self._stats["fetch_count"] += 1
-        news_list = _fetch_crypto_news(max_items=self.config.agent2_max_news_per_fetch)
+        news_list = await asyncio.to_thread(
+            _fetch_crypto_news,
+            max_items=self.config.agent2_max_news_per_fetch,
+        )
 
         if not news_list:
             logger.debug("Agent 2: 本轮无新闻")
