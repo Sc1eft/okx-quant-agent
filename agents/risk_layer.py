@@ -20,7 +20,7 @@ Layer 3 — 交易后监控:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, timedelta, date
 from typing import Optional, Tuple
 
 from agents.config import AgentSystemConfig
@@ -117,7 +117,7 @@ class RiskManager:
         """报告 API 错误（用于熔断）"""
         self._consecutive_api_errors += 1
         if self._consecutive_api_errors >= 3:
-            self._api_breaker_until = datetime.now(timezone.utc)
+            self._api_breaker_until = datetime.now(timezone.utc) + timedelta(minutes=5)
             logger.warning(f"连续 {self._consecutive_api_errors} 次 API 错误，触发熔断 5 分钟")
         # 实际熔断时间在 check 里计算
 
@@ -141,8 +141,13 @@ class RiskManager:
             self._current_position_side = "long"
             self._current_position_eth += size
         elif side == "sell":
-            self._current_position_side = "short" if trade_data.get("short") else None
-            self._current_position_eth = max(0, self._current_position_eth - size)
+            if trade_data.get("short"):
+                self._current_position_side = "short"
+            else:
+                # closing a long / reducing long position
+                self._current_position_eth = max(0, self._current_position_eth - size)
+                if self._current_position_eth <= 0:
+                    self._current_position_side = None
 
         pnl = trade_data.get("pnl", 0)
         if pnl < 0:
@@ -154,6 +159,10 @@ class RiskManager:
         """记录亏损"""
         self._consecutive_losses += 1
         self._daily_loss_usdt += loss_usdt
+
+    def record_loss(self, loss_usdt: float):
+        """公开的亏损记录接口，代理 _record_loss"""
+        self._record_loss(loss_usdt)
 
     def get_position_size_multiplier(self) -> float:
         """返回仓位乘数（连亏后减半）"""
