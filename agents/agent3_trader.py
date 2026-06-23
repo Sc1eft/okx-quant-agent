@@ -39,6 +39,8 @@ class Agent3:
         risk_manager: RiskManager,
         trade_executor: TradeExecutor,
         root_config,
+        position_monitor=None,  # Phase 2: 持仓监控器
+        okx_client=None,       # Phase 2: OKX客户端（用于BTC/深度检查）
     ):
         self.config = config
         self.bus = event_bus
@@ -46,6 +48,9 @@ class Agent3:
         self.risk = risk_manager
         self.executor = trade_executor
         self.root_config = root_config  # 根 Config（含 trading symbol 等）
+        self.position_monitor = position_monitor  # Phase 2
+        self.okx_client = okx_client               # Phase 2
+        self._btc_checked = False  # Phase 2: 标记本轮是否已完成BTC检查
 
         # 事件缓冲区
         self._event_buffer: list[AgentEvent] = []
@@ -155,8 +160,16 @@ class Agent3:
             events = list(self._event_buffer)
             self._event_buffer.clear()
 
+            # ── 0. BTC 波动检查（Phase 2） ──
+            if self.okx_client and hasattr(self.risk, 'check_btc_volatility_async'):
+                ok, reason = await self.risk.check_btc_volatility_async(self.okx_client)
+                if not ok:
+                    logger.info(f"BTC 波动检查拒绝: {reason}")
+                    self._stats["trades_skipped"] += 1
+                    return
+
             # ── 1. 构建上下文摘要（不含方向） ──
-            context = await self._build_context(events)
+            context = self._build_context(events)
 
             # ── 2. 调用 DeepSeek ──
             self._stats["deepseek_calls"] += 1
@@ -170,6 +183,19 @@ class Agent3:
             # ── 3. 从 DeepSeek 输出获取交易方向 ──
             trade_side = "buy" if decision["action"] == "buy" else "sell"
             size_eth = self._suggested_size(context)
+
+            # ── 3b. 市场深度检查（Phase 2） ──
+            prefer_limit = True
+            if self.okx_client and hasattr(self.risk, 'check_market_depth_async'):
+                ok, reason, prefer_limit = await self.risk.check_market_depth_async(
+                    self.okx_client, trade_side, size_eth
+                )
+                if not ok:
+                    logger.info(f"市场深度拒绝: {reason}")
+                    self._stats["trades_skipped"] += 1
+                    return
+                if prefer_limit:
+                    logger.info(f"市场深度检查: {reason}")
 
             # ── 4. Layer 1 风控检查（使用真实交易方向） ──
             ok, reason = self.risk.check_layer1(trade_side, size_eth, context.get("current_price", 0))
@@ -186,7 +212,7 @@ class Agent3:
                 side=trade_side,
                 size_eth=size_eth,
                 signal_price=context.get("current_price", 0),
-                prefer_limit=True,
+                prefer_limit=prefer_limit,
             )
 
             # ── 6. Layer 3 记录 ──
@@ -202,11 +228,23 @@ class Agent3:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
                 logger.info(f"交易成功: {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}")
+
+                # Phase 2: 通知持仓监控器
+                if self.position_monitor:
+                    stop_loss = float(decision.get("stop_loss", 0))
+                    take_profit = float(decision.get("take_profit", 0))
+                    self.position_monitor.update_position(
+                        side=trade_side,
+                        size=size_eth,
+                        entry_price=trade_result["fill_price"],
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                    )
             else:
                 self.risk.report_api_error()
                 logger.error(f"交易失败: {trade_result['error']}")
 
-    async def _build_context(self, events: list[AgentEvent]) -> dict:
+    def _build_context(self, events: list[AgentEvent]) -> dict:
         """从事件列表构建 DeepSeek 上下文"""
         agent1_lines = []
         agent2_lines = []
@@ -229,6 +267,9 @@ class Agent3:
                 weight = d.get("weight", 0)
                 agent2_lines.append(f"[{source} w={weight:.2f}] {title}")
 
+        # Phase 2: 注入风控状态
+        risk_status = self.risk.get_status()
+
         return {
             "symbol": self.root_config.trading.symbol,
             "position_direction": self._current_position["side"],
@@ -241,10 +282,15 @@ class Agent3:
             "win_rate": 0,
             "monthly_pnl": 0,
             "current_price": current_price,
+            "risk_status": risk_status,  # Phase 2: 风控状态
         }
 
     def _suggested_size(self, context: dict) -> float:
-        """根据上下文和风控建议仓位大小"""
+        """根据上下文和风控建议仓位大小
+
+        阶段一: 固定 0.01 ETH × 风控乘数
+        阶段二: 优先使用 DeepSeek 建议的比例
+        """
         multiplier = self.risk.get_position_size_multiplier()
         base_size = 0.01  # 基础 0.01 ETH
         return base_size * multiplier
