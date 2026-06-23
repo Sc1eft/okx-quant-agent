@@ -42,12 +42,16 @@ class RiskManager:
         self._daily_loss_usdt: float = 0.0
         self._consecutive_losses: int = 0
         self._current_date: date = datetime.now(timezone.utc).date()
+        self._current_cst_date: date = self._utc_to_cst_date(datetime.now(timezone.utc))
         self._current_position_eth: float = 0.0
         self._current_position_side: Optional[str] = None  # "long" / "short"
 
         # ── Layer 2 状态 ──
         self._consecutive_api_errors: int = 0
         self._api_breaker_until: Optional[datetime] = None
+
+        # ── Phase 2 状态 ──
+        self._btc_delay_until: Optional[datetime] = None
 
         # ── Layer 3 状态 ──
         self._daily_trades: list[dict] = []
@@ -176,15 +180,22 @@ class RiskManager:
             return max(0.1, 1.0 - self._consecutive_losses * 0.25)
         return 1.0
 
+    @staticmethod
+    def _utc_to_cst_date(utc_dt: datetime) -> date:
+        """UTC 时间转北京时间（CST, UTC+8）的日期"""
+        cst_dt = utc_dt + timedelta(hours=8)
+        return cst_dt.date()
+
     def _check_date_reset(self, now: datetime):
-        """每日重置"""
-        today = now.date()
-        if today != self._current_date:
-            logger.info(f"每日风控重置: {self._current_date} → {today}")
+        """每日重置（北京时间午夜 00:00 CST = UTC 16:00）"""
+        cst_today = self._utc_to_cst_date(now)
+        if cst_today != self._current_cst_date:
+            logger.info(f"每日风控重置 (CST): {self._current_cst_date} → {cst_today}")
             self._daily_trade_count = 0
             self._daily_loss_usdt = 0.0
             self._consecutive_losses = 0
-            self._current_date = today
+            self._current_cst_date = cst_today
+            self._current_date = now.date()
             self._daily_trades = []
             self._consecutive_api_errors = 0
             self._api_breaker_until = None
@@ -202,6 +213,115 @@ class RiskManager:
             "position_eth": round(self._current_position_eth, 6),
             "position_side": self._current_position_side,
         }
+
+    # ── Phase 2: BTC 波动检查 ──
+
+    async def check_btc_volatility_async(self, okx_client) -> tuple[bool, str]:
+        """检查 BTC 15m 波动率，超阈值则拒绝交易
+
+        Args:
+            okx_client: OKXClient 实例（用于获取 BTC K线）
+
+        Returns:
+            (通过?, 原因)
+        """
+        # 先检查是否在延迟期内
+        now = datetime.now(timezone.utc)
+        if hasattr(self, '_btc_delay_until') and self._btc_delay_until and now < self._btc_delay_until:
+            remaining = (self._btc_delay_until - now).total_seconds()
+            return False, f"BTC 波动延迟中，剩余 {remaining:.0f}s"
+
+        # 获取最后两根 BTC 15m K线
+        try:
+            import asyncio
+            klines = await asyncio.to_thread(
+                okx_client.get_klines, "BTC-USDT", "15m", 2
+            )
+        except Exception as e:
+            logger.warning(f"BTC 波动检查失败（API 异常）: {e}")
+            return True, ""  # API 异常不阻塞交易
+
+        if len(klines) < 2:
+            return True, ""
+
+        prev_close = klines[0]["close"] if isinstance(klines[0], dict) else float(klines[0][4])
+        curr_close = klines[1]["close"] if isinstance(klines[1], dict) else float(klines[1][4])
+
+        if prev_close <= 0:
+            return True, ""
+
+        change_pct = abs(curr_close - prev_close) / prev_close * 100
+        if change_pct > self.config.btc_volatility_threshold_pct:
+            self._btc_delay_until = now + timedelta(seconds=self.config.btc_volatility_delay_seconds)
+            logger.warning(
+                f"BTC 15m 波动 {change_pct:.1f}% > {self.config.btc_volatility_threshold_pct}%"
+                f"，延迟 {self.config.btc_volatility_delay_seconds}s"
+            )
+            return False, f"BTC 15m 波动 {change_pct:.1f}%，超过阈值 {self.config.btc_volatility_threshold_pct}%"
+
+        # 波动恢复正常 → 清除延迟
+        self._btc_delay_until = None
+        return True, ""
+
+    # ── Phase 2: 市场深度检查 ──
+
+    async def check_market_depth_async(
+        self,
+        okx_client,
+        side: str,       # "buy" / "sell"
+        size_eth: float,  # 交易数量（ETH）
+    ) -> tuple[bool, str, bool]:
+        """检查市场深度是否足够
+
+        Args:
+            okx_client: OKXClient 实例
+            side: 交易方向
+            size_eth: 交易数量（ETH）
+
+        Returns:
+            (检查通过?, 消息, 是否强制限价单)
+        """
+        try:
+            import asyncio
+            order_book = await asyncio.to_thread(
+                okx_client.get_order_book, self.config.ws_symbol, depth=5
+            )
+        except Exception as e:
+            logger.warning(f"市场深度检查失败: {e}")
+            return True, "深度检查跳过", True  # 失败则保守地走限价单
+
+        asks = order_book.get("asks", [])
+        bids = order_book.get("bids", [])
+
+        if not asks or not bids:
+            return True, "深度数据为空", True
+
+        # 计算买卖价差（基点）
+        best_ask = float(asks[0][0])
+        best_bid = float(bids[0][0])
+        mid_price = (best_ask + best_bid) / 2
+
+        if mid_price <= 0:
+            return True, "", True
+
+        spread_bps = (best_ask - best_bid) / mid_price * 10000
+
+        # 检查深度是否足够完成交易
+        if side == "buy":
+            available_depth = sum(float(ask[1]) for ask in asks if float(ask[0]) <= best_ask * 1.005)
+        else:
+            available_depth = sum(float(bid[1]) for bid in bids if float(bid[0]) >= best_bid * 0.995)
+
+        if available_depth < size_eth:
+            return False, (
+                f"卖方深度不足: 可用 {available_depth:.4f} ETH < 需求 {size_eth} ETH"
+            ), True
+
+        # 价差过大 → 强制走限价单
+        if spread_bps > self.config.market_depth_spread_bps:
+            return True, f"价差 {spread_bps:.1f}bps > {self.config.market_depth_spread_bps}bps，走限价单", True
+
+        return True, "", False  # 深度充足，可以市价单
 
     # ── SQLite 持久化 ──
 
