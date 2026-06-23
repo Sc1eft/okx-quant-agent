@@ -169,6 +169,67 @@ class OKXClient:
         self._check_api_response(data)
         return data["data"]
 
+    # ── Phase 2: 订单管理（Task 1） ──
+
+    def cancel_order(self, symbol: str, order_id: str) -> dict:
+        """撤销订单
+
+        https://www.okx.com/docs-v5/en/#rest-api-trade-cancel-order
+        需要 Trade 权限。
+        """
+        ts = self._timestamp()
+        body = {"instId": symbol, "ordId": order_id}
+        json_body = str(body).replace("'", '"')
+        headers = self._sign("POST", "/api/v5/trade/cancel-order", json_body, ts)
+        headers["Content-Type"] = "application/json"
+        resp = self._request("POST", "/api/v5/trade/cancel-order", headers=headers, content=json_body)
+        data = resp.json()
+        self._check_api_response(data)
+        return self._normalize_order_data(data.get("data", []))
+
+    def get_order(self, symbol: str, order_id: str) -> dict:
+        """查询订单状态
+
+        https://www.okx.com/docs-v5/en/#rest-api-trade-get-order-details
+        需要 Trade 权限。
+        返回字段: ordId, state(canceled/filled/partially_filled/live),
+        fillPx, fillSz, accFillSz, side, instId
+        """
+        ts = self._timestamp()
+        path = f"/api/v5/trade/order?instId={symbol}&ordId={order_id}"
+        headers = self._sign("GET", path, "", ts)
+        resp = self._request("GET", path, headers=headers)
+        data = resp.json()
+        self._check_api_response(data)
+        return self._normalize_order_data(data.get("data", []))
+
+    def get_order_book(self, symbol: str, depth: int = 5) -> dict:
+        """获取订单簿深度
+
+        https://www.okx.com/docs-v5/en/#rest-api-market-data-get-order-book
+        公开接口，无需签名。
+        返回: {"asks": [[price, sz, ...], ...], "bids": [[price, sz, ...], ...], "ts": "..."}
+        """
+        params = {"instId": symbol, "sz": str(min(depth, 10))}
+        resp = self._request("GET", "/api/v5/market/books", params=params)
+        data = resp.json()
+        self._check_api_response(data)
+        raw = data.get("data", [{}])[0]
+        return {
+            "asks": raw.get("asks", []),
+            "bids": raw.get("bids", []),
+            "ts": raw.get("ts", ""),
+        }
+
+    @staticmethod
+    def _normalize_order_data(raw: list) -> dict:
+        """标准化订单 API 返回值"""
+        if isinstance(raw, list) and len(raw) > 0:
+            return raw[0]
+        if isinstance(raw, dict):
+            return raw
+        return {}
+
     # ── 内部 ──
 
     def _sign(self, method: str, path: str, body: str, ts: str) -> dict:
