@@ -41,6 +41,25 @@ class AgentSystemConfig:
     # ── SQLite ──
     db_path: str = "data/agent_trades.db"
 
+    # ── Phase 2: Risk Hardening ──
+    # BTC 波动检查
+    btc_volatility_threshold_pct: float = 3.0
+    btc_volatility_delay_seconds: int = 300
+
+    # 市场深度
+    market_depth_spread_bps: float = 10.0       # 买卖价差阈值（基点）
+    market_depth_min_liquidity_eth: float = 1.0  # 最小深度（ETH）
+
+    # 交易执行
+    limit_order_timeout_seconds: int = 10        # 限价单等待超时
+    max_slippage_pct: float = 0.3                # 最大滑点百分比
+    partial_fill_timeout_seconds: int = 10       # 部分成交等待超时
+
+    # 持仓监控
+    position_monitor_interval: float = 5.0       # 持仓检查间隔（秒）
+    trailing_stop_activation_pct: float = 3.0    # 浮盈激活移动止损
+    trailing_stop_distance_pct: float = 1.5      # 移动止损距离
+
     # ── Logging ──
     log_level: str = "INFO"
     log_file: str = "logs/agent_system.log"
