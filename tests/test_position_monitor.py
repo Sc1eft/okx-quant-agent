@@ -140,13 +140,11 @@ class TestPositionMonitor:
         mock_okx_client.get_ticker.return_value = {"last": 3580.0}
         triggered = await monitor._check_once()
         assert triggered is True
+        assert monitor._stats["trailing_stop_triggered"] == 1
 
     @pytest.mark.asyncio
     async def test_no_position_no_action(self, config, mock_risk_manager, mock_executor, mock_okx_client):
         """无持仓时不做任何操作"""
-        mock_risk_manager._current_position_eth = 0
-        mock_risk_manager._current_position_side = None
-
         monitor = PositionMonitor(
             config=config,
             risk_manager=mock_risk_manager,
@@ -154,7 +152,10 @@ class TestPositionMonitor:
             okx_client=mock_okx_client,
         )
         monitor._running = True
-
+        # Start with a position, then clear it
+        monitor.update_position(side="long", size=0.01, entry_price=3500.0,
+                                stop_loss=3400.0, take_profit=3600.0)
+        monitor.clear_position()
         triggered = await monitor._check_once()
         assert triggered is False
         mock_executor.execute_market.assert_not_called()
@@ -181,6 +182,49 @@ class TestPositionMonitor:
         triggered = await monitor._check_once()
         assert triggered is True
         assert monitor._stats["take_profit_triggered"] == 1
+
+    @pytest.mark.asyncio
+    async def test_short_trailing_stop_activates(self, config, mock_risk_manager, mock_executor, mock_okx_client):
+        """空头：价格下跌触发移动止损激活"""
+        mock_risk_manager._current_position_side = "short"
+        monitor = PositionMonitor(
+            config=config,
+            risk_manager=mock_risk_manager,
+            executor=mock_executor,
+            okx_client=mock_okx_client,
+        )
+        monitor._running = True
+        monitor.update_position(side="short", size=0.01, entry_price=3500.0,
+                                stop_loss=3570.0, take_profit=3300.0)
+        # 价格跌到 3350（浮盈 4.3% > 3%）→ 激活移动止损
+        mock_okx_client.get_ticker.return_value = {"last": 3350.0}
+        triggered = await monitor._check_once()
+        assert triggered is False
+        assert monitor._trailing_stop_active is True
+        assert monitor._stats["trailing_stop_activated"] == 1
+
+    @pytest.mark.asyncio
+    async def test_short_trailing_stop_triggers(self, config, mock_risk_manager, mock_executor, mock_okx_client):
+        """空头移动止损激活后价格回升 → 触发"""
+        mock_risk_manager._current_position_side = "short"
+        monitor = PositionMonitor(
+            config=config,
+            risk_manager=mock_risk_manager,
+            executor=mock_executor,
+            okx_client=mock_okx_client,
+        )
+        monitor._running = True
+        monitor.update_position(side="short", size=0.01, entry_price=3500.0,
+                                stop_loss=3570.0, take_profit=3400.0)
+        monitor._trailing_low = 3350.0
+        monitor._trailing_stop_active = True
+        monitor._current_stop_loss = 3350.0 * (1 + config.trailing_stop_distance_pct / 100)  # ~3400.25
+
+        # 价格回升到 3410 > 3400.25 → 触发移动止损
+        mock_okx_client.get_ticker.return_value = {"last": 3410.0}
+        triggered = await monitor._check_once()
+        assert triggered is True
+        assert monitor._stats["trailing_stop_triggered"] == 1
 
     @pytest.mark.asyncio
     async def test_status_report(self, config, mock_risk_manager, mock_executor, mock_okx_client):

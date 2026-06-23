@@ -172,9 +172,10 @@ class PositionMonitor:
             logger.warning(
                 f"多头止损触发: ${current_price:.2f} <= SL ${self._current_stop_loss:.2f}"
             )
+            was_trailing = self._trailing_stop_active
             await self._close_position("多头止损")
             self._stats["stop_loss_triggered"] += 1
-            if self._trailing_stop_active:
+            if was_trailing:
                 self._stats["trailing_stop_triggered"] += 1
             return True
 
@@ -211,8 +212,11 @@ class PositionMonitor:
             logger.warning(
                 f"空头止损触发: ${current_price:.2f} >= SL ${self._current_stop_loss:.2f}"
             )
+            was_trailing = self._trailing_stop_active
             await self._close_position("空头止损")
             self._stats["stop_loss_triggered"] += 1
+            if was_trailing:
+                self._stats["trailing_stop_triggered"] += 1
             return True
 
         # 止盈（价格下跌）
@@ -236,12 +240,18 @@ class PositionMonitor:
         try:
             result = await self.executor.execute_market(side, size_str)
             if result["success"]:
-                # 同步更新 RiskManager
+                # Calculate actual PnL
+                fill_price = result.get("fill_price", 0)
+                if self._position_side == "long":
+                    pnl = (fill_price - self._entry_price) * self._position_size
+                else:
+                    pnl = (self._entry_price - fill_price) * self._position_size
+
                 self.risk.record_trade({
                     "side": side,
                     "size": self._position_size,
-                    "price": result["fill_price"],
-                    "pnl": 0,
+                    "price": fill_price,
+                    "pnl": round(pnl, 2),
                     "order_id": result["order_id"],
                     "symbol": self.executor.symbol,
                     "decision": {"action": side, "reason": reason},

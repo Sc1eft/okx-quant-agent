@@ -286,11 +286,7 @@ class Agent3:
         }
 
     def _suggested_size(self, context: dict) -> float:
-        """根据上下文和风控建议仓位大小
-
-        阶段一: 固定 0.01 ETH × 风控乘数
-        阶段二: 优先使用 DeepSeek 建议的比例
-        """
+        """根据上下文和风控建议仓位大小"""
         multiplier = self.risk.get_position_size_multiplier()
         base_size = 0.01  # 基础 0.01 ETH
         return base_size * multiplier

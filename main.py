@@ -103,6 +103,7 @@ async def main():
     trade_executor = TradeExecutor(
         okx_client=okx_rest,
         symbol=root_config.trading.symbol,
+        config=agent_config,
     )
 
     # ── Phase 2: 持仓监控器 ──

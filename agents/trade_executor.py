@@ -271,11 +271,35 @@ class TradeExecutor:
                 "note": "部分成交—剩余已撤销",
             }
 
-        # ── 4c. 未成交 → 撤销 → 市价单兜底 ──
+        # ── 4c. 未成交 → 撤销 → 确认 → 市价单兜底 ──
         try:
             await asyncio.to_thread(self._client.cancel_order, self.symbol, order_id)
         except Exception as e:
             logger.warning(f"撤单失败: {e}")
+
+        # 确认订单状态（防止撤单瞬间已成交 → 双仓位）
+        try:
+            final_status = await asyncio.to_thread(
+                self._client.get_order, self.symbol, order_id
+            )
+            final_state = final_status.get("state", "")
+            if final_state == "filled":
+                fill_price = float(final_status.get("fillPx", price))
+                acc_fill_sz = float(final_status.get("accFillSz", "0"))
+                logger.info(f"撤单时订单已成交: fill_price={fill_price}")
+                self.last_order = {
+                    "side": side, "size": size, "order_id": order_id,
+                    "fill_price": fill_price, "filled_size": acc_fill_sz,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "note": "撤单时已成交—未发市价单",
+                }
+                return {
+                    "success": True, "order_id": order_id,
+                    "fill_price": fill_price, "filled_size": acc_fill_sz,
+                    "error": "", "note": "撤单前订单已成交",
+                }
+        except Exception:
+            pass
 
         logger.info("限价单未成交，撤销后转市价单")
         result = await self.execute_market(side, size)
