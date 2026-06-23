@@ -93,8 +93,8 @@ class ChangeDetector:
                                              f"MACD {tf} 死叉↓", price))
 
         # 柱线方向反转（正→负 或 负→正）
-        prev_hist = prev.get("histogram", 0)
-        cur_hist = cur.get("histogram", 0)
+        prev_hist = prev.get("histogram")
+        cur_hist = cur.get("histogram")
         if prev_hist is not None and cur_hist is not None:
             if prev_hist < 0 and cur_hist >= 0:
                 if self._can_push(tf, "macd_hist_positive", ts):
@@ -130,11 +130,13 @@ class ChangeDetector:
         # 超买/超卖区进出
         if cur.get("zone") != prev.get("zone"):
             if cur["zone"] == "overbought":
-                signals.append(self._signal("kdj_overbought", tf, "medium", 0.6,
-                                             f"KDJ {tf} 进入超买区 ⚠️", price))
+                if self._can_push(tf, "kdj_overbought", ts):
+                    signals.append(self._signal("kdj_overbought", tf, "medium", 0.6,
+                                                 f"KDJ {tf} 进入超买区 ⚠️", price))
             elif cur["zone"] == "oversold":
-                signals.append(self._signal("kdj_oversold", tf, "medium", 0.6,
-                                             f"KDJ {tf} 进入超卖区 🔻", price))
+                if self._can_push(tf, "kdj_oversold", ts):
+                    signals.append(self._signal("kdj_oversold", tf, "medium", 0.6,
+                                                 f"KDJ {tf} 进入超卖区 🔻", price))
 
         return signals
 
@@ -159,10 +161,11 @@ class ChangeDetector:
                 signals.append(self._signal("boll_break_lower", tf, "high", 0.75,
                                              f"价格突破布林下轨 {tf}", price))
 
-        # 布林收口结束（带宽从挤压扩张）
+        # 布林开始收口（带宽挤压收缩）
         if not prev.get("squeeze") and cur.get("squeeze"):
-            signals.append(self._signal("boll_squeeze", tf, "medium", 0.65,
-                                         f"布林收口 {tf} 🌀", price))
+            if self._can_push(tf, "boll_squeeze", ts):
+                signals.append(self._signal("boll_squeeze", tf, "medium", 0.65,
+                                             f"布林收口 {tf} 🌀", price))
 
         return signals
 
