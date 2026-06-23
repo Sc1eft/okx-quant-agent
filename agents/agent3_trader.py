@@ -50,6 +50,7 @@ class Agent3:
         # 事件缓冲区
         self._event_buffer: list[AgentEvent] = []
         self._last_decision_time: Optional[datetime] = None
+        self._decision_lock = asyncio.Lock()  # re-entrancy guard
 
         # 运行状态
         self._running = False
@@ -87,14 +88,28 @@ class Agent3:
     async def _consume_a(self):
         """消费 Queue A（技术面事件）"""
         while self._running:
-            event = await self.bus.consume_a()
+            try:
+                event = await asyncio.wait_for(self.bus.consume_a(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                logger.exception("_consume_a 异常，1s 后重试")
+                await asyncio.sleep(1)
+                continue
             self._stats["events_received_a"] += 1
             await self._on_event(event)
 
     async def _consume_b(self):
         """消费 Queue B（新闻/基本面事件）"""
         while self._running:
-            event = await self.bus.consume_b()
+            try:
+                event = await asyncio.wait_for(self.bus.consume_b(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                logger.exception("_consume_b 异常，1s 后重试")
+                await asyncio.sleep(1)
+                continue
             self._stats["events_received_b"] += 1
             await self._on_event(event)
 
@@ -129,62 +144,65 @@ class Agent3:
 
     async def _make_decision(self):
         """执行一次完整的交易决策周期"""
-        if not self._event_buffer:
+        if self._decision_lock.locked():
             return
+        async with self._decision_lock:
+            if not self._event_buffer:
+                return
 
-        self._last_decision_time = datetime.now(timezone.utc)
-        events = list(self._event_buffer)
-        self._event_buffer.clear()
+            self._last_decision_time = datetime.now(timezone.utc)
+            events = list(self._event_buffer)
+            self._event_buffer.clear()
 
-        # ── 1. 构建上下文摘要 ──
-        context = await self._build_context(events)
+            # ── 1. 构建上下文摘要 ──
+            context = await self._build_context(events)
 
-        # ── 2. Layer 1 风控检查 ──
-        size_eth = self._suggested_size(context)
-        side = "buy" if context.get("suggested_direction") == "long" else "sell"
-        ok, reason = self.risk.check_layer1(side, size_eth, context.get("current_price", 0))
-        if not ok:
-            logger.info(f"Layer 1 拒绝: {reason}")
-            self._stats["trades_skipped"] += 1
-            return
+            # ── 2. Layer 1 风控检查 ──
+            size_eth = self._suggested_size(context)
+            side = "buy" if context.get("suggested_direction") == "long" else "sell"
+            ok, reason = self.risk.check_layer1(side, size_eth, context.get("current_price", 0))
+            if not ok:
+                logger.info(f"Layer 1 拒绝: {reason}")
+                self._stats["trades_skipped"] += 1
+                return
 
-        # ── 3. 调用 DeepSeek ──
-        self._stats["deepseek_calls"] += 1
-        decision = self.deepseek.analyze(context)
+            # ── 3. 调用 DeepSeek ──
+            self._stats["deepseek_calls"] += 1
+            decision = await asyncio.to_thread(self.deepseek.analyze, context)
 
-        if decision["action"] == "hold":
-            logger.info(f"DeepSeek 建议持有: {decision.get('reason', '')}")
-            self._stats["trades_skipped"] += 1
-            return
+            if decision["action"] == "hold":
+                logger.info(f"DeepSeek 建议持有: {decision.get('reason', '')}")
+                self._stats["trades_skipped"] += 1
+                return
 
-        # ── 4. 执行交易 ──
-        logger.info(f"DeepSeek 决策: {decision['action']} (信心 {decision['confidence']}%)")
-        self._stats["trades_executed"] += 1
+            # ── 4. 执行交易 ──
+            logger.info(f"DeepSeek 决策: {decision['action']} (信心 {decision['confidence']}%)")
+            self._stats["trades_executed"] += 1
 
-        trade_side = "buy" if decision["action"] == "buy" else "sell"
-        trade_result = await self.executor.execute_safe(
-            side=trade_side,
-            size_eth=size_eth,
-            signal_price=context.get("current_price", 0),
-            prefer_limit=True,
-        )
+            trade_side = "buy" if decision["action"] == "buy" else "sell"
+            trade_result = await self.executor.execute_safe(
+                side=trade_side,
+                size_eth=size_eth,
+                signal_price=context.get("current_price", 0),
+                prefer_limit=True,
+            )
 
-        # ── 5. Layer 3 记录 ──
-        if trade_result["success"]:
-            self.risk.record_trade({
-                "side": trade_side,
-                "size": size_eth,
-                "price": trade_result["fill_price"],
-                "pnl": 0,
-                "order_id": trade_result["order_id"],
-                "symbol": self.executor.symbol,
-                "decision": decision,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-            logger.info(f"✅ 交易成功: {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}")
-        else:
-            self.risk.report_api_error()
-            logger.error(f"❌ 交易失败: {trade_result['error']}")
+            # ── 5. Layer 3 记录 ──
+            if trade_result["success"]:
+                self.risk.record_trade({
+                    "side": trade_side,
+                    "size": size_eth,
+                    "price": trade_result["fill_price"],
+                    "pnl": 0,
+                    "order_id": trade_result["order_id"],
+                    "symbol": self.executor.symbol,
+                    "decision": decision,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+                logger.info(f"交易成功: {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}")
+            else:
+                self.risk.report_api_error()
+                logger.error(f"交易失败: {trade_result['error']}")
 
     async def _build_context(self, events: list[AgentEvent]) -> dict:
         """从事件列表构建 DeepSeek 上下文"""
@@ -193,6 +211,8 @@ class Agent3:
         current_price = 0.0
 
         for e in events:
+            if not isinstance(e.data, dict):
+                continue
             d = e.data
             if e.source == "agent1":
                 desc = d.get("description", "")
