@@ -109,19 +109,15 @@ class Agent1:
         # 转为 DataFrame（pandas，与 eth_ai_analysis.py 兼容格式）
         import pandas as pd
         df = pd.DataFrame(history)
-        df.rename(columns={
-            "timestamp": "timestamp",
-            "open": "open",
-            "high": "high",
-            "low": "low",
-            "close": "close",
-            "volume": "volume",
-        }, inplace=True)
 
         # 计算指标
-        macd = _calc_macd(df)
-        kdj = _calc_kdj(df)
-        boll = _calc_boll(df)
+        try:
+            macd = _calc_macd(df)
+            kdj = _calc_kdj(df)
+            boll = _calc_boll(df)
+        except Exception as e:
+            logger.error(f"指标计算失败 [{timeframe}]: {e}")
+            return
 
         self._latest_indicators[timeframe] = {
             "macd": macd,
