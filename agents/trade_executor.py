@@ -195,6 +195,13 @@ class TradeExecutor:
                     logger.warning(
                         f"滑点 {slippage:.2f}% 超过 {self.config.max_slippage_pct}% 上限"
                     )
+                    self.last_order = {
+                        "side": side, "size": size, "order_id": order_id,
+                        "fill_price": fill_price, "filled_size": acc_fill_sz,
+                        "slippage_pct": round(slippage, 2),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "note": f"滑点 {slippage:.2f}% 超过上限 {self.config.max_slippage_pct}%",
+                    }
                     self.failed_orders += 1
                     return {
                         "success": False,
@@ -205,6 +212,13 @@ class TradeExecutor:
                         "error": f"滑点 {slippage:.2f}% 超过上限 {self.config.max_slippage_pct}%",
                     }
 
+            # Update last_order
+            self.last_order = {
+                "side": side, "size": size, "order_id": order_id,
+                "fill_price": fill_price, "filled_size": acc_fill_sz,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
             return {
                 "success": True,
                 "order_id": order_id,
@@ -213,25 +227,47 @@ class TradeExecutor:
                 "error": "",
             }
 
-        # ── 4b. 部分成交 ──
+        # ── 4b. 部分成交 — 等待额外时间再撤单 ──
         if state == "partially_filled":
-            # 撤销剩余部分
+            # 等待额外时间让剩余部分成交
+            extra_wait = self.config.partial_fill_timeout_seconds
+            logger.info(f"部分成交，等待 {extra_wait}s 让剩余部分成交...")
+            await asyncio.sleep(extra_wait)
+
+            # 再次查询订单状态
             try:
-                await asyncio.to_thread(self._client.cancel_order, self.symbol, order_id)
-            except Exception as e:
-                logger.warning(f"部分成交后撤单失败: {e}")
+                order_status = await asyncio.to_thread(
+                    self._client.get_order, self.symbol, order_id
+                )
+                state = order_status.get("state", "")
+                acc_fill_sz = float(order_status.get("accFillSz", "0"))
+                fill_px_str = order_status.get("fillPx", "") or order_status.get("avgPx", "")
+            except Exception:
+                pass
+
+            # 如果仍未完全成交，撤销剩余
+            if state != "filled":
+                try:
+                    await asyncio.to_thread(self._client.cancel_order, self.symbol, order_id)
+                except Exception as e:
+                    logger.warning(f"部分成交后撤单失败: {e}")
 
             fill_price = float(fill_px_str) if fill_px_str else float(price)
             filled_pct = (acc_fill_sz / float(size)) * 100 if float(size) > 0 else 0
             logger.info(f"限价单部分成交: {acc_fill_sz}/{size} ({filled_pct:.0f}%)")
 
+            # Update last_order
+            self.last_order = {
+                "side": side, "size": size, "order_id": order_id,
+                "fill_price": fill_price, "filled_size": acc_fill_sz,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "note": f"部分成交—剩余已撤销 ({filled_pct:.0f}%)",
+            }
+
             return {
-                "success": True,
-                "order_id": order_id,
-                "fill_price": fill_price,
-                "filled_size": acc_fill_sz,
-                "filled_pct": round(filled_pct, 1),
-                "error": "",
+                "success": True, "order_id": order_id,
+                "fill_price": fill_price, "filled_size": acc_fill_sz,
+                "filled_pct": round(filled_pct, 1), "error": "",
                 "note": "部分成交—剩余已撤销",
             }
 
