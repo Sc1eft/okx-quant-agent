@@ -57,6 +57,7 @@ class Agent1:
 
         # 运行状态
         self._running = False
+        self._pending_tasks: set[asyncio.Task] = set()
         self._stats = {
             "ticks_received": 0,
             "bars_completed": 0,
@@ -77,6 +78,9 @@ class Agent1:
         """停止 Agent 1"""
         self._running = False
         await self.ws_client.disconnect()
+        # 等待所有待处理的发布任务完成
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
         logger.info("Agent 1 已停止")
 
     def _on_tick(self, msg: dict):
@@ -148,8 +152,10 @@ class Agent1:
                 confidence=confidence,
                 urgency=urgency,
             )
-            # 非阻塞发布
-            asyncio.ensure_future(self.bus.publish_a(event))
+            # 跟踪异步发布任务，防止 task 泄漏
+            task = asyncio.create_task(self.bus.publish_a(event))
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
             self._stats["signals_pushed"] += 1
             logger.info(f"📊 Agent 1 push: {sig['description']} (urgency={urgency})")
 

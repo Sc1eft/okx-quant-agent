@@ -14,9 +14,7 @@ class AgentSystemConfig:
 
     # ── Agent 1: Technical Analyst ──
     agent1_enabled: bool = True
-    agent1_interval_seconds: float = 1.0  # tick 收集间隔
     agent1_timeframes: list[str] = field(default_factory=lambda: ["15m", "1h", "1d"])
-    agent1_min_kline_count: int = 100  # 启动时需预取的最少 K 线数
     agent1_change_cooldown_seconds: float = 60.0  # 同一信号的最小推送间隔
 
     # ── Agent 2: News Collector ──
@@ -33,7 +31,6 @@ class AgentSystemConfig:
     agent3_max_daily_loss_usdt: float = 100.0
     agent3_max_consecutive_losses: int = 3
     agent3_max_position_eth: float = 0.5  # 单笔最大 0.5 ETH
-    agent3_consecutive_loss_cooldown_multiplier: float = 0.5  # 连亏后仓位减半
 
     # ── WebSocket ──
     ws_symbol: str = "ETH-USDT"

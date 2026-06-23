@@ -85,7 +85,8 @@ class KlineBuilder:
                 "volume": 0.0,
             }
             # 检查新秒级 K 线是否跨越了标准周期边界
-            self._check_boundary_flip()
+            # 使用 self._last_boundary 避免与 _aggregate_sec_candle 重复触发
+            self._check_new_sec_boundary()
         else:
             # 同秒内更新
             self._sec_candle["high"] = max(self._sec_candle["high"], price)
@@ -138,11 +139,15 @@ class KlineBuilder:
                 c["close"] = sec["close"]
                 c["volume"] = c.get("volume", 0) + sec.get("volume", 0)
 
-    def _check_boundary_flip(self):
-        """当新秒级 K 线的跨越了标准周期边界时，完成旧周期 K 线
+    def _check_new_sec_boundary(self):
+        """检查新秒级 K 线是否跨过标准周期边界
 
-        此方法在 _aggregate_sec_candle 之后调用，处理因 tick 稀疏
-        （如直接跳过整个周期）导致的边界翻转。
+        在 _aggregate_sec_candle 之后调用。_aggregate_sec_candle 已经将
+        _last_boundary 更新为旧秒级 K 线的边界。如果新秒级 K 线的边界与
+        之不同，说明跨越了边界，需要完成当前周期 K 线并开始新的周期 K 线。
+
+        由于 _aggregate_sec_candle 先更新了 _last_boundary，此方法不会
+        与其重复检测（double-trigger）。
         """
         sec = self._sec_candle
         if sec is None:
@@ -160,7 +165,7 @@ class KlineBuilder:
                 if self.on_completed_bar:
                     self.on_completed_bar(tf, dict(old))
 
-                # 新建周期 K 线（使用当前秒级 K 线的数据）
+                # 新建周期 K 线（使用新秒级 K 线的数据）
                 self._candles[tf] = {
                     "timestamp": boundary,
                     "open": sec["open"],

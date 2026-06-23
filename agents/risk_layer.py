@@ -20,6 +20,8 @@ Layer 3 — 交易后监控:
 from __future__ import annotations
 
 import logging
+import sqlite3
+import os
 from datetime import datetime, timezone, timedelta, date
 from typing import Optional, Tuple
 
@@ -49,6 +51,9 @@ class RiskManager:
 
         # ── Layer 3 状态 ──
         self._daily_trades: list[dict] = []
+
+        # ── SQLite 持久化 ──
+        self._init_db()
 
     # ── Layer 1: 交易前检查 ──
 
@@ -129,10 +134,11 @@ class RiskManager:
     # ── Layer 3: 交易后记录 ──
 
     def record_trade(self, trade_data: dict):
-        """记录一笔交易"""
+        """记录一笔交易（写入内存 + SQLite）"""
         self._last_trade_time = datetime.now(timezone.utc)
         self._daily_trade_count += 1
         self._daily_trades.append(trade_data)
+        self._log_trade_sync(trade_data)
 
         # 更新仓位信息
         side = trade_data.get("side", "")
@@ -196,3 +202,52 @@ class RiskManager:
             "position_eth": round(self._current_position_eth, 6),
             "position_side": self._current_position_side,
         }
+
+    # ── SQLite 持久化 ──
+
+    def _init_db(self):
+        """初始化 SQLite 数据库和表"""
+        db_path = self.config.db_path
+        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+        try:
+            self._db_conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._db_conn.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    side TEXT,
+                    size REAL,
+                    price REAL,
+                    pnl REAL,
+                    order_id TEXT,
+                    symbol TEXT,
+                    decision TEXT
+                )
+            """)
+            self._db_conn.commit()
+        except Exception as e:
+            logger.error(f"SQLite 初始化失败: {e}")
+            self._db_conn = None
+
+    def _log_trade_sync(self, trade_data: dict):
+        """同步写入交易到 SQLite"""
+        if not self._db_conn:
+            return
+        try:
+            self._db_conn.execute(
+                "INSERT INTO trades (timestamp, side, size, price, pnl, order_id, symbol, decision) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    trade_data.get("timestamp", ""),
+                    trade_data.get("side", ""),
+                    trade_data.get("size", 0),
+                    trade_data.get("price", 0),
+                    trade_data.get("pnl", 0),
+                    trade_data.get("order_id", ""),
+                    trade_data.get("symbol", ""),
+                    str(trade_data.get("decision", {})),
+                )
+            )
+            self._db_conn.commit()
+        except Exception as e:
+            logger.error(f"SQLite 写入失败: {e}")

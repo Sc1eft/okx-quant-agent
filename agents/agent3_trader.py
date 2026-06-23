@@ -71,6 +71,7 @@ class Agent3:
     async def run(self):
         """启动 Agent 3 主循环"""
         self._running = True
+        self._last_decision_time = datetime.now(timezone.utc)  # 初始化 debounce 计时起点
         self._stats["start_time"] = datetime.now(timezone.utc).isoformat()
         logger.info("Agent 3 (交易员) 启动")
 
@@ -154,19 +155,10 @@ class Agent3:
             events = list(self._event_buffer)
             self._event_buffer.clear()
 
-            # ── 1. 构建上下文摘要 ──
+            # ── 1. 构建上下文摘要（不含方向） ──
             context = await self._build_context(events)
 
-            # ── 2. Layer 1 风控检查 ──
-            size_eth = self._suggested_size(context)
-            side = "buy" if context.get("suggested_direction") == "long" else "sell"
-            ok, reason = self.risk.check_layer1(side, size_eth, context.get("current_price", 0))
-            if not ok:
-                logger.info(f"Layer 1 拒绝: {reason}")
-                self._stats["trades_skipped"] += 1
-                return
-
-            # ── 3. 调用 DeepSeek ──
+            # ── 2. 调用 DeepSeek ──
             self._stats["deepseek_calls"] += 1
             decision = await asyncio.to_thread(self.deepseek.analyze, context)
 
@@ -175,11 +167,21 @@ class Agent3:
                 self._stats["trades_skipped"] += 1
                 return
 
-            # ── 4. 执行交易 ──
+            # ── 3. 从 DeepSeek 输出获取交易方向 ──
+            trade_side = "buy" if decision["action"] == "buy" else "sell"
+            size_eth = self._suggested_size(context)
+
+            # ── 4. Layer 1 风控检查（使用真实交易方向） ──
+            ok, reason = self.risk.check_layer1(trade_side, size_eth, context.get("current_price", 0))
+            if not ok:
+                logger.info(f"Layer 1 拒绝: {reason}")
+                self._stats["trades_skipped"] += 1
+                return
+
+            # ── 5. 执行交易 ──
             logger.info(f"DeepSeek 决策: {decision['action']} (信心 {decision['confidence']}%)")
             self._stats["trades_executed"] += 1
 
-            trade_side = "buy" if decision["action"] == "buy" else "sell"
             trade_result = await self.executor.execute_safe(
                 side=trade_side,
                 size_eth=size_eth,
@@ -187,7 +189,7 @@ class Agent3:
                 prefer_limit=True,
             )
 
-            # ── 5. Layer 3 记录 ──
+            # ── 6. Layer 3 记录 ──
             if trade_result["success"]:
                 self.risk.record_trade({
                     "side": trade_side,
@@ -228,6 +230,7 @@ class Agent3:
                 agent2_lines.append(f"[{source} w={weight:.2f}] {title}")
 
         return {
+            "symbol": self.root_config.trading.symbol,
             "position_direction": self._current_position["side"],
             "position_size": self._current_position["size"],
             "entry_price": self._current_position["entry_price"],

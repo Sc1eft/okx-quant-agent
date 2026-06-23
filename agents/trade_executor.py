@@ -134,24 +134,26 @@ class TradeExecutor:
         # 等待成交
         await asyncio.sleep(timeout_seconds)
 
-        # TODO(phase2): 调用 OKX 撤单 API 撤销未成交的限价单
-        # 目前简单返回限价单已提交
+        # TODO(phase2): 调用 OKX 撤单 API 撤销未成交的限价单，并查询实际成交价
+        # 当前返回的 fill_price 为预估（限价单挂牌价），非实际成交价
         self.last_order = {
             "side": side,
             "size": size,
             "order_id": order_id,
-            "fill_price": float(price),
+            "fill_price": float(price),      # TODO(phase2): 实际成交价需调用撤单API查询
             "filled_size": float(size),
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "note": "限价单已提交",
+            "note": "限价单已提交(成交价为预估)",
+            "estimated": True,
         }
 
         return {
             "success": True,
             "order_id": order_id,
-            "fill_price": float(price),
+            "fill_price": float(price),      # 预估成交价（限价单挂牌价）
             "filled_size": float(size),
             "error": "",
+            "estimated": True,
         }
 
     async def execute_safe(
