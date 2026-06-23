@@ -26,7 +26,6 @@ sys.path.insert(0, "")
 from config import Config, CONFIG_PATH
 from agents.config import AgentSystemConfig
 from agents.event_bus import EventBus
-from agents.okx_ws import OKXWebSocketClient
 from agents.risk_layer import RiskManager
 from agents.trade_executor import TradeExecutor
 from agents.deepseek_caller import DeepSeekTrader
@@ -50,6 +49,18 @@ def setup_logging(level: str = "INFO", log_file: str = ""):
         format=fmt,
         handlers=handlers,
     )
+
+
+def _install_signal_handlers(loop, shutdown_cb):
+    """Install signal handlers — works on both Unix and Windows."""
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, shutdown_cb)
+    except NotImplementedError:
+        # Windows fallback: signal.signal works but not on the event loop
+        import signal as _signal
+        _signal.signal(_signal.SIGINT, lambda *_: loop.call_soon_threadsafe(shutdown_cb))
+        _signal.signal(_signal.SIGTERM, lambda *_: loop.call_soon_threadsafe(shutdown_cb))
 
 
 async def main():
@@ -141,12 +152,7 @@ async def main():
         logger.info("收到关闭信号，正在停止所有 Agent...")
         stop_event.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _shutdown)
-        except NotImplementedError:
-            # Windows 不支持 add_signal_handler
-            pass
+    _install_signal_handlers(loop, _shutdown)
 
     # 等待 stop 信号
     await stop_event.wait()
