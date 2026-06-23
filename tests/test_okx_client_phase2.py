@@ -104,3 +104,8 @@ class TestGetOrderBook:
         call_kwargs = client._request.call_args
         assert call_kwargs[0][0] == "GET"
         assert "/api/v5/market/books" in call_kwargs[0][1]
+        # Verify params were passed (keyword args, second arg is params dict)
+        kwargs = call_kwargs[1] if len(call_kwargs) > 1 else {}
+        params = kwargs.get("params", {})
+        assert params.get("instId") == "ETH-USDT"
+        assert params.get("sz") == "5"

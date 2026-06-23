@@ -13,6 +13,7 @@ import random
 import time
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlencode
 
 import httpx
 from httpx import RemoteProtocolError, ConnectError, TimeoutException
@@ -196,7 +197,7 @@ class OKXClient:
         fillPx, fillSz, accFillSz, side, instId
         """
         ts = self._timestamp()
-        path = f"/api/v5/trade/order?instId={symbol}&ordId={order_id}"
+        path = f"/api/v5/trade/order?{urlencode({'instId': symbol, 'ordId': order_id})}"
         headers = self._sign("GET", path, "", ts)
         resp = self._request("GET", path, headers=headers)
         data = resp.json()
