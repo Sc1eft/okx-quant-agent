@@ -3,7 +3,7 @@
 
 支持:
   - 限价单优先（10s 未成交撤单 → 市价单兜底）
-  - 滑点保护（成交价偏离信号价 > 0.3% 取消剩余）
+  - TODO(phase2): 滑点保护、撤单重下
   - 重试机制（网络失败重试 3 次）
   - 部分成交处理
   - 交易日志
@@ -177,15 +177,16 @@ class TradeExecutor:
 
     def _extract_fill_price(self, order_result) -> float:
         """从 OKX 下单返回值中提取成交价"""
-        if isinstance(order_result, list) and len(order_result) > 0:
-            item = order_result[0]
-            fill_px = item.get("fillPx", "")
-            if fill_px:
-                return float(fill_px)
-            # 部分成交
-            avg_px = item.get("avgPx", "")
-            if avg_px:
-                return float(avg_px)
+        item = self._normalize_result(order_result)
+        if not item:
+            return 0.0
+        fill_px = item.get("fillPx", "")
+        if fill_px:
+            return float(fill_px)
+        # 部分成交
+        avg_px = item.get("avgPx", "")
+        if avg_px:
+            return float(avg_px)
         return 0.0
 
     def get_stats(self) -> dict:
