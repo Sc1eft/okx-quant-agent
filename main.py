@@ -105,6 +105,16 @@ async def main():
         symbol=root_config.trading.symbol,
     )
 
+    # ── Phase 2: 持仓监控器 ──
+    from agents.position_monitor import PositionMonitor
+
+    position_monitor = PositionMonitor(
+        config=agent_config,
+        risk_manager=risk_manager,
+        executor=trade_executor,
+        okx_client=okx_rest,
+    ) if agent_config.agent3_enabled else None
+
     # DeepSeek 决策器
     deepseek = DeepSeekTrader(
         api_key=root_config.agent.api_key,
@@ -123,6 +133,8 @@ async def main():
         risk_manager=risk_manager,
         trade_executor=trade_executor,
         root_config=root_config,
+        position_monitor=position_monitor,
+        okx_client=okx_rest,
     ) if agent_config.agent3_enabled else None
 
     logger.info(f"Agent 1 (技术)={'✅' if agent1 else '❌'}")
@@ -138,8 +150,15 @@ async def main():
     if agent3:
         tasks.append(asyncio.create_task(agent3.run(), name="agent3"))
 
+    # ── 启动持仓监控器（Phase 2） ──
+    if position_monitor:
+        tasks.append(asyncio.create_task(position_monitor.run(), name="position_monitor"))
+
     # ── 启动状态监控协程 ──
-    tasks.append(asyncio.create_task(_status_reporter(agent1, agent2, agent3), name="monitor"))
+    tasks.append(asyncio.create_task(
+        _status_reporter(agent1, agent2, agent3, position_monitor=position_monitor),
+        name="monitor",
+    ))
 
     logger.info(f"共 {len(tasks)} 个协程已启动，开始运行...")
     logger.info("=" * 50)
@@ -165,6 +184,10 @@ async def main():
     if agent3:
         await agent3.stop()
 
+    # 停止持仓监控器
+    if position_monitor:
+        await position_monitor.stop()
+
     # 取消任务
     for t in tasks:
         t.cancel()
@@ -173,7 +196,7 @@ async def main():
     logger.info("所有 Agent 已停止。再见！")
 
 
-async def _status_reporter(agent1, agent2, agent3):
+async def _status_reporter(agent1, agent2, agent3, position_monitor=None):
     """定期报告系统状态（每 60s）"""
     while True:
         await asyncio.sleep(60)
@@ -193,6 +216,12 @@ async def _status_reporter(agent1, agent2, agent3):
             lines.append(f"  Agent 3: running={s3['running']}, "
                          f"trades={s3.get('trades_executed',0)}, "
                          f"skipped={s3.get('trades_skipped',0)}")
+        if position_monitor:
+            pm = position_monitor.get_status()
+            lines.append(f"  Position Monitor: running={pm['running']}, "
+                         f"has_position={pm['has_position']}, "
+                         f"SL={pm['stop_loss_triggered']} TP={pm['take_profit_triggered']} "
+                         f"trailing={pm['trailing_stop_triggered']}")
         logging.getLogger("main").info("\n".join(lines))
 
 
