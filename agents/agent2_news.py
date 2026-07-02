@@ -1,19 +1,20 @@
 """
-Agent 2 — 信息收集员（新闻 + 基本面）
+Agent 2 — 信息收集员（新闻 + 链上数据）
 
 职责:
   1. 定时（每 60s）从 4 个 RSS 源获取新闻
   2. 对每条新闻进行影响权重评分
   3. 高权重新闻推送到 Queue B
   4. 去重（已推送过的新闻不再推送）
+  5. 【Phase 3】链上数据收集（Gas费 / 巨鲸转账 / 吃单比 / 资金费率）
 
 权重评分规则（来自设计文档）:
-  - ETH 大额转入交易所 (>5000 ETH)  0.9  — 阶段一暂缺（阶段三）
+  - ETH 大额转入交易所 (>5000 ETH)  0.9  — 阶段三通过 Whale Alert 实现
   - 重大监管新闻                   0.8
   - ETH2.0/升级相关                 0.7
-  - 巨鲸地址异动                   0.6
+  - 巨鲸地址异动                   0.6  — 阶段三通过 Whale Alert 实现
   - 普通市场新闻                   0.3
-  - Gas 费异常                     0.4  — 阶段一暂缺
+  - Gas 费异常                     0.4  — 阶段三实现
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ if "." not in sys.path and "" not in sys.path:
 
 from agents.event_bus import EventBus, AgentEvent, AgentEventType
 from agents.config import AgentSystemConfig
+from agents.onchain_collector import OnchainCollector
 from frontend.utils.eth_news import _fetch_crypto_news
 
 logger = logging.getLogger("agent2")
@@ -77,29 +79,56 @@ def _score_news_item(title: str, source: str) -> float:
 
 
 class Agent2:
-    """Agent 2 — 新闻信息收集员"""
+    """Agent 2 — 信息收集员（新闻 + 链上数据）"""
 
-    def __init__(self, config: AgentSystemConfig, event_bus: EventBus):
+    def __init__(self, config: AgentSystemConfig, event_bus: EventBus, okx_client=None):
         self.config = config
         self.bus = event_bus
 
-        # 已推送新闻的标题 set（去重）
-        self._seen_titles: set[str] = set()
+        # 已推送新闻的标题 list（去重，保留插入顺序供 Agent 4 复盘使用）
+        self._seen_titles: list[str] = []
         self._running = False
+
+        # Phase 3: 链上数据收集器
+        self._onchain: Optional[OnchainCollector] = None
+        if okx_client and config.agent2_onchain_enabled:
+            self._onchain = OnchainCollector(
+                okx_client=okx_client,
+                config=config,
+                event_bus=event_bus,
+            )
 
         self._stats = {
             "fetch_count": 0,
             "news_seen": 0,
             "news_pushed": 0,
+            "onchain_events_pushed": 0,
             "start_time": "",
         }
 
     async def run(self):
-        """启动 Agent 2 主循环"""
+        """启动 Agent 2 主循环 — 新闻 + 链上数据并发运行"""
         self._running = True
         self._stats["start_time"] = datetime.now(timezone.utc).isoformat()
         logger.info("Agent 2 (信息收集员) 启动")
 
+        tasks = [asyncio.create_task(self._news_loop(), name="agent2_news")]
+
+        # Phase 3: 链上数据收集
+        if self._onchain:
+            tasks.append(asyncio.create_task(self._onchain.run(), name="agent2_onchain"))
+
+        await asyncio.gather(*tasks)
+
+    async def stop(self):
+        """停止 Agent 2"""
+        self._running = False
+        if self._onchain:
+            await self._onchain.stop()
+        logger.info("Agent 2 已停止")
+
+    async def _news_loop(self):
+        """新闻抓取主循环"""
         while self._running:
             try:
                 await self._fetch_and_score()
@@ -108,11 +137,6 @@ class Agent2:
 
             # 等待下一次抓取
             await asyncio.sleep(self.config.agent2_fetch_interval_seconds)
-
-    async def stop(self):
-        """停止 Agent 2"""
-        self._running = False
-        logger.info("Agent 2 已停止")
 
     async def _fetch_and_score(self):
         """抓取新闻 → 评分 → 推送"""
@@ -132,7 +156,7 @@ class Agent2:
 
             if title in self._seen_titles:
                 continue
-            self._seen_titles.add(title)
+            self._seen_titles.append(title)
             self._stats["news_seen"] += 1
 
             # 权重评分
@@ -159,10 +183,22 @@ class Agent2:
 
         # 控制 seen 集合大小
         if len(self._seen_titles) > 1000:
-            self._seen_titles = set(list(self._seen_titles)[-500:])
+            self._seen_titles = self._seen_titles[-500:]
 
     def get_status(self) -> dict:
+        onchain_status = {}
+        onchain_events = 0
+        if self._onchain:
+            onchain_status = self._onchain.get_status()
+            onchain_events = onchain_status.get("events_pushed", 0)
+
         return {
             "running": self._running,
+            "onchain": onchain_status,
+            "onchain_events_pushed": onchain_events,
             **self._stats,
         }
+
+    def get_recent_news(self, n: int = 10) -> list[dict]:
+        """返回最近 N 条新闻（供 Agent 4 复盘使用）"""
+        return list(self._seen_titles)[-n:] if isinstance(self._seen_titles, list) else []
