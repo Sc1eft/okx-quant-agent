@@ -32,6 +32,7 @@ from agents.deepseek_caller import DeepSeekTrader
 from agents.agent1_technical import Agent1
 from agents.agent2_news import Agent2
 from agents.agent3_trader import Agent3
+from agents.status_writer import write_agent_status
 from okx_client import OKXClient
 
 
@@ -124,9 +125,31 @@ async def main():
         temperature=root_config.agent.temperature,
     )
 
+    # ── Phase 4: 复盘报告生成器 + Agent 4 复盘改进 ──
+    from agents.review_generator import ReviewGenerator
+    from agents.agent4_reviewer import Agent4Reviewer
+
+    review_gen = ReviewGenerator(
+        config=agent_config, db_path=agent_config.db_path,
+    ) if agent_config.review_generator_enabled else None
+
     # ── 创建 Agent 实例 ──
     agent1 = Agent1(config=agent_config, event_bus=event_bus) if agent_config.agent1_enabled else None
-    agent2 = Agent2(config=agent_config, event_bus=event_bus) if agent_config.agent2_enabled else None
+    agent2 = Agent2(
+        config=agent_config, event_bus=event_bus,
+        okx_client=okx_rest,  # Phase 3: 链上数据
+    ) if agent_config.agent2_enabled else None
+
+    # Agent 4：先创建复盘报告生成器，再创建 Agent 4 复盘改进
+    agent4_reviewer = Agent4Reviewer(
+        config=agent_config,
+        deepseek=deepseek,
+        db_path=agent_config.db_path,
+        kline_builder=agent1.kline_builder if agent1 else None,
+        agent1=agent1,
+        agent2=agent2,
+    ) if agent_config.agent4_enabled else None
+
     agent3 = Agent3(
         config=agent_config,
         event_bus=event_bus,
@@ -136,11 +159,14 @@ async def main():
         root_config=root_config,
         position_monitor=position_monitor,
         okx_client=okx_rest,
+        review_generator=review_gen,  # Phase 4
+        agent4_reviewer=agent4_reviewer,  # Agent 4（替代 param_adapter）
     ) if agent_config.agent3_enabled else None
 
     logger.info(f"Agent 1 (技术)={'✅' if agent1 else '❌'}")
     logger.info(f"Agent 2 (新闻)={'✅' if agent2 else '❌'}")
     logger.info(f"Agent 3 (交易)={'✅' if agent3 else '❌'}")
+    logger.info(f"Agent 4 (复盘)={'✅' if agent4_reviewer else '❌'}")
 
     # ── 启动所有 Agent ──
     tasks = []
@@ -150,6 +176,8 @@ async def main():
         tasks.append(asyncio.create_task(agent2.run(), name="agent2"))
     if agent3:
         tasks.append(asyncio.create_task(agent3.run(), name="agent3"))
+    if agent4_reviewer:
+        tasks.append(asyncio.create_task(agent4_reviewer.run(), name="agent4"))
 
     # ── 启动持仓监控器（Phase 2） ──
     if position_monitor:
@@ -157,7 +185,7 @@ async def main():
 
     # ── 启动状态监控协程 ──
     tasks.append(asyncio.create_task(
-        _status_reporter(agent1, agent2, agent3, position_monitor=position_monitor),
+        _status_reporter(agent1, agent2, agent3, agent4_reviewer=agent4_reviewer, position_monitor=position_monitor, mode=args.mode),
         name="monitor",
     ))
 
@@ -184,6 +212,8 @@ async def main():
         await agent2.stop()
     if agent3:
         await agent3.stop()
+    if agent4_reviewer:
+        await agent4_reviewer.stop()
 
     # 停止持仓监控器
     if position_monitor:
@@ -197,11 +227,12 @@ async def main():
     logger.info("所有 Agent 已停止。再见！")
 
 
-async def _status_reporter(agent1, agent2, agent3, position_monitor=None):
-    """定期报告系统状态（每 60s）"""
+async def _status_reporter(agent1, agent2, agent3, agent4_reviewer=None, position_monitor=None, mode="paper"):
+    """定期报告系统状态并写入 JSON（每 60s）"""
     while True:
         await asyncio.sleep(60)
         lines = ["\n--- 系统状态 ---"]
+        s1 = s2 = s3 = s4 = pm = {}
         if agent1:
             s1 = agent1.get_status()
             lines.append(f"  Agent 1: running={s1['running']}, "
@@ -211,19 +242,38 @@ async def _status_reporter(agent1, agent2, agent3, position_monitor=None):
             s2 = agent2.get_status()
             lines.append(f"  Agent 2: running={s2['running']}, "
                          f"fetches={s2.get('fetch_count',0)}, "
-                         f"pushed={s2.get('news_pushed',0)}")
+                         f"pushed={s2.get('news_pushed',0)}, "
+                         f"onchain={s2.get('onchain_events_pushed',0)}")
         if agent3:
             s3 = agent3.get_status()
             lines.append(f"  Agent 3: running={s3['running']}, "
                          f"trades={s3.get('trades_executed',0)}, "
-                         f"skipped={s3.get('trades_skipped',0)}")
+                         f"skipped={s3.get('trades_skipped',0)}, "
+                         f"composite={s3.get('last_composite_score','—')}, "
+                         f"win_rate={s3.get('last_win_rate','—')}%")
         if position_monitor:
             pm = position_monitor.get_status()
             lines.append(f"  Position Monitor: running={pm['running']}, "
                          f"has_position={pm['has_position']}, "
                          f"SL={pm['stop_loss_triggered']} TP={pm['take_profit_triggered']} "
                          f"trailing={pm['trailing_stop_triggered']}")
+        if agent4_reviewer:
+            s4 = agent4_reviewer.get_status()
+            lines.append(f"  Agent 4: running={s4['running']}, "
+                         f"reviews={s4.get('total_reviews',0)}, "
+                         f"adjustments={s4.get('total_adjustments',0)}, "
+                         f"errors={s4.get('total_adjustment_errors',0)}")
         logging.getLogger("main").info("\n".join(lines))
+
+        # 写入状态 JSON 供 Streamlit 面板读取
+        write_agent_status(
+            agent1_status=s1 if agent1 else None,
+            agent2_status=s2 if agent2 else None,
+            agent3_status=s3 if agent3 else None,
+            agent4_reviewer_status=s4 if agent4_reviewer else None,
+            position_monitor_status=pm if position_monitor else None,
+            mode=mode,
+        )
 
 
 if __name__ == "__main__":
