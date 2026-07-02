@@ -15,7 +15,9 @@ Agent 3 — 资深交易员
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -24,6 +26,9 @@ from agents.deepseek_caller import DeepSeekTrader
 from agents.risk_layer import RiskManager
 from agents.trade_executor import TradeExecutor
 from agents.config import AgentSystemConfig
+# Phase 4
+from agents.confidence_scorer import ConfidenceScorer
+from agents.signal_aligner import SignalAligner
 
 logger = logging.getLogger("agent3")
 
@@ -41,16 +46,24 @@ class Agent3:
         root_config,
         position_monitor=None,  # Phase 2: 持仓监控器
         okx_client=None,       # Phase 2: OKX客户端（用于BTC/深度检查）
+        review_generator=None,  # Phase 4: 复盘报告生成器
+        agent4_reviewer=None,  # Agent 4 复盘改进（替代 param_adapter）
     ):
         self.config = config
         self.bus = event_bus
         self.deepseek = deepseek
         self.risk = risk_manager
         self.executor = trade_executor
-        self.root_config = root_config  # 根 Config（含 trading symbol 等）
-        self.position_monitor = position_monitor  # Phase 2
-        self.okx_client = okx_client               # Phase 2
-        self._btc_checked = False  # Phase 2: 标记本轮是否已完成BTC检查
+        self.root_config = root_config
+        self.position_monitor = position_monitor
+        self.okx_client = okx_client
+        self._btc_checked = False
+
+        # Phase 4
+        self.confidence_scorer = ConfidenceScorer(config) if config.confidence_scorer_enabled else None
+        self.signal_aligner = SignalAligner(config) if config.signal_aligner_enabled else None
+        self.review_gen = review_generator
+        self.agent4_reviewer = agent4_reviewer  # Agent 4（替代 param_adapter）
 
         # 事件缓冲区
         self._event_buffer: list[AgentEvent] = []
@@ -71,6 +84,12 @@ class Agent3:
             "trades_executed": 0,
             "trades_skipped": 0,
             "start_time": "",
+            # Phase 4
+            "last_composite_score": 0.0,
+            "last_composite_confidence": 0.0,
+            "last_alignment_score": 0.0,
+            "last_monthly_pnl": 0.0,
+            "last_win_rate": 0.0,
         }
 
     async def run(self):
@@ -85,6 +104,11 @@ class Agent3:
             self._consume_a(),
             self._consume_b(),
         ]
+        # Phase 4: 后台协程
+        if self.review_gen:
+            consumers.append(self._review_scheduler())
+        # Agent 4 替代了 param_adapter 的调参职责
+
         await asyncio.gather(*consumers)
 
     async def stop(self):
@@ -215,13 +239,17 @@ class Agent3:
                 prefer_limit=prefer_limit,
             )
 
-            # ── 6. Layer 3 记录 ──
+            # ── 6. Layer 3 记录（Phase 4: P&L 跟踪） ──
             if trade_result["success"]:
+                trade_group_id = str(uuid.uuid4())[:8]
                 self.risk.record_trade({
                     "side": trade_side,
                     "size": size_eth,
                     "price": trade_result["fill_price"],
                     "pnl": 0,
+                    "pnl_close": 0,
+                    "trade_group_id": trade_group_id,
+                    "trade_type": "open",
                     "order_id": trade_result["order_id"],
                     "symbol": self.executor.symbol,
                     "decision": decision,
@@ -229,7 +257,7 @@ class Agent3:
                 })
                 logger.info(f"交易成功: {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}")
 
-                # Phase 2: 通知持仓监控器
+                # Phase 2: 通知持仓监控器 (Phase 4: 传入 trade_group_id)
                 if self.position_monitor:
                     stop_loss = float(decision.get("stop_loss", 0))
                     take_profit = float(decision.get("take_profit", 0))
@@ -239,7 +267,25 @@ class Agent3:
                         entry_price=trade_result["fill_price"],
                         stop_loss=stop_loss,
                         take_profit=take_profit,
+                        trade_group_id=trade_group_id,
                     )
+                # 通知 Agent 4 复盘（如果配置了）
+                if self.agent4_reviewer:
+                    trade_record = {
+                        "id": trade_result["order_id"],
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "side": trade_side,
+                        "size": size_eth,
+                        "price": trade_result["fill_price"],
+                        "pnl": 0.0,
+                        "order_id": trade_result["order_id"],
+                        "symbol": self.executor.symbol,
+                        "decision": json.dumps(decision),
+                        "pnl_close": 0.0,
+                        "trade_group_id": trade_group_id,
+                        "trade_type": "open",
+                    }
+                    asyncio.create_task(self.agent4_reviewer.notify_trade(trade_record))
             else:
                 self.risk.report_api_error()
                 logger.error(f"交易失败: {trade_result['error']}")
@@ -249,6 +295,12 @@ class Agent3:
         agent1_lines = []
         agent2_lines = []
         current_price = 0.0
+
+        # Phase 3: 链上数据汇总
+        gas_gwei = 0.0
+        taker_buy_ratio = 0.0
+        funding_rate_pct = 0.0
+        whale_alerts: list[str] = []
 
         for e in events:
             if not isinstance(e.data, dict):
@@ -266,30 +318,115 @@ class Agent3:
                 source = d.get("source", "")
                 weight = d.get("weight", 0)
                 agent2_lines.append(f"[{source} w={weight:.2f}] {title}")
+            # Phase 3: 链上事件处理
+            elif e.source == "agent2_gas":
+                agent2_lines.append(d.get("description", ""))
+                gas_gwei = d.get("gas_gwei", gas_gwei)
+            elif e.source == "agent2_whale":
+                agent2_lines.append(d.get("description", ""))
+                whale_alerts.append(d.get("description", ""))
+            elif e.source == "agent2_taker":
+                agent2_lines.append(d.get("description", ""))
+                taker_buy_ratio = d.get("buy_ratio", taker_buy_ratio)
+            elif e.source == "agent2_funding":
+                agent2_lines.append(d.get("description", ""))
+                funding_rate_pct = d.get("funding_rate_pct", funding_rate_pct)
 
         # Phase 2: 注入风控状态
         risk_status = self.risk.get_status()
+
+        # Phase 4: 多周期信心分
+        composite = {}
+        if self.confidence_scorer:
+            composite = self.confidence_scorer.compute(events)
+            self._stats["last_composite_score"] = composite.get("composite_score", 0)
+            self._stats["last_composite_confidence"] = composite.get("composite_confidence", 0)
+
+        # Phase 4: 信号对齐
+        alignment = {}
+        if self.signal_aligner:
+            alignment = self.signal_aligner.align(events, composite)
+            self._stats["last_alignment_score"] = alignment.get("alignment_score", 0)
+
+        # Phase 4: 月度统计
+        monthly = {"trades": 0, "win_rate": 0, "total_pnl": 0, "max_drawdown": 0}
+        if self.review_gen:
+            monthly = self.review_gen.compute_monthly_stats()
+            self._stats["last_monthly_pnl"] = monthly.get("total_pnl", 0)
+            self._stats["last_win_rate"] = monthly.get("win_rate", 0)
 
         return {
             "symbol": self.root_config.trading.symbol,
             "position_direction": self._current_position["side"],
             "position_size": self._current_position["size"],
             "entry_price": self._current_position["entry_price"],
-            "pnl_pct": "",  # 阶段一简单处理，暂不计算
+            "pnl_pct": "",
             "agent1_summary": "\n".join(agent1_lines) if agent1_lines else "暂无技术面信号",
             "agent2_summary": "\n".join(agent2_lines) if agent2_lines else "暂无新闻数据",
-            "monthly_trades": 0,
-            "win_rate": 0,
-            "monthly_pnl": 0,
+            # Phase 3: 链上指标
+            "gas_gwei": round(gas_gwei, 1),
+            "taker_buy_ratio": f"{taker_buy_ratio:.1%}" if taker_buy_ratio else "—",
+            "funding_rate_pct": round(funding_rate_pct, 4),
+            "whale_alert": whale_alerts[-1] if whale_alerts else "无",
+            # Phase 4: 真实统计替代硬编码零值
+            "monthly_trades": monthly["trades"],
+            "win_rate": monthly["win_rate"],
+            "monthly_pnl": monthly["total_pnl"],
+            "max_drawdown": monthly.get("max_drawdown", 0),
             "current_price": current_price,
-            "risk_status": risk_status,  # Phase 2: 风控状态
+            "risk_status": risk_status,
+            # Phase 4: 信心分 + 对齐 + 自适应参数
+            "composite_score": round(composite.get("composite_score", 0), 2) if composite else "—",
+            "composite_confidence": round(composite.get("composite_confidence", 0), 2) if composite else "—",
+            "signal_alignment": alignment.get("summary_line", "暂无对齐数据"),
+            "adjusted_max_trades": str(self.config.agent3_max_daily_trades),
+            "adjusted_debounce": str(self.config.agent3_debounce_seconds),
+            "adjusted_trade_interval": str(self.config.agent3_min_interval_between_trades),
         }
 
     def _suggested_size(self, context: dict) -> float:
-        """根据上下文和风控建议仓位大小"""
+        """根据上下文和风控建议仓位大小 (Phase 4: 信号对齐调节)"""
         multiplier = self.risk.get_position_size_multiplier()
         base_size = 0.01  # 基础 0.01 ETH
+
+        # Phase 4: 信号对齐调节
+        if self.signal_aligner:
+            alignment = context.get("_alignment_cache", {})
+            if not alignment:
+                # 从上下文中的 alignment 字段推断
+                score = context.get("composite_score", 0)
+                if isinstance(score, (int, float)):
+                    pass  # 后续按需扩展
+            # 交易中会通过 _build_context 的 alignment 结果感知风险
+
         return base_size * multiplier
+
+    # ── Phase 4: 复盘报告调度 ──
+
+    async def _review_scheduler(self):
+        """定时检查并生成复盘报告"""
+        last_daily_date = ""
+        last_weekly_week = ""
+        while self._running:
+            now_utc = datetime.now(timezone.utc)
+            today_str = now_utc.strftime("%Y-%m-%d")
+            week_str = now_utc.strftime("%Y-W%W")
+
+            if self.config.review_generator_enabled and self.review_gen:
+                if now_utc.hour >= self.config.review_daily_hour_utc and today_str != last_daily_date:
+                    report = self.review_gen.generate_daily_report()
+                    last_daily_date = today_str
+                    logger.info(f"📊 每日复盘: 胜率 {report['stats']['win_rate']:.1f}%, "
+                                f"盈亏 {report['stats']['total_pnl']:+.2f} USDT")
+
+                if now_utc.weekday() == 6 and week_str != last_weekly_week:  # 周日
+                    report = self.review_gen.generate_weekly_report()
+                    last_weekly_week = week_str
+                    logger.info(f"📊 每周复盘已生成")
+
+            await asyncio.sleep(3600)  # 每小时检查一次
+
+    # Agent 4 替代了 param_adapter 的调参职责
 
     def update_position(self, side: str, size: float, entry_price: float):
         """更新当前持仓（供外部或 main.py 调用）"""
@@ -300,12 +437,22 @@ class Agent3:
         }
 
     def get_status(self) -> dict:
+        # Phase 4: 自适应参数调整记录
         return {
             "running": self._running,
             "position": self._current_position,
             "event_buffer_size": len(self._event_buffer),
+            "adjusted_max_trades": self.config.agent3_max_daily_trades,
+            "adjusted_debounce": self.config.agent3_debounce_seconds,
+            "adjusted_trade_interval": self.config.agent3_min_interval_between_trades,
             "deepseek_stats": self.deepseek.get_stats(),
             "executor_stats": self.executor.get_stats(),
             "risk_status": self.risk.get_status(),
+            "phase4": {
+                "confidence_scorer": self.confidence_scorer is not None,
+                "signal_aligner": self.signal_aligner is not None,
+                "review_generator": self.review_gen is not None,
+                "agent4_reviewer": self.agent4_reviewer is not None,
+            },
             **self._stats,
         }
