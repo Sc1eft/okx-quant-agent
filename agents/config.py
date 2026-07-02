@@ -111,13 +111,6 @@ class AgentSystemConfig:
     review_report_dir: str = "data/reviews"
     review_report_min_trades: int = 5
 
-    # ParamAdapter（参数自适应）
-    param_adapter_enabled: bool = True
-    param_adapter_min_trades_for_adjust: int = 10
-    param_adapter_adjust_interval_hours: int = 24
-    param_adapter_max_trades_range: list = field(default_factory=lambda: [5, 20])
-    param_adapter_win_rate_target: float = 0.50
-
     # ── Agent 1（新增可调参数，原写死在 change_detector.py）──
     agent1_change_cooldown: float = 60.0
 

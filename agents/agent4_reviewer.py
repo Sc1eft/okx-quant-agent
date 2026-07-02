@@ -356,7 +356,7 @@ class Agent4Reviewer:
         for r in prev_reviews[-3:]:
             ts = r.get("timestamp", "")[:19]
             summary = r.get("summary", "")[:80]
-            applied = r.get("adjustments_applied", [])
+            applied = r.get("adjustments", [])
             params_changed = ", ".join(
                 a.get("param", "?") for a in applied
             )

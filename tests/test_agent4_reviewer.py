@@ -227,7 +227,7 @@ def test_review_prompt_format():
         onchain={"last_gas_gwei": 45, "last_taker_buy_ratio": 0.48,
                  "last_funding_rate": -0.0005, "last_whale_count": 2},
         prev_reviews=[{"timestamp": "2026-07-02T10:00:00", "summary": "上轮复盘",
-                       "adjustments_applied": [{"param": "agent3_debounce_seconds"}]}],
+                       "adjustments": [{"param": "agent3_debounce_seconds"}]}],
     )
     assert "【最近1笔交易】" in prompt
     assert "ETH ETF" in prompt
