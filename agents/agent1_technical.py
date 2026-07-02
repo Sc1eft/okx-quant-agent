@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -33,6 +34,8 @@ from frontend.utils.eth_ai_analysis import _calc_macd, _calc_kdj, _calc_boll
 
 logger = logging.getLogger("agent1")
 
+MAX_SIGNAL_HISTORY = 20
+
 
 class Agent1:
     """Agent 1 — 技术分析师"""
@@ -41,7 +44,7 @@ class Agent1:
         self.config = config
         self.bus = event_bus
         self.kline_builder = KlineBuilder()
-        self.change_detector = ChangeDetector()
+        self.change_detector = ChangeDetector(default_cooldown=config.agent1_change_cooldown)
         self.ws_client = OKXWebSocketClient(
             symbols=[config.ws_symbol],
             reconnect_delay_base=config.ws_reconnect_delay_base,
@@ -50,6 +53,10 @@ class Agent1:
 
         # 指标缓存（用于在 on_bar 中快速获取最新值）
         self._latest_indicators: dict[str, dict] = {}
+
+        # Phase 4+: 逐周期 K 线计数 + 信号历史
+        self._bar_counts: dict[str, int] = {}
+        self._signal_history: deque[dict] = deque(maxlen=MAX_SIGNAL_HISTORY)
 
         # 回调绑定
         self.kline_builder.on_completed_bar = self._on_bar
@@ -99,15 +106,18 @@ class Agent1:
     def _on_bar(self, timeframe: str, bar: dict):
         """处理新完成的 K 线"""
         self._stats["bars_completed"] += 1
+        self._bar_counts[timeframe] = self._bar_counts.get(timeframe, 0) + 1
         logger.debug(f"新K线完成: {timeframe} @ {bar['close']:.2f}")
 
         # 收集该周期所有历史 K 线
         history = self.kline_builder.get_history(timeframe)
         history.append(bar)  # 把刚完成的这根也算进去
 
-        # 需要至少 30 根 K 线才能计算可靠指标
-        if len(history) < 30:
-            logger.debug(f"{timeframe} 数据不足 ({len(history)}/{30}), 跳过指标计算")
+        # 各周期所需最小 K 线数（自适应：短周期快出信号，长周期多积累）
+        _MIN_BARS = {"3m": 10, "5m": 10, "15m": 15, "1h": 15, "1d": 30}
+        min_bars = _MIN_BARS.get(timeframe, 15)
+        if len(history) < min_bars:
+            logger.debug(f"{timeframe} 数据不足 ({len(history)}/{min_bars}), 跳过指标计算")
             return
 
         # 转为 DataFrame（pandas，与 eth_ai_analysis.py 兼容格式）
@@ -157,6 +167,15 @@ class Agent1:
             self._pending_tasks.add(task)
             task.add_done_callback(self._pending_tasks.discard)
             self._stats["signals_pushed"] += 1
+            self._signal_history.append({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "signal": sig.get("signal", ""),
+                "timeframe": sig.get("timeframe", ""),
+                "urgency": urgency,
+                "confidence": confidence,
+                "description": sig.get("description", ""),
+                "price": sig.get("price", 0),
+            })
             logger.info(f"📊 Agent 1 push: {sig['description']} (urgency={urgency})")
 
     def get_status(self) -> dict:
@@ -169,4 +188,37 @@ class Agent1:
                 for tf in self.kline_builder.TIMEFRAMES
             },
             "latest_indicators": self._latest_indicators,
+            "bar_counts": dict(self._bar_counts),
+            "signal_history": list(self._signal_history),
+        }
+
+    def get_recent_signal_stats(self) -> dict:
+        """返回近期信号统计数据（供 Agent 4 复盘使用）"""
+        signals = list(self._signal_history)
+        total = len(signals)
+        if total == 0:
+            return {"total_signals": 0, "by_timeframe": {},
+                    "by_direction": {}, "by_urgency": {}}
+
+        by_tf: dict[str, int] = {}
+        by_dir: dict[str, int] = {}
+        by_urg: dict[str, int] = {}
+        for s in signals:
+            tf = s.get("timeframe", "unknown")
+            by_tf[tf] = by_tf.get(tf, 0) + 1
+            desc = s.get("description", "")
+            if "bullish" in desc or "buy" in desc or "金叉" in desc or "超卖" in desc:
+                by_dir["buy"] = by_dir.get("buy", 0) + 1
+            elif "bearish" in desc or "sell" in desc or "死叉" in desc or "超买" in desc:
+                by_dir["sell"] = by_dir.get("sell", 0) + 1
+            else:
+                by_dir["neutral"] = by_dir.get("neutral", 0) + 1
+            urg = s.get("urgency", "medium")
+            by_urg[urg] = by_urg.get(urg, 0) + 1
+
+        return {
+            "total_signals": total,
+            "by_timeframe": by_tf,
+            "by_direction": by_dir,
+            "by_urgency": by_urg,
         }

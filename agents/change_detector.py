@@ -33,13 +33,13 @@ class ChangeDetector:
     }
     """
 
-    def __init__(self):
+    def __init__(self, default_cooldown: float = 60.0):
         # 存储上次各周期各指标的值 {timeframe: {indicator_key: value}}
         self._prev: dict[str, dict] = {}
         # 冷却计时 {timeframe_signal_type: last_push_timestamp_s}
         self._cooldown: dict[str, float] = {}
         # 默认冷却时间（秒）
-        self._default_cooldown: float = 60.0
+        self._default_cooldown = default_cooldown
 
     def set_cooldown(self, signal_key: str, seconds: float):
         """设置某类型信号的冷却时间"""
