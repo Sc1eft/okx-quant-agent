@@ -157,6 +157,52 @@ class DeepSeekTrader:
             logger.error(f"DeepSeek API 调用失败: {e}")
             return self._fallback_decision(context.get("current_price", 0))
 
+    # ── Agent 4 复盘分析 ──
+
+    def analyze_review(self, prompt_text: str) -> dict:
+        """用 DeepSeek 分析复盘数据（Agent 4 专用）
+
+        Args:
+            prompt_text: 完整的复盘 Prompt（已含所有上下文）
+
+        Returns:
+            解析后的 JSON dict，含 review_id, summary, market_regime, param_adjustments
+            失败时返回 {"summary": "分析失败", "param_adjustments": []}
+        """
+        self.total_calls += 1
+        try:
+            resp = self._client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个量化交易复盘分析 AI。分析交易数据，输出 JSON 格式的参数调整建议。"},
+                    {"role": "user", "content": prompt_text},
+                ],
+                temperature=0.4,  # 复盘分析用略高温度以获取多样性洞察
+                max_tokens=3000,
+            )
+            content = resp.choices[0].message.content or ""
+            return self._parse_json_response(content)
+        except Exception as e:
+            self.total_errors += 1
+            logger.error(f"DeepSeek 复盘分析失败: {e}")
+            return {"summary": "分析失败", "param_adjustments": []}
+
+    def _parse_json_response(self, content: str) -> dict:
+        """从 DeepSeek 响应中提取 JSON（通用方法）"""
+        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+        else:
+            start = content.find("{")
+            end = content.rfind("}")
+            if start != -1 and end != -1:
+                content = content[start:end + 1]
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning(f"DeepSeek JSON 解析失败: {content[:200]}")
+            return {"summary": "JSON 解析失败", "param_adjustments": []}
+
     def _parse_response(self, content: str, current_price: float) -> dict:
         """解析 DeepSeek 返回的 JSON"""
 
