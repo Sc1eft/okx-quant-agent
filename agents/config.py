@@ -111,6 +111,13 @@ class AgentSystemConfig:
     review_report_dir: str = "data/reviews"
     review_report_min_trades: int = 5
 
+    # ── 交易报告 + ServerChan 推送 ──
+    report_enabled: bool = True
+    report_dir: str = "data/reports"
+    report_min_trades_for_analysis: int = 1  # 最少几笔交易才做 AI 分析
+    serverchan_enabled: bool = False
+    serverchan_sendkey: str = ""
+
     # ── Agent 1（新增可调参数，原写死在 change_detector.py）──
     agent1_change_cooldown: float = 60.0
 
