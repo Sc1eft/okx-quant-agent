@@ -17,9 +17,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from agents.event_bus import EventBus, AgentEvent, AgentEventType
@@ -49,6 +51,7 @@ class Agent3:
         okx_client=None,       # Phase 2: OKX客户端（用于BTC/深度检查）
         review_generator=None,  # Phase 4: 复盘报告生成器
         agent4_reviewer=None,  # Agent 4 复盘改进（替代 param_adapter）
+        notifier=None,        # 交易报告推送器（ServerChan）
     ):
         self.config = config
         self.bus = event_bus
@@ -65,6 +68,7 @@ class Agent3:
         self.signal_aligner = SignalAligner(config) if config.signal_aligner_enabled else None
         self.review_gen = review_generator
         self.agent4_reviewer = agent4_reviewer  # Agent 4（替代 param_adapter）
+        self.notifier = notifier  # 交易报告推送器
 
         # 事件缓冲区
         self._event_buffer: list[AgentEvent] = []
@@ -449,33 +453,75 @@ class Agent3:
     # ── Phase 4: 复盘报告调度 ──
 
     async def _review_scheduler(self):
-        """定时检查并生成复盘报告"""
+        """定时检查并生成复盘报告 + 推送微信"""
         last_daily_date = ""
         last_weekly_week = ""
+        last_monthly_month = ""
         while self._running:
             now_utc = datetime.now(timezone.utc)
             today_str = now_utc.strftime("%Y-%m-%d")
             week_str = now_utc.strftime("%Y-W%W")
+            month_str = now_utc.strftime("%Y-%m")
 
             if self.config.review_generator_enabled and self.review_gen:
+                # ── 每日报告 (UTC 16:00) ──
                 if now_utc.hour >= self.config.review_daily_hour_utc and today_str != last_daily_date:
                     self._current_activity = "📊 生成每日复盘报告…"
                     self._last_activity_time = time.time()
                     report = self.review_gen.generate_daily_report()
                     last_daily_date = today_str
+                    self._push_report_if_needed(report, "daily", today_str)
                     self._current_activity = f"📊 每日复盘完成: 胜率 {report['stats']['win_rate']:.1f}%"
                     self._last_activity_time = time.time()
                     logger.info(f"📊 每日复盘: 胜率 {report['stats']['win_rate']:.1f}%, "
                                 f"盈亏 {report['stats']['total_pnl']:+.2f} USDT")
 
-                if now_utc.weekday() == 6 and week_str != last_weekly_week:  # 周日
+                # ── 每周报告 (周日 + UTC 16:00) ──
+                if now_utc.weekday() == 6 and now_utc.hour >= self.config.review_daily_hour_utc and week_str != last_weekly_week:
                     self._current_activity = "📊 生成每周复盘报告…"
                     self._last_activity_time = time.time()
                     report = self.review_gen.generate_weekly_report()
                     last_weekly_week = week_str
-                    logger.info(f"📊 每周复盘已生成")
+                    self._push_report_if_needed(report, "weekly", week_str)
+                    logger.info("📊 每周复盘已生成")
+
+                # ── 每月报告 (1日 + UTC 16:00) ──
+                if now_utc.day == 1 and now_utc.hour >= self.config.review_daily_hour_utc and month_str != last_monthly_month:
+                    self._current_activity = "📊 生成月度复盘报告…"
+                    self._last_activity_time = time.time()
+                    report = self.review_gen.generate_monthly_report()
+                    last_monthly_month = month_str
+                    self._push_report_if_needed(report, "monthly", month_str)
+                    logger.info("📊 月度复盘已生成")
 
             await asyncio.sleep(3600)  # 每小时检查一次
+
+    def _push_report_if_needed(self, report: dict, report_type: str, date_str: str):
+        """如果配置了推送且未推送，推送报告到微信"""
+        if not self.notifier or not self.config.serverchan_enabled:
+            return
+        if report.get("pushed"):
+            return
+
+        try:
+            ok = self.notifier.push_report(report_type, date_str, report)
+            if ok:
+                report["pushed"] = True
+                report["push_time"] = datetime.now(timezone.utc).isoformat()
+                self._rewrite_report_file(report, report_type, date_str)
+        except Exception as e:
+            logger.warning(f"推送报告失败: {e}")
+
+    def _rewrite_report_file(self, report: dict, report_type: str, date_str: str):
+        """更新报告文件的 pushed 标记"""
+        base_dir = Path(self.config.report_dir) / report_type
+        filename = f"{report_type}_{date_str}.json"
+        path = base_dir / filename
+        try:
+            with open(str(path), "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+        except OSError as e:
+            logger.warning(f"更新报告文件推送状态失败: {e}")
 
     # Agent 4 替代了 param_adapter 的调参职责
 
