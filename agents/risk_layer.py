@@ -138,11 +138,21 @@ class RiskManager:
     # ── Layer 3: 交易后记录 ──
 
     def record_trade(self, trade_data: dict):
-        """记录一笔交易（写入内存 + SQLite）"""
+        """记录一笔交易（写入内存 + SQLite）
+
+        Phase 4 新增字段:
+            trade_group_id (str): 开平配对 ID
+            trade_type (str): 'open' / 'close'
+            pnl_close (float): 平仓时实际盈亏
+        """
         self._last_trade_time = datetime.now(timezone.utc)
         self._daily_trade_count += 1
         self._daily_trades.append(trade_data)
         self._log_trade_sync(trade_data)
+
+        # Phase 4: 平仓时更新对应开仓记录的 pnl_close
+        if trade_data.get("trade_type") == "close" and trade_data.get("trade_group_id"):
+            self._update_pnl_close(trade_data)
 
         # 更新仓位信息
         side = trade_data.get("side", "")
@@ -164,6 +174,20 @@ class RiskManager:
             self._record_loss(abs(pnl))
         elif pnl > 0:
             self._consecutive_losses = 0  # 盈利后重置连亏
+
+    def _update_pnl_close(self, trade_data: dict):
+        """平仓时更新对应开仓记录的 pnl_close"""
+        if not self._db_conn:
+            return
+        try:
+            self._db_conn.execute(
+                "UPDATE trades SET pnl_close = ? "
+                "WHERE trade_group_id = ? AND trade_type = 'open'",
+                (trade_data.get("pnl", 0), trade_data["trade_group_id"])
+            )
+            self._db_conn.commit()
+        except Exception as e:
+            logger.debug(f"更新 pnl_close 失败: {e}")
 
     def _record_loss(self, loss_usdt: float):
         """记录亏损"""
@@ -326,7 +350,7 @@ class RiskManager:
     # ── SQLite 持久化 ──
 
     def _init_db(self):
-        """初始化 SQLite 数据库和表"""
+        """初始化 SQLite 数据库和表（含 Phase 4 迁移）"""
         db_path = self.config.db_path
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         try:
@@ -344,19 +368,30 @@ class RiskManager:
                     decision TEXT
                 )
             """)
+            # Phase 4 迁移: 新增 P&L 跟踪列
+            for col, col_def in [
+                ("pnl_close", "REAL DEFAULT 0"),
+                ("trade_group_id", "TEXT DEFAULT ''"),
+                ("trade_type", "TEXT DEFAULT 'open'"),
+            ]:
+                try:
+                    self._db_conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_def}")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
             self._db_conn.commit()
         except Exception as e:
             logger.error(f"SQLite 初始化失败: {e}")
             self._db_conn = None
 
     def _log_trade_sync(self, trade_data: dict):
-        """同步写入交易到 SQLite"""
+        """同步写入交易到 SQLite（含 Phase 4 P&L 列）"""
         if not self._db_conn:
             return
         try:
             self._db_conn.execute(
-                "INSERT INTO trades (timestamp, side, size, price, pnl, order_id, symbol, decision) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO trades (timestamp, side, size, price, pnl, order_id, symbol, decision, "
+                "pnl_close, trade_group_id, trade_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     trade_data.get("timestamp", ""),
                     trade_data.get("side", ""),
@@ -366,6 +401,9 @@ class RiskManager:
                     trade_data.get("order_id", ""),
                     trade_data.get("symbol", ""),
                     str(trade_data.get("decision", {})),
+                    trade_data.get("pnl_close", 0),
+                    trade_data.get("trade_group_id", ""),
+                    trade_data.get("trade_type", "open"),
                 )
             )
             self._db_conn.commit()

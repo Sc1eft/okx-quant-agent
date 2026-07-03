@@ -122,8 +122,8 @@ st.subheader("🔧 策略参数调整")
 # Make editable copies of strategy params
 editable = {
     "ma_cross": {
-        "short_window": cfg.strategy.short_window,
-        "long_window": cfg.strategy.long_window,
+        "short_window": cfg.strategy.ma_short_window,
+        "long_window": cfg.strategy.ma_long_window,
         "stop_loss_pct": cfg.strategy.stop_loss_pct,
         "take_profit_pct": cfg.strategy.take_profit_pct,
         "trailing_stop_activation": cfg.strategy.trailing_stop_activation,
@@ -132,8 +132,8 @@ editable = {
     },
     "rsi_mean_reversion": {
         "rsi_period": cfg.strategy.rsi_period,
-        "oversold": cfg.strategy.oversold,
-        "overbought": cfg.strategy.overbought,
+        "oversold": cfg.strategy.rsi_oversold,
+        "overbought": cfg.strategy.rsi_overbought,
         "stop_loss_pct": cfg.strategy.stop_loss_pct,
         "take_profit_pct": cfg.strategy.take_profit_pct,
         "trailing_stop_activation": cfg.strategy.trailing_stop_activation,
@@ -141,8 +141,8 @@ editable = {
         "position_timeout_bars": cfg.strategy.position_timeout_bars,
     },
     "breakout": {
-        "period": cfg.strategy.period,
-        "atr_multiplier": cfg.strategy.atr_multiplier,
+        "period": cfg.strategy.breakout_period,
+        "atr_multiplier": cfg.strategy.breakout_atr_multiplier,
         "stop_loss_pct": cfg.strategy.stop_loss_pct,
         "take_profit_pct": cfg.strategy.take_profit_pct,
         "trailing_stop_activation": cfg.strategy.trailing_stop_activation,

@@ -11,7 +11,7 @@ import base64
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -222,6 +222,49 @@ class OKXClient:
             "ts": raw.get("ts", ""),
         }
 
+    # ── Phase 3: 链上数据（公开，无需签名） ──
+
+    def get_taker_volume(self, symbol: str = "ETH-USDT") -> dict:
+        """获取吃单量（买卖比）
+
+        https://www.okx.com/docs-v5/en/#rubik-stat-taker-volume
+        公开接口，无需签名。
+        返回: {"sellVol": "...", "buyVol": "...", "ts": "...", ...}
+        """
+        resp = self._request(
+            "GET", "/api/v5/rubik/stat/taker-volume",
+            params={"instId": symbol, "instType": "SPOT", "period": "5m", "ccy": "ETH"},
+        )
+        data = resp.json()
+        self._check_api_response(data)
+        raw = data.get("data", [[None, "0", "0"]])[0]  # [ts, sellVol, buyVol]
+        return {
+            "sell_vol_ccy": raw[2] if len(raw) > 2 else "0",  # buyVol ≈ 买方量
+            "buy_vol_ccy": raw[1] if len(raw) > 1 else "0",   # sellVol ≈ 卖方量
+            "sell_vol": str(raw[1]),
+            "buy_vol": str(raw[2]),
+            "ts": str(raw[0]) if raw[0] else "",
+        }
+
+    def get_funding_rate(self, symbol: str = "ETH-USDT-SWAP") -> dict:
+        """获取永续合约资金费率
+
+        https://www.okx.com/docs-v5/en/#rest-api-public-data-get-funding-rate
+        公开接口，无需签名。
+        返回: {"fundingRate": "...", "fundingTime": "...", "nextFundingRate": "...", ...}
+        """
+        resp = self._request("GET", "/api/v5/public/funding-rate", params={"instId": symbol})
+        data = resp.json()
+        self._check_api_response(data)
+        raw = data.get("data", [{}])[0]
+        return {
+            "funding_rate": raw.get("fundingRate", ""),
+            "funding_time": raw.get("fundingTime", ""),
+            "next_funding_rate": raw.get("nextFundingRate", ""),
+            "next_funding_time": raw.get("nextFundingTime", ""),
+            "funding_cap": raw.get("fundingCap", ""),
+        }
+
     @staticmethod
     def _normalize_order_data(raw: list) -> dict:
         """标准化订单 API 返回值"""
@@ -251,7 +294,7 @@ class OKXClient:
 
     @staticmethod
     def _timestamp() -> str:
-        return datetime.utcnow().isoformat()[:-3] + "Z"
+        return datetime.now(timezone.utc).isoformat()[:-3] + "Z"
 
     @staticmethod
     def _tf_to_bar(tf: str) -> str:

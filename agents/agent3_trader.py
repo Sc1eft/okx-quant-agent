@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -72,6 +73,8 @@ class Agent3:
 
         # 运行状态
         self._running = False
+        self._current_activity = ""
+        self._last_activity_time = 0.0
         self._current_position = {
             "side": "none",
             "size": 0.0,
@@ -117,16 +120,25 @@ class Agent3:
 
     async def _consume_a(self):
         """消费 Queue A（技术面事件）"""
+        idle_ticks = 0
         while self._running:
             try:
                 event = await asyncio.wait_for(self.bus.consume_a(), timeout=1.0)
             except asyncio.TimeoutError:
+                idle_ticks += 1
+                if idle_ticks % 5 == 0:
+                    buf = len(self._event_buffer)
+                    self._current_activity = f"⏳ 等待信号 | 缓冲 {buf} 事件"
+                    self._last_activity_time = time.time()
                 continue
             except Exception:
                 logger.exception("_consume_a 异常，1s 后重试")
                 await asyncio.sleep(1)
                 continue
+            idle_ticks = 0
             self._stats["events_received_a"] += 1
+            self._current_activity = f"📨 收到技术信号 (#{self._stats['events_received_a']})"
+            self._last_activity_time = time.time()
             await self._on_event(event)
 
     async def _consume_b(self):
@@ -141,18 +153,23 @@ class Agent3:
                 await asyncio.sleep(1)
                 continue
             self._stats["events_received_b"] += 1
+            self._current_activity = f"📨 收到新闻/链上事件 (#{self._stats['events_received_b']})"
+            self._last_activity_time = time.time()
             await self._on_event(event)
 
     async def _on_event(self, event: AgentEvent):
         """收到新事件后的处理"""
         self._event_buffer.append(event)
+        buf = len(self._event_buffer)
 
-        # 高优先级事件 → 立即决策
         if event.urgency == "high":
+            self._current_activity = f"⚡ 高优事件触发即时决策 ({buf} 缓冲)"
+            self._last_activity_time = time.time()
             logger.info(f"高优先级事件触发立即决策: {event.type}")
             await self._make_decision()
         else:
-            # 低优先级 → 攒批或超时触发
+            self._current_activity = f"📥 缓冲事件 ({buf}/5, debounce {self.config.agent3_debounce_seconds}s)"
+            self._last_activity_time = time.time()
             await self._maybe_debounce()
 
     async def _maybe_debounce(self):
@@ -175,6 +192,7 @@ class Agent3:
     async def _make_decision(self):
         """执行一次完整的交易决策周期"""
         if self._decision_lock.locked():
+            self._current_activity = "⏳ 上次决策进行中，跳过"
             return
         async with self._decision_lock:
             if not self._event_buffer:
@@ -186,35 +204,52 @@ class Agent3:
 
             # ── 0. BTC 波动检查（Phase 2） ──
             if self.okx_client and hasattr(self.risk, 'check_btc_volatility_async'):
+                self._current_activity = "🔍 检查 BTC 波动…"
+                self._last_activity_time = time.time()
                 ok, reason = await self.risk.check_btc_volatility_async(self.okx_client)
                 if not ok:
+                    self._current_activity = f"⏭ BTC 波动检查跳过: {reason[:40]}"
+                    self._last_activity_time = time.time()
                     logger.info(f"BTC 波动检查拒绝: {reason}")
                     self._stats["trades_skipped"] += 1
                     return
 
             # ── 1. 构建上下文摘要（不含方向） ──
+            self._current_activity = "🧠 构建 DeepSeek 上下文 ({len(events)} 事件)"
+            self._last_activity_time = time.time()
             context = self._build_context(events)
 
             # ── 2. 调用 DeepSeek ──
+            self._current_activity = "🤔 等待 DeepSeek 决策…"
+            self._last_activity_time = time.time()
             self._stats["deepseek_calls"] += 1
             decision = await asyncio.to_thread(self.deepseek.analyze, context)
 
             if decision["action"] == "hold":
-                logger.info(f"DeepSeek 建议持有: {decision.get('reason', '')}")
+                reason = decision.get('reason', '')
+                self._current_activity = f"⏭ DeepSeek 建议持有: {reason[:40]}"
+                self._last_activity_time = time.time()
+                logger.info(f"DeepSeek 建议持有: {reason}")
                 self._stats["trades_skipped"] += 1
                 return
 
             # ── 3. 从 DeepSeek 输出获取交易方向 ──
             trade_side = "buy" if decision["action"] == "buy" else "sell"
             size_eth = self._suggested_size(context)
+            self._current_activity = f"📐 决策: {decision['action']} {size_eth:.4f} ETH (信心 {decision['confidence']}%)"
+            self._last_activity_time = time.time()
 
             # ── 3b. 市场深度检查（Phase 2） ──
             prefer_limit = True
             if self.okx_client and hasattr(self.risk, 'check_market_depth_async'):
+                self._current_activity = "🔍 检查市场深度…"
+                self._last_activity_time = time.time()
                 ok, reason, prefer_limit = await self.risk.check_market_depth_async(
                     self.okx_client, trade_side, size_eth
                 )
                 if not ok:
+                    self._current_activity = f"⏭ 深度检查跳过: {reason[:40]}"
+                    self._last_activity_time = time.time()
                     logger.info(f"市场深度拒绝: {reason}")
                     self._stats["trades_skipped"] += 1
                     return
@@ -222,13 +257,19 @@ class Agent3:
                     logger.info(f"市场深度检查: {reason}")
 
             # ── 4. Layer 1 风控检查（使用真实交易方向） ──
+            self._current_activity = "🛡️ 风控检查中…"
+            self._last_activity_time = time.time()
             ok, reason = self.risk.check_layer1(trade_side, size_eth, context.get("current_price", 0))
             if not ok:
+                self._current_activity = f"⏭ 风控拒绝: {reason[:40]}"
+                self._last_activity_time = time.time()
                 logger.info(f"Layer 1 拒绝: {reason}")
                 self._stats["trades_skipped"] += 1
                 return
 
             # ── 5. 执行交易 ──
+            self._current_activity = f"💱 执行 {trade_side} {size_eth:.4f} ETH…"
+            self._last_activity_time = time.time()
             logger.info(f"DeepSeek 决策: {decision['action']} (信心 {decision['confidence']}%)")
             self._stats["trades_executed"] += 1
 
@@ -286,8 +327,12 @@ class Agent3:
                         "trade_type": "open",
                     }
                     asyncio.create_task(self.agent4_reviewer.notify_trade(trade_record))
+                self._current_activity = f"✅ {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}"
+                self._last_activity_time = time.time()
             else:
                 self.risk.report_api_error()
+                self._current_activity = f"❌ 交易失败: {trade_result.get('error', '未知')[:40]}"
+                self._last_activity_time = time.time()
                 logger.error(f"交易失败: {trade_result['error']}")
 
     def _build_context(self, events: list[AgentEvent]) -> dict:
@@ -414,12 +459,18 @@ class Agent3:
 
             if self.config.review_generator_enabled and self.review_gen:
                 if now_utc.hour >= self.config.review_daily_hour_utc and today_str != last_daily_date:
+                    self._current_activity = "📊 生成每日复盘报告…"
+                    self._last_activity_time = time.time()
                     report = self.review_gen.generate_daily_report()
                     last_daily_date = today_str
+                    self._current_activity = f"📊 每日复盘完成: 胜率 {report['stats']['win_rate']:.1f}%"
+                    self._last_activity_time = time.time()
                     logger.info(f"📊 每日复盘: 胜率 {report['stats']['win_rate']:.1f}%, "
                                 f"盈亏 {report['stats']['total_pnl']:+.2f} USDT")
 
                 if now_utc.weekday() == 6 and week_str != last_weekly_week:  # 周日
+                    self._current_activity = "📊 生成每周复盘报告…"
+                    self._last_activity_time = time.time()
                     report = self.review_gen.generate_weekly_report()
                     last_weekly_week = week_str
                     logger.info(f"📊 每周复盘已生成")
@@ -437,9 +488,10 @@ class Agent3:
         }
 
     def get_status(self) -> dict:
-        # Phase 4: 自适应参数调整记录
         return {
             "running": self._running,
+            "current_activity": self._current_activity,
+            "last_activity_time": self._last_activity_time,
             "position": self._current_position,
             "event_buffer_size": len(self._event_buffer),
             "adjusted_max_trades": self.config.agent3_max_daily_trades,

@@ -228,9 +228,9 @@ async def main():
 
 
 async def _status_reporter(agent1, agent2, agent3, agent4_reviewer=None, position_monitor=None, mode="paper"):
-    """定期报告系统状态并写入 JSON（每 60s）"""
+    """定期报告系统状态并写入 JSON（每 5s，保证前端实时更新）"""
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(5)
         lines = ["\n--- 系统状态 ---"]
         s1 = s2 = s3 = s4 = pm = {}
         if agent1:

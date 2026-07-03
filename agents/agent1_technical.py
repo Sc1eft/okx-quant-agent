@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -65,6 +66,8 @@ class Agent1:
         # 运行状态
         self._running = False
         self._pending_tasks: set[asyncio.Task] = set()
+        self._current_activity = ""
+        self._last_activity_time = 0.0
         self._stats = {
             "ticks_received": 0,
             "bars_completed": 0,
@@ -100,6 +103,8 @@ class Agent1:
                 price = float(data.get("last", "0"))
                 self.kline_builder.add_tick(price, ts_s)
                 self._stats["ticks_received"] += 1
+                self._current_activity = f"📡 接收 Tick #{self._stats['ticks_received']} @ ${price:,.2f}"
+                self._last_activity_time = time.time()
         except (ValueError, KeyError, TypeError) as e:
             logger.warning(f"tick 解析失败: {e} | msg={msg}")
 
@@ -107,6 +112,8 @@ class Agent1:
         """处理新完成的 K 线"""
         self._stats["bars_completed"] += 1
         self._bar_counts[timeframe] = self._bar_counts.get(timeframe, 0) + 1
+        self._current_activity = f"📐 构建 {timeframe} K线 @ ${bar['close']:.2f}"
+        self._last_activity_time = time.time()
         logger.debug(f"新K线完成: {timeframe} @ {bar['close']:.2f}")
 
         # 收集该周期所有历史 K 线
@@ -139,6 +146,8 @@ class Agent1:
             "boll": boll,
             "close": bar["close"],
         }
+        self._current_activity = f"🧮 计算 {timeframe} 指标 — " + self._indicator_summary(timeframe, macd, kdj, boll)
+        self._last_activity_time = time.time()
 
         # 变化检测
         now = datetime.now(timezone.utc).timestamp()
@@ -176,12 +185,41 @@ class Agent1:
                 "description": sig.get("description", ""),
                 "price": sig.get("price", 0),
             })
+            self._current_activity = f"📊 推送 {timeframe} {sig['description']} (⚡{urgency})"
+            self._last_activity_time = time.time()
             logger.info(f"📊 Agent 1 push: {sig['description']} (urgency={urgency})")
+
+    def _indicator_summary(self, tf: str, macd: dict, kdj: dict, boll: dict) -> str:
+        """生成一行指标摘要（供 current_activity 使用）"""
+        parts = []
+        if macd:
+            h = macd.get("histogram", 0)
+            if isinstance(h, (int, float)):
+                parts.append(f"MACD{'↑' if h > 0 else '↓' if h < 0 else '→'}")
+        if kdj:
+            if kdj.get("k_cross") == "golden":
+                parts.append("KDJ金叉")
+            elif kdj.get("k_cross") == "dead":
+                parts.append("KDJ死叉")
+            if kdj.get("overbought"):
+                parts.append("⚠️超买")
+            if kdj.get("oversold"):
+                parts.append("🔥超卖")
+        if boll:
+            pos = boll.get("position", 0.5)
+            if isinstance(pos, (int, float)):
+                if pos > 0.9:
+                    parts.append("上轨")
+                elif pos < 0.1:
+                    parts.append("下轨")
+        return " ".join(parts) if parts else "无新信号"
 
     def get_status(self) -> dict:
         """返回当前状态（供监控用）"""
         return {
             "running": self._running,
+            "current_activity": self._current_activity,
+            "last_activity_time": self._last_activity_time,
             **self._stats,
             "bars_history": {
                 tf: self.kline_builder.has_history(tf, 1)

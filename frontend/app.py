@@ -53,8 +53,17 @@ for _key in ("OKX_API_KEY", "OKX_SECRET_KEY", "OKX_PASSPHRASE", "DEEPSEEK_API_KE
 init_all()
 
 # ── Theme mode (light/dark only, no system) ──
+# Restore from file if session state is fresh (survives full page navigation)
+THEME_FILE = PROJECT_ROOT / "data" / ".theme"
 if "theme_mode" not in st.session_state:
     st.session_state.theme_mode = "light"
+    try:
+        if THEME_FILE.exists():
+            saved = THEME_FILE.read_text(encoding="utf-8").strip()
+            if saved in ("light", "dark"):
+                st.session_state.theme_mode = saved
+    except Exception:
+        pass
 
 # Sidebar navigation
 st.sidebar.markdown("""
@@ -74,6 +83,86 @@ theme_mode = st.sidebar.radio(
     label_visibility="collapsed",
 )
 st.session_state.theme_mode = "light" if "亮" in theme_mode else "dark"
+# Persist to file (survives full page navigation across pages)
+THEME_FILE.parent.mkdir(parents=True, exist_ok=True)
+THEME_FILE.write_text(st.session_state.theme_mode, encoding="utf-8")
+
+# ── Inject dark mode CSS (before pg.run() so it runs on every MPA page load) ──
+if st.session_state.theme_mode == "dark":
+    st.markdown("""<style>
+    :root {
+        --bg-page: #0f172a;
+        --bg-card: #1e293b;
+        --bg-card-hover: #253349;
+        --bg-input: #1e293b;
+        --text-primary: #f1f5f9;
+        --text-secondary: #94a3b8;
+        --text-muted: #64748b;
+        --border: #334155;
+        --border-light: #1e293b;
+        --primary-light: #1e3a5f;
+        --primary-ring: rgba(37,99,235,0.4);
+        --green-bg: #064e3b;
+        --green-border: #065f46;
+        --red-bg: #7f1d1d;
+        --red-border: #991b1b;
+        --amber-bg: #78350f;
+        --amber-border: #92400e;
+        --purple-bg: #3b0764;
+        --shadow-xs: 0 1px 2px rgba(0,0,0,0.2);
+        --shadow-sm: 0 1px 3px rgba(0,0,0,0.25);
+        --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.3);
+        --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.4);
+    }
+    .stApp { background-color: #0f172a !important; }
+    .stDataFrame thead tr th { background: #1e293b !important; border-color: #334155 !important; }
+    .stDataFrame tbody tr:hover { background: #253349 !important; }
+    div[data-baseweb="tag"] { background: #334155 !important; }
+    code { background: #1e293b; color: #f87171; }
+    .stProgress > div > div { background-color: #334155 !important; }
+    .sidebar-footer { color: #64748b; border-top-color: rgba(255,255,255,0.06); }
+    .sidebar-footer-mode { color: #64748b; }
+    .sidebar-footer-ver { color: #334155; }
+    .stAlert[data-baseweb="notification"][kind="info"] { background: rgba(37,99,235,0.15) !important; }
+    .stAlert[data-baseweb="notification"][kind="success"] { background: rgba(5,150,105,0.15) !important; }
+    .stAlert[data-baseweb="notification"][kind="warning"] { background: rgba(217,119,6,0.15) !important; }
+    .stAlert[data-baseweb="notification"][kind="error"] { background: rgba(220,38,38,0.15) !important; }
+    .status-bar { background: #064e3b !important; border-color: #065f46 !important; }
+    div[style*="background: white"],div[style*="background:white"],div[style*="background:#fff"],div[style*="background-color: white"],div[style*="background-color:white"] { background: #1e293b !important; }
+    div[style*="background: #f8fafc"],div[style*="background:#f8fafc"] { background: #253349 !important; }
+    div[style*="background: #f1f5f9"],div[style*="background:#f1f5f9"] { background: #1e293b !important; }
+    *[style*="color: #0f172a"],*[style*="color:#0f172a"] { color: #f1f5f9 !important; }
+    *[style*="color: #475569"],*[style*="color:#475569"] { color: #94a3b8 !important; }
+    *[style*="border-color: #e2e8f0"],*[style*="border-color:#e2e8f0"] { border-color: #334155 !important; }
+    *[style*="border: 1px solid #e2e8f0"],*[style*="border:1px solid #e2e8f0"] { background: #1e293b !important; border-color: #334155 !important; }
+    .agent-card { background: #1e293b !important; border-color: #334155 !important; }
+    .agent-card.running { border-color: #065f46 !important; }
+    .agent-name,.metric-item .value { color: #f1f5f9 !important; }
+    .metric-item .label,.tag,.tag.neutral { color: #94a3b8 !important; background: #1e293b !important; }
+    .tag.bullish { background: #064e3b !important; color: #6ee7b7 !important; }
+    .tag.bearish { background: #7f1d1d !important; color: #fca5a5 !important; }
+    .agent-footer,.uptime { color: #64748b !important; }
+    .agent-header,.tag-row,.agent-footer { border-color: #334155 !important; }
+    .section-title { color: #f1f5f9 !important; }
+    .agent-activity { background: rgba(255,255,255,0.06) !important; }
+    .agent-activity .act-text { color: #f1f5f9 !important; }
+    .agent-activity .act-text.highlight { color: #34d399 !important; }
+    .agent-activity .act-time { color: #64748b !important; }
+    .agent-details { border-top-color: #334155 !important; }
+    .agent-details summary:hover { background: rgba(255,255,255,0.05) !important; color: #94a3b8 !important; }
+    .detail-section-title { color: #94a3b8 !important; }
+    .detail-row .label { color: #94a3b8 !important; }
+    .detail-row .value { color: #e2e8f0 !important; }
+    .detail-sep { background: #334155 !important; }
+    .pipeline-step { background: rgba(255,255,255,0.05) !important; }
+    .pipeline-step .step-label { color: #94a3b8 !important; }
+    .pipeline-step .step-value { color: #e2e8f0 !important; }
+    .tf-name { color: #e2e8f0 !important; }
+    .tf-status { color: #94a3b8 !important; }
+    .tf-bar-bg { background: #334155 !important; }
+    .stPlotlyChart svg { background: #1e293b; }
+    .stPlotlyChart .bg { fill: #1e293b !important; }
+    </style>""", unsafe_allow_html=True)
 
 # Navigation pages
 pages = [
@@ -114,11 +203,3 @@ with st.sidebar:
         f"</div>",
         unsafe_allow_html=True,
     )
-
-# ── Apply theme class to body (after sidebar so theme_mode is set) ──
-_theme = st.session_state.get("theme_mode", "light")
-st.markdown(
-    f"<script>document.body.classList.remove('light-mode','dark-mode');"
-    f"document.body.classList.add('{_theme}-mode');</script>",
-    unsafe_allow_html=True,
-)

@@ -1,0 +1,70 @@
+# ──────────────────────────────────────────────────────
+# OKX Quant Agent — Docker Compose
+# ──────────────────────────────────────────────────────
+# Usage:
+#   docker compose up -d           # 启动所有服务
+#   docker compose logs -f         # 查看日志
+#   docker compose stop            # 停止
+#   docker compose down            # 停止+清理
+# ──────────────────────────────────────────────────────
+
+services:
+
+  # ── 三 Agent 交易系统 ──
+  agent:
+    build: .
+    image: okx-quant-agent:latest
+    container_name: okx-quant-agent-core
+    command: python main.py --mode paper --log-level INFO
+    volumes:
+      - data_volume:/app/data
+      - logs_volume:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - okx-net
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/data/agent_status.json"]
+      interval: 120s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── Streamlit 前端面板 ──
+  frontend:
+    build: .
+    image: okx-quant-agent:latest
+    container_name: okx-quant-agent-ui
+    command: streamlit run frontend/app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true
+    ports:
+      - "8501:8501"
+    volumes:
+      - data_volume:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - agent
+    networks:
+      - okx-net
+
+networks:
+  okx-net:
+    driver: bridge
+
+volumes:
+  data_volume:
+    driver: local
+    driver_opts:
+      type: none
+      device: ${PWD}/data
+      o: bind
+  logs_volume:
+    driver: local
+    driver_opts:
+      type: none
+      device: ${PWD}/logs
+      o: bind

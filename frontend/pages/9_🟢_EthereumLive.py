@@ -583,20 +583,20 @@ def _data_fragment():
     st.session_state.eth_last_refresh = datetime.now().strftime("%H:%M:%S")
     _df = st.session_state.get("eth_data")
 
-    # AI executor 喂数据
+    # BacktestEngine 喂数据
     if st.session_state.get("ai_running") and _df is not None and not _df.empty:
-        _executor = st.session_state.get("ai_executor")
-        if _executor is not None:
-            _buf = _executor.bar_buffer
-            if _buf is not None and not _buf.empty:
+        _engine = st.session_state.get("ai_executor")
+        if _engine is not None:
+            _buf = _engine.bar_buffer
+            if not _buf.empty:
                 _last_processed = _buf.index[-1]
                 _new_bars = _df[_df.index > _last_processed]
             else:
                 _new_bars = _df
             if not _new_bars.empty:
                 for _, _bar in _new_bars.iterrows():
-                    _executor.on_bar(_bar)
-                st.session_state.ai_trade_state = _executor.get_state()
+                    _engine.on_bar(_bar)
+                st.session_state.ai_trade_state = _engine.get_state()
 
     # 触发全页重跑 → 更新 fragment 外的显示代码
     if auto:
@@ -788,15 +788,41 @@ with st.container():
     # ── AI 信号 → 交易执行 ──
     if not st.session_state.ai_running:
         if st.button("⚡ 按此信号交易", type="primary", use_container_width=True):
-            from agent.signal_bridge import ai_signal_to_rules
-            rules = ai_signal_to_rules(_res)
+            # Inline ai_signal_to_rules — convert AI analysis to rules
+            _dir = _res.get("direction", "neutral")
+            _dir_label = "看多" if _dir == "long" else "看空" if _dir == "short" else "中性"
+            rules = {
+                "strategy_name": f"AI信号-{_dir_label}",
+                "_strategy_type": "ai_signal",
+                "timeframe_hint": "15m",
+                "entry_conditions": [],
+                "exit_conditions": [],
+                "risk_params": {
+                    "stop_loss_pct": 1.5, "take_profit_pct": 3.0,
+                    "max_loss_pct": 3.0, "leverage": 1.0,
+                    "position_timeout_bars": 96,
+                    "trailing_stop_activation_pct": 2.0,
+                    "trailing_stop_distance_pct": 1.25,
+                },
+                "ai_signal": {
+                    "original_direction": _dir,
+                    "confidence": _res.get("confidence", 0),
+                    "summary": _res.get("summary", ""),
+                    "key_evidence": _res.get("key_evidence", []),
+                    "risk_warnings": _res.get("risk_warnings", []),
+                    "technical_analysis": _res.get("technical_analysis", ""),
+                    "market_sentiment": _res.get("market_sentiment", ""),
+                    "fundamental_analysis": _res.get("fundamental_analysis", ""),
+                },
+                "_notes": f"AI信号: 信心指数{_res.get('confidence', 0)}%",
+            }
             _df = st.session_state.get("eth_data")
             if _df is None or _df.empty:
                 st.error("❌ 暂无K线数据，请等待数据加载")
                 st.stop()
-            from execution.ai_executor import AIStrategyExecutor
-            executor = AIStrategyExecutor(
-                rules=rules, cfg=cfg,
+            from frontend.utils.backtest_engine import BacktestEngine
+            executor = BacktestEngine(
+                rules=rules,
                 initial_balance=st.session_state.ai_initial_balance,
                 mode="live" if st.session_state.ai_use_live_mode else "paper",
             )
@@ -936,9 +962,8 @@ with st.expander("🤖 AI 交易", expanded=bool(st.session_state.ai_running)):
                      disabled=st.session_state.ai_running):
             if ai_text.strip():
                 with st.spinner("🤖 AI 正在解析策略…"):
-                    from agent.strategy_interpreter import StrategyInterpreter
-                    interpreter = StrategyInterpreter(cfg)
-                    rules = interpreter.interpret(ai_text)
+                    from frontend.utils.strategy_parser import parse_strategy_text
+                    rules = parse_strategy_text(ai_text)
                 if "parse_error" in rules:
                     st.session_state.ai_interpret_error = rules["parse_error"]
                     st.session_state.ai_strategy_rules = None
@@ -1094,10 +1119,9 @@ with st.expander("🤖 AI 交易", expanded=bool(st.session_state.ai_running)):
                         st.error("暂无K线数据，请等待数据加载")
                         st.stop()
 
-                    from execution.ai_executor import AIStrategyExecutor
-                    executor = AIStrategyExecutor(
+                    from frontend.utils.backtest_engine import BacktestEngine
+                    executor = BacktestEngine(
                         rules=ai_rules,
-                        cfg=cfg,
                         initial_balance=st.session_state.ai_initial_balance,
                         mode="live" if st.session_state.ai_use_live_mode else "paper",
                     )

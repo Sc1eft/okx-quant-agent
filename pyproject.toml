@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "okx-quant-agent"
+version = "0.2.0"
+description = "OKX 三 Agent AI 量化交易系统"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT" }
+keywords = ["okx", "quant", "trading", "crypto", "agent"]
+authors = [
+  { name = "Sc1eft" },
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Office/Business :: Financial :: Investment",
+]
+
+dependencies = [
+  "streamlit>=1.28.0",
+  "plotly>=5.17.0",
+  "pandas>=2.0.0",
+  "numpy>=1.24.0",
+  "httpx>=0.25.0",
+  "scipy>=1.10.0",
+  "openai>=1.0.0",
+  "requests>=2.28.0",
+  "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.4.0"]
+dev = ["pytest>=7.4.0", "ipython"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# 兼容无根 __init__.py 的导入模式
+norecursedirs = [".claude", ".superpowers", ".playwright-mcp", ".workbuddy"]
+
+[tool.setuptools.packages.find]
+include = [
+  "agents*",
+  "backtest*",
+  "configs*",
+  "execution*",
+  "frontend*",
+  "notification*",
+  "risk*",
+  "strategies*",
+  "data*",
+  "tests*",
+]
+exclude = ["logs*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.yaml", "*.yml"]
+
+[project.urls]
+Homepage = "https://github.com/Sc1eft/okx-quant-agent"

@@ -1,0 +1,37 @@
+# ── Git ──
+.git
+.gitignore
+.claude/
+.superpowers/
+.workbuddy/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── IDE ──
+.vscode/
+.idea/
+
+# ── Data (mounted as volumes) ──
+data/
+logs/
+
+# ── Docs ──
+README.md
+*.md
+checklist-progress.md
+
+# ── Docker ──
+.dockerignore
+
+# ── Frontend build (none currently) ──
+node_modules/

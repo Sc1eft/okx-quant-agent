@@ -255,6 +255,7 @@ div[data-testid="stSidebarNav"] a[aria-current="page"] div {
 .section-card:hover {
   box-shadow: var(--shadow-sm);
 }
+.section-title,
 .section-card .section-title {
   font-size: 0.85rem;
   font-weight: 600;
@@ -321,8 +322,8 @@ div[data-testid="stSidebarNav"] a[aria-current="page"] div {
   margin-top: 0.1rem;
 }
 
-/* Streamlit default metric containers */
-div[data-testid="metric-container"] {
+/* Streamlit metric containers — data-testid is "stMetric" not "metric-container" */
+[data-testid="stMetric"] {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -330,15 +331,15 @@ div[data-testid="metric-container"] {
   padding: 0.75rem 1rem !important;
   transition: box-shadow 0.2s;
 }
-div[data-testid="metric-container"]:hover { box-shadow: var(--shadow-md); }
-div[data-testid="metric-container"] label {
+[data-testid="stMetric"]:hover { box-shadow: var(--shadow-md); }
+[data-testid="stMetricLabel"] {
   color: var(--text-muted) !important;
   font-size: 0.75rem !important;
   font-weight: 500 !important;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-div[data-testid="metric-container"] div[data-testid="metric-value"] {
+[data-testid="stMetricValue"] {
   color: var(--text-primary) !important;
   font-weight: 700 !important;
   font-size: 1.3rem !important;
@@ -720,6 +721,7 @@ div[data-baseweb="toast"] {
 
   /* ── Cards ── */
   .section-card { padding: 0.75rem; }
+  .section-title,
   .section-card .section-title { font-size: 0.78rem; margin-bottom: 0.5rem; }
 
   /* ── Metric Cards ── */
@@ -729,13 +731,13 @@ div[data-baseweb="toast"] {
   .metric-card .sub { font-size: 0.65rem; }
 
   /* ── Streamlit native metric containers ── */
-  div[data-testid="metric-container"] {
+  [data-testid="stMetric"] {
     padding: 0.4rem 0.55rem !important;
   }
-  div[data-testid="metric-container"] [data-testid="metric-value"] {
+  [data-testid="stMetricValue"] {
     font-size: 1rem !important;
   }
-  div[data-testid="metric-container"] label {
+  [data-testid="stMetricLabel"] {
     font-size: 0.65rem !important;
   }
 
@@ -967,9 +969,45 @@ body.dark-mode div[style*="text-align:center"][style*="background"] {
   border-color: var(--border) !important;
 }
 
-/* Dark theme improvements: Metric container value text */
-body.dark-mode div[data-testid="metric-container"] div[data-testid="metric-value"] {
+/* Dark theme improvements: Metric value text */
+body.dark-mode [data-testid="stMetricValue"] {
   color: var(--text-primary) !important;
+}
+
+/* ── Agent Dashboard Cards (from agent_dashboard.py) ── */
+body.dark-mode .agent-card {
+  background: var(--bg-card) !important;
+  border-color: var(--border) !important;
+}
+body.dark-mode .agent-card.running {
+  border-color: #065f46 !important;
+}
+body.dark-mode .agent-name,
+body.dark-mode .metric-item .value {
+  color: var(--text-primary) !important;
+}
+body.dark-mode .metric-item .label,
+body.dark-mode .tag,
+body.dark-mode .tag.neutral {
+  color: var(--text-secondary) !important;
+  background: var(--bg-input) !important;
+}
+body.dark-mode .tag.bullish {
+  background: #064e3b !important;
+  color: #6ee7b7 !important;
+}
+body.dark-mode .tag.bearish {
+  background: #7f1d1d !important;
+  color: #fca5a5 !important;
+}
+body.dark-mode .agent-footer,
+body.dark-mode .uptime {
+  color: var(--text-muted) !important;
+}
+body.dark-mode .agent-header,
+body.dark-mode .tag-row,
+body.dark-mode .agent-footer {
+  border-color: var(--border) !important;
 }
 
 /* Price change labels in heartbeat card */

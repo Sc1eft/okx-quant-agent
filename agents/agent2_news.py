@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -98,6 +99,8 @@ class Agent2:
                 event_bus=event_bus,
             )
 
+        self._current_activity = ""
+        self._last_activity_time = 0.0
         self._stats = {
             "fetch_count": 0,
             "news_seen": 0,
@@ -131,11 +134,18 @@ class Agent2:
         """新闻抓取主循环"""
         while self._running:
             try:
+                self._current_activity = "📰 正在抓取新闻…"
+                self._last_activity_time = time.time()
                 await self._fetch_and_score()
+                self._current_activity = f"✅ 新闻更新完成 ({self._stats['news_pushed']} 条推送)"
+                self._last_activity_time = time.time()
             except Exception as e:
+                self._current_activity = f"⚠️ 新闻抓取异常: {str(e)[:50]}"
                 logger.error(f"Agent 2 抓取异常: {e}")
 
             # 等待下一次抓取
+            self._current_activity = f"⏳ 等待下一轮采集 ({self.config.agent2_fetch_interval_seconds}s)"
+            self._last_activity_time = time.time()
             await asyncio.sleep(self.config.agent2_fetch_interval_seconds)
 
     async def _fetch_and_score(self):
@@ -179,6 +189,8 @@ class Agent2:
             )
             await self.bus.publish_b(event)
             self._stats["news_pushed"] += 1
+            self._current_activity = f"📰 推送新闻 [{source}]: {title[:50]}…"
+            self._last_activity_time = time.time()
             logger.info(f"\U0001f4f0 Agent 2 push: [{source}] {title[:60]}... (w={weight:.2f})")
 
         # 控制 seen 集合大小
@@ -194,6 +206,8 @@ class Agent2:
 
         return {
             "running": self._running,
+            "current_activity": self._current_activity,
+            "last_activity_time": self._last_activity_time,
             "onchain": onchain_status,
             "onchain_events_pushed": onchain_events,
             **self._stats,

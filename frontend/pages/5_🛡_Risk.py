@@ -93,8 +93,8 @@ risk = cfg.risk
 risk_cols = st.columns(3)
 with risk_cols[0]:
     st.markdown("**仓位限制**")
-    new_max_pos = st.slider("最大仓位 (%)", 5, 100, risk.max_position_pct, key="risk_max_pos")
-    new_max_order = st.slider("单笔最大 (%)", 1, 50, risk.max_single_order_pct, key="risk_max_order")
+    new_max_pos = st.slider("最大仓位 (%)", 5.0, 100.0, risk.max_position_pct, key="risk_max_pos")
+    new_max_order = st.slider("单笔最大 (%)", 1.0, 50.0, risk.max_single_order_pct, key="risk_max_order")
 
 with risk_cols[1]:
     st.markdown("**亏损限制**")
@@ -123,7 +123,7 @@ with rec_cols[1]:
     )
 with rec_cols[2]:
     new_max_restarts = st.number_input(
-        "日最大重启次数", 1, 10, risk.max_daily_restarts, key="risk_max_restarts"
+        "日最大重启次数", 1, 10, risk.max_daily_starts, key="risk_max_restarts"
     )
 
 # Apply changes
@@ -136,7 +136,7 @@ if st.button("💾 应用风控设置", type="primary"):
     risk.signal_expiry_bars = new_expiry
     risk.recovery_mode = new_recovery
     risk.recovery_cooldown_bars = new_rec_cooldown
-    risk.max_daily_restarts = new_max_restarts
+    risk.max_daily_starts = new_max_restarts
 
     # Recreate risk engine with new config
     st.session_state.risk_engine = RiskEngine(cfg)

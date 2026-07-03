@@ -1,33 +1,30 @@
-"""🤖 AI 自动交易 — 基于 DeepSeek AI 多空分析的自动交易执行
-
-将 AI 多空分析结果与 AIStrategyExecutor 打通，实现半自动/全自动交易。
-
-流程：
-  用户点击「开始AI交易」
-    ↓
-  自动采集：行情 + 技术指标 + 关联币种 + 新闻
-    ↓
-  调用 DeepSeek AI 分析（复用 eth_ai_analysis 模块）
-    ↓
-  AI 返回：direction / confidence / 入场区间 / 止损 / 止盈
-    ↓
-  组装为 AIStrategyExecutor 可消费的 rules JSON
-    ↓
-  Executor 在实时 K 线数据流中等待入场条件
-    ↓
-  入场 → 持仓监控（止盈止损/移动止盈）→ 出场 → 记录
 """
+🤖 AI 自动交易 — 三 Agent 系统控制面板
 
+将 Streamlit 前端与后端三 Agent 系统打通：
+
+  Start → 启动 main.py (subprocess) → Agent 1/2/3 运行 → 写入 agent_status.json + SQLite
+  Stop  → 停止 Agent 进程
+  Display ← 从 agent_status.json + agent_trades.db 读取实时数据
+
+保留独立 DeepSeek 一键分析 + 追问对话功能（不依赖 Agent 系统）。
+"""
 from __future__ import annotations
+
+import logging
+import os
+import signal as _signal
+import sqlite3
+import subprocess
 import sys
 import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
 
 from frontend.components.metrics_display import render_metric_card
 from frontend.components.charts import equity_curve_chart
@@ -60,6 +57,268 @@ if str(PROJECT_ROOT) not in sys.path:
 
 ETH_SYMBOL = "ETH-USDT"
 DEFAULT_TF_LABEL = "15分钟"
+PID_FILE = PROJECT_ROOT / "data" / "agent.pid"
+STATUS_FILE = PROJECT_ROOT / "data" / "agent_status.json"
+STOP_FLAG = PROJECT_ROOT / "data" / ".agent_stopped"
+DB_FILE = PROJECT_ROOT / "data" / "agent_trades.db"
+AGENT_FRESH_THRESHOLD_S = 30  # status.json 超过此秒数视为 Agent 已停止
+
+logger = logging.getLogger("ai_trading_page")
+
+
+# ════════════════════════════════════════════════════════════════
+# AGENT PROCESS MANAGEMENT HELPERS
+# ════════════════════════════════════════════════════════════════
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Windows 上用 tasklist 检测进程是否存活（比 os.kill(pid,0) 更可靠）"""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # tasklist 输出含进程名才表示存活
+        return "python" in result.stdout.lower() and str(pid) in result.stdout
+    except Exception:
+        return False
+
+
+def _agent_is_running() -> bool:
+    """检查 Agent 系统是否在运行"""
+    # 如果存在停止标记，一律返回 False（覆盖所有其他检查）
+    if STOP_FLAG.exists():
+        # 清理残留文件
+        _cleanup_pid()
+        return False
+
+    # 方式 1: PID 文件 + 进程存活
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text().strip())
+            if _pid_is_alive(pid):
+                # 进程存活 → 检查状态文件新鲜度
+                if STATUS_FILE.exists():
+                    age = _time.time() - STATUS_FILE.stat().st_mtime
+                    return age < AGENT_FRESH_THRESHOLD_S
+                # 有 PID 但还没出状态文件（刚启动 <30s）
+                return True
+            # 进程已死 → 清理
+            _cleanup_pid()
+        except (ValueError, OSError):
+            _cleanup_pid()
+
+    # 方式 2: 仅有状态文件且够新鲜（可能其他终端启动）
+    if STATUS_FILE.exists():
+        # 如果 STATUS_FILE 内容为空（被停止流程清空过），视为已停止
+        try:
+            content = STATUS_FILE.read_text(encoding="utf-8").strip()
+            if content == "{}" or content == "":
+                return False
+        except Exception:
+            pass
+        age = _time.time() - STATUS_FILE.stat().st_mtime
+        return age < AGENT_FRESH_THRESHOLD_S
+
+    return False
+
+
+def _cleanup_pid():
+    """删除过期的 PID 文件"""
+    try:
+        if PID_FILE.exists():
+            PID_FILE.unlink()
+    except Exception:
+        pass
+
+
+def _read_agent_status() -> dict:
+    """读取 agent_status.json，失败返回空 dict"""
+    try:
+        import json
+        with open(STATUS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _start_agent_process(mode: str = "paper") -> bool:
+    """启动 main.py 子进程并等待健康确认"""
+    if _agent_is_running():
+        return False  # 已经在运行
+
+    # 清除停止标记（如果有）
+    try:
+        if STOP_FLAG.exists():
+            STOP_FLAG.unlink()
+    except Exception:
+        pass
+
+    script = PROJECT_ROOT / "main.py"
+    if not script.exists():
+        raise FileNotFoundError(f"未找到 {script}")
+
+    # 启动前清理可能残留的状态文件
+    if STATUS_FILE.exists():
+        try:
+            STATUS_FILE.unlink()
+        except Exception:
+            pass
+
+    proc = subprocess.Popen(
+        [sys.executable or "python", str(script), "--mode", mode],
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # 写 PID 文件
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(proc.pid))
+
+    # 等待确认进程活着 + 状态文件出现（最长 10s）
+    for _ in range(20):
+        if not _pid_is_alive(proc.pid):
+            _cleanup_pid()
+            raise RuntimeError("Agent 进程启动后立即崩溃，请检查 main.py 日志")
+        if STATUS_FILE.exists():
+            break
+        _time.sleep(0.5)
+
+    return True
+
+
+def _stop_agent_process() -> bool:
+    """停止 Agent 子进程（Windows 用 taskkill /F 确保彻底杀掉）"""
+    # 先写停止标记，让 _agent_is_running() 立即返回 False
+    STOP_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        STOP_FLAG.write_text("1", encoding="utf-8")
+    except Exception:
+        pass
+
+    pid = None
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text().strip())
+        except (ValueError, OSError):
+            pass
+
+    # 方式 1: 按 PID 杀（更精准）
+    if pid:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, text=True, timeout=10,
+                )
+            else:
+                os.kill(pid, _signal.SIGTERM)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    # 方式 2: 补杀 — 按命令行查找 main.py 进程（避免误杀其他 Python 进程）
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["wmic", "process", "where", "name='python.exe'",
+                 "get", "ProcessId,CommandLine", "/format:csv"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.strip().splitlines():
+                if "main.py" not in line.lower():
+                    continue
+                parts = line.split(",")
+                for part in parts:
+                    try:
+                        p = int(part.strip())
+                        if p != pid and p != 0:
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", str(p)],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                    except ValueError:
+                        continue
+        except Exception:
+            pass
+
+    _cleanup_pid()
+
+    # 覆写状态文件为空 JSON（比 unlink 更可靠：即使文件被进程锁定，
+    # 写入空内容不会触发 PermissionError）
+    _overwrite_status_empty()
+
+    # 验证进程真死了（最多等 3 秒）
+    if pid:
+        for _ in range(6):
+            if not _pid_is_alive(pid):
+                break
+            _time.sleep(0.5)
+
+    return True
+
+
+def _overwrite_status_empty():
+    """覆写 status.json 为空对象（比 unlink 更可靠）"""
+    for _ in range(3):
+        try:
+            with open(STATUS_FILE, "w", encoding="utf-8") as f:
+                f.write("{}")
+            break
+        except PermissionError:
+            # Windows 文件锁，重试
+            _time.sleep(0.3)
+        except Exception:
+            break
+
+
+# ════════════════════════════════════════════════════════════════
+# SQLITE HELPERS
+# ════════════════════════════════════════════════════════════════
+
+
+def _get_trades_df(limit: int = 50) -> pd.DataFrame:
+    """从 agent_trades.db 读取最近交易记录"""
+    if not DB_FILE.exists():
+        return pd.DataFrame()
+    try:
+        conn = sqlite3.connect(str(DB_FILE))
+        df = pd.read_sql_query(
+            "SELECT id, timestamp, side, size, price, pnl, pnl_close, "
+            "trade_group_id, trade_type, order_id, symbol "
+            "FROM trades ORDER BY id DESC LIMIT ?",
+            conn, params=(limit,),
+        )
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _get_trade_stats() -> dict:
+    """从 SQLite 统计交易数据"""
+    if not DB_FILE.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(str(DB_FILE))
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*), COALESCE(SUM(pnl_close), 0) FROM trades WHERE pnl_close != 0")
+        total, total_pnl = cur.fetchone()
+        cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_close > 0")
+        wins = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_close < 0")
+        losses = cur.fetchone()[0]
+        conn.close()
+        return {
+            "total": total or 0,
+            "wins": wins or 0,
+            "losses": losses or 0,
+            "total_pnl": total_pnl or 0.0,
+            "win_rate": (wins / total * 100) if total else 0,
+        }
+    except Exception:
+        return {}
+
 
 # ════════════════════════════════════════════════════════════════
 # SESSION STATE HELPERS
@@ -74,15 +333,11 @@ def _ss(key: str, default=None):
 
 def _init_state():
     """Initialize all session state variables for this page."""
-    _ss("ai_running", False)
-    _ss("ai_executor", None)
-    _ss("ai_trade_state", None)
+    _ss("ai_agent_process", None)
     _ss("ai_analysis_result", None)
     _ss("ai_news", None)
     _ss("ai_data", None)
     _ss("ai_ticker", None)
-    _ss("ai_trades", [])
-    _ss("ai_equity_curve", [])
     _ss("ai_timeframe", DEFAULT_TF_LABEL)
     _ss("ai_data_count", 120)
     _ss("ai_auto_refresh", True)
@@ -102,6 +357,12 @@ def _fmt_change(c: float | None) -> str:
     return f"{c:+.2f}%"
 
 
+def _render_agent_dashboard(status_data: dict):
+    """Render visual agent activity cards (delegates to shared component)."""
+    from frontend.components.agent_dashboard import render_agent_cards
+    render_agent_cards(status_data, show_recent=True)
+
+
 # ════════════════════════════════════════════════════════════════
 # PAGE LAYOUT
 # ════════════════════════════════════════════════════════════════
@@ -109,11 +370,11 @@ def _fmt_change(c: float | None) -> str:
 st.markdown("""
     <div class="page-header">
         <h1>🤖 AI 自动交易</h1>
-        <p>DeepSeek AI 多空分析 · 自动执行 · 实时监控</p>
+        <p>三 Agent 系统控制 · 实时监控 · 深度分析</p>
     </div>
 """, unsafe_allow_html=True)
 
-# ── 隐藏自动刷新的加载蒙版（Streamlit 1.58 兼容） ──
+# ── 隐藏自动刷新的加载蒙版 ──
 import streamlit.components.v1 as _comps
 _comps.html("""
 <script>
@@ -223,8 +484,7 @@ with ctrl_cols[4]:
     st.caption("")
     st.session_state.ai_use_live_mode = st.checkbox(
         "实盘模式", value=st.session_state.ai_use_live_mode,
-        disabled=st.session_state.ai_running,
-        help="启用时使用 OKX API 直接下单（需 Trade 权限）",
+        help="启用时 main.py 以 --mode live 启动（需 Trade 权限）",
     )
 
 st.markdown('</div>', unsafe_allow_html=True)
@@ -243,44 +503,86 @@ tf_key = TIMEFRAMES.get(tf_label, "1d")
 data_count = st.session_state.ai_data_count
 
 # ════════════════════════════════════════════════════════════════
-# CONTROL BUTTONS (Start / Stop / Clear)
+# CONTROL BUTTONS (Start / Stop / Clear / One-shot Analysis)
 # ════════════════════════════════════════════════════════════════
 
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
-btn_cols = st.columns([2, 2, 2, 4])
+btn_cols = st.columns([2, 2, 2, 2, 3])
+
+agent_running = _agent_is_running()
+
+# ── 进程诊断信息（debug 用，帮助用户理解按钮状态） ──
+_pid_exists = PID_FILE.exists() and PID_FILE.read_text().strip().isdigit()
+_pid_val = int(PID_FILE.read_text().strip()) if _pid_exists else None
+_stat_age = (_time.time() - STATUS_FILE.stat().st_mtime) if STATUS_FILE.exists() else None
+_debug_parts = []
+if _pid_val:
+    _alive = "🟢" if _pid_is_alive(_pid_val) else "🔴"
+    _debug_parts.append(f"PID {_pid_val} {_alive}")
+if _stat_age is not None:
+    _debug_parts.append(f"状态文件 {_stat_age:.0f}s")
+if _debug_parts:
+    _debug_str = " · ".join(_debug_parts)
+else:
+    _debug_str = "无进程"
+
+st.caption(f"🔍 {_debug_str}")
 
 with btn_cols[0]:
-    start_disabled = st.session_state.ai_running
-    if st.button("🚀 开始AI交易", type="primary", use_container_width=True, disabled=start_disabled):
+    if st.button("🚀 启动 Agent", type="primary", use_container_width=True,
+                 disabled=agent_running):
+        try:
+            mode = "live" if st.session_state.ai_use_live_mode else "paper"
+            _start_agent_process(mode)
+            st.toast(f"✅ Agent 系统已启动（{mode.upper()} 模式）", icon="🚀")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ 启动失败: {e}")
+
+with btn_cols[1]:
+    if st.button("⏹ 停止 Agent", use_container_width=True, type="secondary",
+                 disabled=not agent_running):
+        if _stop_agent_process():
+            st.toast("✅ Agent 系统已停止", icon="⏹")
+        else:
+            st.toast("⚠ Agent 进程未找到或已停止", icon="⚠")
+        st.rerun()
+
+with btn_cols[2]:
+    if st.button("🗑 清除", use_container_width=True):
+        for k in ["ai_analysis_result", "ai_news", "ai_data", "ai_ticker",
+                   "ai_entry_markers", "ai_exit_markers",
+                   "ai_chat_context", "ai_chat_messages", "ai_error"]:
+            st.session_state[k] = None
+        st.rerun()
+
+with btn_cols[3]:
+    # 一键分析按钮（独立于 Agent，随时可用）
+    if st.button("🔍 一键 AI 分析", use_container_width=True):
         st.session_state.ai_analysis_result = None
         st.session_state.ai_news = None
         st.session_state.ai_error = None
-        st.session_state.ai_trades = []
-        st.session_state.ai_equity_curve = []
-        st.session_state.ai_entry_markers = []
-        st.session_state.ai_exit_markers = []
-
         try:
-            with st.status("🤖 AI 交易启动中…", expanded=True) as status:
-                status.update(label="📡 获取 ETH 行情数据…")
+            with st.status("🤖 AI 分析中…", expanded=True) as status:
+                status.update(label="📡 获取 ETH 行情…")
                 tk = fetch_ticker(cfg, symbol=ETH_SYMBOL)
                 st.session_state.ai_ticker = tk
 
-                status.update(label="📊 获取技术指标数据…")
+                status.update(label="📊 获取技术指标…")
                 k15 = fetch_klines_with_agg(cfg, limit=30, timeframe="15m", symbol=ETH_SYMBOL)
                 k1h = fetch_klines_with_agg(cfg, limit=20, timeframe="1h", symbol=ETH_SYMBOL)
                 k1d = fetch_klines_with_agg(cfg, limit=7, timeframe="1d", symbol=ETH_SYMBOL)
 
-                status.update(label="🔄 获取关联币种行情…")
+                status.update(label="🔄 关联币种…")
                 btc = fetch_ticker(cfg, symbol="BTC-USDT")
                 sol = fetch_ticker(cfg, symbol="SOL-USDT")
                 doge = fetch_ticker(cfg, symbol="DOGE-USDT")
 
-                status.update(label="📰 采集新闻与政策信息…")
+                status.update(label="📰 新闻采集…")
                 news = _fetch_crypto_news()
                 st.session_state.ai_news = news
 
-                status.update(label="🧠 AI 正在综合分析（技术面+基本面）…")
+                status.update(label="🧠 AI 综合分析…")
                 result = _call_ai_analysis(
                     ticker=tk, klines_15m=k15, klines_1h=k1h, klines_1d=k1d,
                     btc_ticker=btc, sol_ticker=sol, doge_ticker=doge,
@@ -288,7 +590,7 @@ with btn_cols[0]:
                 )
                 st.session_state.ai_analysis_result = result
 
-                # ── 保存对话上下文 ──
+                # 保存对话上下文
                 mk = (
                     f"### 实时行情\n{_ticker_summary('ETH', tk)}\n\n"
                     f"{_summarize_klines(k15, '短期(15分钟)')}\n"
@@ -305,171 +607,71 @@ with btn_cols[0]:
                 }
                 st.session_state.ai_chat_messages = []
 
-                # ── 组装 AI 信号 → Executor ──
-                if result.get("direction") in ("long", "short"):
-                    from agent.signal_bridge import ai_signal_to_rules
-                    rules = ai_signal_to_rules(result, initial_balance=st.session_state.ai_initial_balance)
-
-                    status.update(label="📥 加载市场数据…")
-                    # 获取当前时间段的 K 线数据用于预热
-                    current_df = fetch_klines_with_agg(cfg, limit=data_count, timeframe=tf_key, symbol=ETH_SYMBOL)
-                    st.session_state.ai_data = current_df
-
-                    from execution.ai_executor import AIStrategyExecutor
-                    executor = AIStrategyExecutor(
-                        rules=rules, cfg=cfg,
-                        initial_balance=st.session_state.ai_initial_balance,
-                        mode="live" if st.session_state.ai_use_live_mode else "paper",
-                    )
-
-                    # 预热：跳过入场，只加载 K 线到缓冲区
-                    executor.ai_signal_skip_entry = True
-                    if current_df is not None and not current_df.empty:
-                        for _, bar in current_df.iterrows():
-                            executor.on_bar(bar)
-                    executor.ai_signal_skip_entry = False
-
-                    st.session_state.ai_executor = executor
-                    st.session_state.ai_running = True
-                    st.session_state.ai_trade_state = executor.get_state()
-
-                    status.update(label="✅ AI 交易已启动", state="complete")
-                    st.success(f"🎯 AI 信号: {result.get('direction')} (信心指数 {result.get('confidence', 0)}%)")
-                else:
-                    st.warning(f"⚠ AI 信号为中性 (neutral)，不启动交易。{result.get('summary', '')}")
-                    st.session_state.ai_running = False
+                dir_text = {"long": "📈 看多", "short": "📉 看空", "neutral": "⚖️ 中性"}.get(
+                    result.get("direction", ""), "-"
+                )
+                status.update(label=f"✅ 分析完成: {dir_text}", state="complete")
+                st.rerun()
         except Exception as e:
             st.session_state.ai_error = str(e)
-            st.session_state.ai_running = False
-        st.rerun()
+            st.rerun()
 
-with btn_cols[1]:
-    stop_disabled = not st.session_state.ai_running
-    if st.button("⏹ 停止", use_container_width=True, type="secondary", disabled=stop_disabled):
-        st.session_state.ai_running = False
-        state = st.session_state.get("ai_trade_state")
-        if state:
-            st.success(
-                f"已停止 | 交易 {state.get('total_trades', 0)} 笔 | "
-                f"权益 ${state.get('account', {}).get('equity', 0):,.2f}"
-            )
-        st.rerun()
-
-with btn_cols[2]:
-    if st.button("🗑 清除", use_container_width=True,
-                 disabled=st.session_state.ai_running):
-        for k in ["ai_running", "ai_executor", "ai_trade_state",
-                  "ai_analysis_result", "ai_news", "ai_data", "ai_ticker",
-                  "ai_trades", "ai_equity_curve", "ai_entry_markers",
-                  "ai_exit_markers", "ai_chat_context", "ai_chat_messages",
-                  "ai_error"]:
-            st.session_state[k] = None
-        st.session_state.ai_running = False
-        st.rerun()
-
-with btn_cols[3]:
+with btn_cols[4]:
     st.session_state.ai_initial_balance = st.number_input(
         "初始资金 (USDT)",
         min_value=100.0, max_value=10_000_000.0,
         value=st.session_state.ai_initial_balance,
         step=1000.0,
-        disabled=st.session_state.ai_running,
     )
 
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════
-# STATUS CARDS
+# AGENT SYSTEM STATUS
 # ════════════════════════════════════════════════════════════════
 
-state = st.session_state.get("ai_trade_state")
-acc = state.get("account", {}) if state else {}
-running = st.session_state.ai_running
-analysis = st.session_state.get("ai_analysis_result")
+status_data = _read_agent_status() if agent_running else {}
+agent3 = status_data.get("agent3", {}) if status_data else {}
+risk_status = agent3.get("risk_status", {}) if agent3 else {}
+pm_status = status_data.get("position_monitor", {}) if status_data else {}
+deepseek_stats = agent3.get("deepseek_stats", {}) if agent3 else {}
 
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
-st.markdown('<div class="section-title">📊 交易状态</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">📊 Agent 系统状态</div>', unsafe_allow_html=True)
 
-kpi_cols = st.columns(6)
-with kpi_cols[0]:
-    equity_val = acc.get("equity", 0) if acc else 0
-    init_val = acc.get("initial_balance", st.session_state.ai_initial_balance) if acc else st.session_state.ai_initial_balance
-    pnl_val = equity_val - init_val
-    pnl_pct = (pnl_val / init_val * 100) if init_val > 0 else 0
-    st.metric("总权益", f"${equity_val:,.2f}", f"{pnl_val:+,.2f}")
+status_cols = st.columns(6)
 
-with kpi_cols[1]:
-    pos_label = "⬜ 空仓"
-    ip = state.get("in_position", False) if state else False
-    ps = state.get("position_side", "") if state else ""
-    if ip and ps == "long":
-        pos_label = "🟢 多头"
-    elif ip and ps == "short":
-        pos_label = "🔴 空头"
-    st.metric("持仓", pos_label)
+with status_cols[0]:
+    mode_text = status_data.get("mode", "—").upper() if status_data else "已停止"
+    st.metric("系统模式", f"{'🟢 运行中' if agent_running else '⏸ 已停止'}", mode_text)
 
-with kpi_cols[2]:
-    ep = state.get("entry_price", 0) if state else 0
-    st.metric("入场价", f"${ep:,.2f}" if ep > 0 else "-")
+with status_cols[1]:
+    trades_exec = agent3.get("trades_executed", "—") if agent3 else "—"
+    st.metric("Agent 3 成交", str(trades_exec))
 
-with kpi_cols[3]:
-    if analysis:
-        dir_text = {"long": "📈 看多", "short": "📉 看空", "neutral": "⚖️ 中性"}.get(analysis.get("direction", ""), "-")
-        conf = analysis.get("confidence", 0)
-        st.metric("AI 信号", dir_text, f"{conf}%")
-    else:
-        st.metric("AI 信号", "等待启动")
+with status_cols[2]:
+    skipped = agent3.get("trades_skipped", "—") if agent3 else "—"
+    st.metric("跳过次数", str(skipped))
 
-with kpi_cols[4]:
-    trades = acc.get("trades", []) if acc else []
-    total_trades = len(trades)
-    st.metric("交易次数", total_trades)
+with status_cols[3]:
+    deepseek_calls = deepseek_stats.get("total_calls", "—") if deepseek_stats else "—"
+    st.metric("DeepSeek 调用", str(deepseek_calls))
 
-with kpi_cols[5]:
-    status_text = "🟢 运行中" if running else "⏸ 已停止"
-    st.metric("状态", status_text)
+with status_cols[4]:
+    pnl = agent3.get("last_monthly_pnl", "—") if agent3 else "—"
+    st.metric("月盈亏", f"{pnl:+.2f}" if isinstance(pnl, (int, float)) else str(pnl))
 
-if running and state:
-    # 附加状态行
-    extra_cols = st.columns(6)
-    with extra_cols[0]:
-        sig = state.get("signal", "hold")
-        sig_emoji = {"buy": "🟢", "sell": "🔴", "short": "🔴", "hold": "⚪", "blocked": "🟡"}
-        st.caption(f"最新信号: {sig_emoji.get(sig, '⚪')} {sig.upper()}")
+with status_cols[5]:
+    wr = agent3.get("last_win_rate", "—") if agent3 else "—"
+    st.metric("胜率", f"{wr:.1f}%" if isinstance(wr, (int, float)) else str(wr))
 
-    with extra_cols[1]:
-        reason = state.get("signal_reason", "")
-        if reason:
-            st.caption(f"📡 {reason}")
-
-    with extra_cols[2]:
-        mtp = state.get("multi_tp_level", 0)
-        if mtp:
-            st.caption(f"止盈级别: {mtp}")
-
-    with extra_cols[3]:
-        dsp = state.get("dynamic_stop_price", 0)
-        if dsp > 0:
-            st.caption(f"动态止损: ${dsp:.2f}")
-
-    with extra_cols[4]:
-        cr = state.get("cooldown_remaining", 0)
-        if cr > 0:
-            st.caption(f"⏳ 冷却: {cr}根K线")
-
-    with extra_cols[5]:
-        ptl = state.get("prev_trade_loss", False)
-        if ptl:
-            st.caption("⚠️ 前笔亏损")
-
-    # 信号原因详情
-    if state.get("signal_reason"):
-        st.info(f"📡 {state['signal_reason']}")
+if agent_running and status_data:
+    _render_agent_dashboard(status_data)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════
-# DISPLAY — 读 session_state 渲染，不在 fragment 内，刷新不闪烁
+# DISPLAY — K-line chart + ticker
 # ════════════════════════════════════════════════════════════════
 
 _ticker_d = st.session_state.get("ai_ticker")
@@ -530,7 +732,7 @@ elif _ticker_d is None:
     st.info("⏳ 加载K线数据…")
 
 # ════════════════════════════════════════════════════════════════
-# DATA FRAGMENT — 仅获取数据 + 喂 Executor，无显示，全页刷新更新
+# DATA FRAGMENT — 数据更新 + Agent 交易标记读取
 # ════════════════════════════════════════════════════════════════
 
 refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
@@ -538,7 +740,7 @@ refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
 
 @st.fragment(run_every=refresh_interval_s)
 def _data_fragment():
-    """仅获取数据 + 喂 Executor，显示在 fragment 外，刷新不闪烁。"""
+    """仅获取数据，刷新不闪烁。"""
     if st.session_state.get("_ai_rerun_guard"):
         st.session_state._ai_rerun_guard = False
         return
@@ -563,38 +765,37 @@ def _data_fragment():
         if st.session_state.get("ai_data") is None:
             st.error(f"获取数据失败: {e}")
 
-    _df = st.session_state.get("ai_data")
+    # 如果 Agent 在运行，从 SQLite 读取交易标记
+    if _agent_is_running():
+        try:
+            trades_df = _get_trades_df(limit=20)
+            if not trades_df.empty:
+                entries = trades_df[trades_df["trade_type"] == "open"]
+                exits = trades_df[trades_df["trade_type"] == "close"]
+                if not entries.empty:
+                    markers = []
+                    for _, r in entries.iterrows():
+                        try:
+                            t = pd.to_datetime(r["timestamp"])
+                            markers.append({"time": t, "price": float(r["price"]), "side": r["side"]})
+                        except Exception:
+                            pass
+                    if markers:
+                        st.session_state.ai_entry_markers = markers
+                if not exits.empty:
+                    markers = []
+                    for _, r in exits.iterrows():
+                        try:
+                            t = pd.to_datetime(r["timestamp"])
+                            markers.append({"time": t, "price": float(r["price"]), "side": r["side"]})
+                        except Exception:
+                            pass
+                    if markers:
+                        st.session_state.ai_exit_markers = markers
+        except Exception:
+            pass
 
-    # 喂数据给 Executor
-    if st.session_state.get("ai_running") and _df is not None and not _df.empty:
-        _executor = st.session_state.get("ai_executor")
-        if _executor is not None:
-            _buf = _executor.bar_buffer
-            if _buf is not None and not _buf.empty:
-                _last_processed = _buf.index[-1]
-                _new_bars = _df[_df.index > _last_processed]
-            else:
-                _new_bars = _df
-            if not _new_bars.empty:
-                for _, _bar in _new_bars.iterrows():
-                    _executor.on_bar(_bar)
-                st.session_state.ai_trade_state = _executor.get_state()
-                _acc = _executor.account
-                if _acc.trades:
-                    st.session_state.ai_trades = _acc.trades
-                _eq = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "equity": _acc.equity}
-                _curve = st.session_state.get("ai_equity_curve") or []
-                _curve.append(_eq)
-                st.session_state.ai_equity_curve = _curve
-                if _executor.in_position:
-                    _entry_markers = st.session_state.get("ai_entry_markers") or []
-                    _ep = _executor.entry_price
-                    _et = _executor.entry_time or ""
-                    if not _entry_markers or _entry_markers[-1].get("price") != _ep:
-                        _entry_markers.append({"time": _et, "price": _ep, "side": _executor.position_side})
-                        st.session_state.ai_entry_markers = _entry_markers
-
-    # 触发全页重跑 → 更新 fragment 外的显示
+    # 触发全页重跑
     if auto:
         st.session_state._ai_rerun_guard = True
         st.rerun()
@@ -704,7 +905,6 @@ if _res:
         for i, msg in enumerate(st.session_state.ai_chat_messages):
             with st.chat_message(msg["role"]):
                 if msg["role"] == "assistant" and i == len(st.session_state.ai_chat_messages) - 1:
-                    # 最新回答 — 带滑入动效
                     st.markdown(
                         f'<div class="fade-in-answer">{_sanitize_ai_text(msg["content"])}</div>',
                         unsafe_allow_html=True,
@@ -733,7 +933,6 @@ if _res:
         st.session_state.ai_chat_loading = True
         st.rerun()
 
-    # 两步渲染：问题先展示，回答好了再滑入
     if st.session_state.get("ai_chat_loading") and st.session_state.get("ai_chat_messages") and st.session_state.ai_chat_messages[-1]["role"] == "user":
         pending_question = st.session_state.ai_chat_messages[-1]["content"]
         context = st.session_state.get("ai_chat_context")
@@ -745,47 +944,167 @@ if _res:
         st.session_state.ai_chat_loading = False
         st.rerun()
 
+# ════════════════════════════════════════════════════════════════
+# PHASE 4 — 自学习指标展示（Agent 运行时）
+# ════════════════════════════════════════════════════════════════
+
+if agent_running and agent3:
+    st.markdown("---")
+    st.markdown("### 📊 Phase 4 — 自学习指标")
+    p4_cols = st.columns(4)
+
+    with p4_cols[0]:
+        cs = agent3.get("last_composite_score", 0)
+        cc = agent3.get("last_composite_confidence", 0)
+        if isinstance(cs, (int, float)):
+            cs_color = "#059669" if cs > 0 else "#dc2626" if cs < 0 else "#64748b"
+            cs_label = "📈 偏多" if cs > 0.2 else "📉 偏空" if cs < -0.2 else "⚖️ 中性"
+            st.metric(f"综合方向 {cs_label}", f"{cs:+.2f}", f"信心 {cc:.0%}" if isinstance(cc, (int, float)) else "—")
+        else:
+            st.metric("综合方向", str(cs))
+
+    with p4_cols[1]:
+        al_score = agent3.get("last_alignment_score", "—")
+        if isinstance(al_score, (int, float)):
+            al_color = "#059669" if al_score >= 0.7 else "#f59e0b" if al_score >= 0.4 else "#dc2626"
+            al_label = "🤝 共识" if al_score >= 0.7 else "⚠️ 分歧" if al_score < 0.4 else "⚪ 中性"
+            st.metric(f"信号对齐 {al_label}", f"{al_score:.2f}")
+        else:
+            st.metric("信号对齐", str(al_score))
+
+    with p4_cols[2]:
+        pnl_val = agent3.get("last_monthly_pnl", 0)
+        if isinstance(pnl_val, (int, float)):
+            st.metric("月盈亏", f"${pnl_val:+,.2f}", delta_color="normal" if pnl_val >= 0 else "inverse")
+        else:
+            st.metric("月盈亏", str(pnl_val))
+
+    with p4_cols[3]:
+        wr = agent3.get("last_win_rate", "—")
+        md = agent3.get("max_drawdown", "—")
+        if isinstance(wr, (int, float)):
+            st.metric("胜率", f"{wr:.1f}%",
+                      f"回撤 {md:.2f}%" if isinstance(md, (int, float)) else None)
+        else:
+            st.metric("胜率", str(wr))
+
+    # 信号对齐摘要文本
+    sa_text = agent3.get("signal_alignment", "")
+    if sa_text and sa_text != "暂无对齐数据":
+        al_score = agent3.get("last_alignment_score", 0)
+        if isinstance(al_score, (int, float)):
+            icon = "✅" if al_score >= 0.7 else "⚠️" if al_score < 0.4 else "ℹ️"
+        else:
+            icon = "ℹ️"
+        st.markdown(
+            f'<div style="background:#f8fafc;border-radius:8px;padding:0.75rem;'
+            f'margin-top:0.5rem;border-left:4px solid '
+            f'{"#059669" if isinstance(al_score,(int,float)) and al_score>=0.7 else "#f59e0b"};'
+            f'font-size:0.9rem;color:#334155;">'
+            f'{icon} 信号对齐: {sa_text}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # 自适应参数
+    amt = agent3.get("adjusted_max_trades")
+    adb = agent3.get("adjusted_debounce")
+    ait = agent3.get("adjusted_trade_interval")
+    if any(v is not None for v in [amt, adb, ait]):
+        st.caption(
+            f"⚙️ 自适应参数 — 最大日交易: {amt} / "
+            f"信号采集: {adb}s / "
+            f"交易间隔: {ait}s"
+        )
+
+    # 参数调整历史
+    p4 = agent3.get("phase4", {})
+    if p4 and p4.get("param_changes"):
+        with st.expander("📋 参数调整记录", expanded=False):
+            for entry in p4["param_changes"][-10:]:  # 最近10条
+                ts = entry.get("timestamp", "—")
+                changes = entry.get("changes", {})
+                reason = entry.get("reason", "")
+                st.markdown(
+                    f"**{ts}** — {reason}  "
+                    f"{'  '.join(f'{k}: {v}' for k, v in changes.items())}"
+               )
+
 
 # ════════════════════════════════════════════════════════════════
-# 交易记录
+# 交易记录（从 SQLite 读取）
 # ════════════════════════════════════════════════════════════════
 
-_trades = st.session_state.get("ai_trades") or []
-if _trades:
+_trades_df = _get_trades_df(limit=50) if agent_running else pd.DataFrame()
+
+if not _trades_df.empty:
     st.markdown("---")
     st.markdown("### 📋 交易记录")
 
-    import pandas as _pd
-    df_trades = _pd.DataFrame(_trades).iloc[::-1].reset_index(drop=True)
-    cols_show = ["time", "side", "price", "size", "pnl", "fee"]
-    cols_exist = [c for c in cols_show if c in df_trades.columns]
-    df_display = df_trades[cols_exist]
-    if "pnl" in df_display.columns:
-        df_display["pnl"] = df_display["pnl"].apply(
-            lambda x: f"${x:+,.2f}" if isinstance(x, (int, float)) and x != 0 else "-"
-        )
+    df_display = _trades_df[["timestamp", "side", "size", "price", "pnl_close", "trade_type"]].copy()
+    df_display["side"] = df_display["side"].map(
+        {"buy": "🟢 买入", "sell": "🔴 卖出", "long": "🟢 买入", "short": "🔴 卖出"}
+    ).fillna(df_display["side"])
+    df_display["trade_type"] = df_display["trade_type"].map(
+        {"open": "开仓", "close": "平仓"}
+    ).fillna(df_display["trade_type"])
+    df_display["pnl_close"] = df_display["pnl_close"].apply(
+        lambda x: f"${x:+,.2f}" if isinstance(x, (int, float)) and x != 0 else "-"
+    )
+    df_display.columns = ["时间", "方向", "数量", "价格", "盈亏", "类型"]
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
     # 统计
-    wins = [t for t in _trades if t.get("pnl", 0) > 0]
-    losses = [t for t in _trades if t.get("pnl", 0) < 0]
-    win_rate = len(wins) / len(_trades) * 100 if _trades else 0
-    total_pnl = sum(t.get("pnl", 0) for t in _trades)
-    stat_cols = st.columns(5)
-    stat_cols[0].metric("总盈亏", f"${total_pnl:+,.2f}")
-    stat_cols[1].metric("胜率", f"{win_rate:.1f}%")
-    stat_cols[2].metric("盈利次数", len(wins))
-    stat_cols[3].metric("亏损次数", len(losses))
-    stat_cols[4].metric("总交易", len(_trades))
-
+    stats = _get_trade_stats()
+    if stats["total"]:
+        stat_cols = st.columns(5)
+        stat_cols[0].metric("总盈亏", f"${stats['total_pnl']:+,.2f}")
+        stat_cols[1].metric("胜率", f"{stats['win_rate']:.1f}%")
+        stat_cols[2].metric("盈利次数", stats["wins"])
+        stat_cols[3].metric("亏损次数", stats["losses"])
+        stat_cols[4].metric("总交易", stats["total"])
+elif agent_running:
+    st.info("💡 Agent 系统运行中，暂无交易记录。等待 Agent 3 执行交易…")
+else:
+    st.info("💡 Agent 系统未运行。点击「启动 Agent」开始交易，或点击「一键 AI 分析」获取市场观点。")
 
 # ════════════════════════════════════════════════════════════════
 # 权益曲线
 # ════════════════════════════════════════════════════════════════
 
-_curve = st.session_state.get("ai_equity_curve") or []
-if len(_curve) >= 2:
-    st.markdown("---")
-    st.markdown("### 📈 权益曲线")
-    fig_eq = equity_curve_chart(_curve, title="AI 交易权益曲线", theme=st.session_state.get("theme_mode", "light"))
-    st.plotly_chart(fig_eq, use_container_width=True, config={"displayModeBar": False})
+if not _trades_df.empty and "pnl_close" in _trades_df.columns:
+    # 从 SQLite 计算每日权益
+    try:
+        hist = _trades_df[_trades_df["trade_type"] == "close"].copy()
+        if not hist.empty and hist["pnl_close"].notna().any():
+            hist["timestamp"] = pd.to_datetime(hist["timestamp"])
+            hist = hist.sort_values("timestamp")
+            cum_pnl = hist["pnl_close"].cumsum()
+            equity_points = []
+            init = st.session_state.ai_initial_balance
+            for i, (_, r) in enumerate(hist.iterrows()):
+                equity_points.append({
+                    "time": r["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                    "equity": init + float(cum_pnl.iloc[i]),
+                })
+            if len(equity_points) >= 2:
+                st.markdown("---")
+                st.markdown("### 📈 权益曲线")
+                fig_eq = equity_curve_chart(
+                    equity_points,
+                    title="Agent 交易权益曲线",
+                    theme=st.session_state.get("theme_mode", "light"),
+                )
+                st.plotly_chart(fig_eq, use_container_width=True, config={"displayModeBar": False})
+    except Exception:
+        pass  # 权益曲线非必需，静默跳过
+
+# ════════════════════════════════════════════════════════════════
+# FOOTER
+# ════════════════════════════════════════════════════════════════
+
+st.divider()
+st.caption(
+    f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC | "
+    f"Agent {'🟢 运行中' if agent_running else '⏸ 已停止'} | "
+    f"K线: {tf_label} | 数据延迟 ≤ 5s"
+)

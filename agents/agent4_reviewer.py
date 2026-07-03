@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -95,6 +96,8 @@ class Agent4Reviewer:
         self._review_history: list[dict] = []
         self._lock = asyncio.Lock()
         self._running = False
+        self._current_activity = ""
+        self._last_activity_time = 0.0
 
         # 统计
         self._stats = {
@@ -118,6 +121,9 @@ class Agent4Reviewer:
         """
         self._trade_count += 1
         interval = self._config.agent4_review_interval_trades
+        remaining = interval - (self._trade_count - self._last_review_count)
+        self._current_activity = f"📊 交易 #{self._trade_count}，还需 {remaining} 笔触发复盘"
+        self._last_activity_time = time.time()
         if self._trade_count - self._last_review_count >= interval:
             logger.info(
                 f"Agent 4: {self._trade_count} 笔交易已达复盘阈值 "
@@ -129,6 +135,8 @@ class Agent4Reviewer:
         """主循环（空循环，保持与 asyncio 任务体系兼容）"""
         self._running = True
         self._stats["start_time"] = datetime.now(timezone.utc).isoformat()
+        self._current_activity = "🟢 待机中（等待交易触发复盘）"
+        self._last_activity_time = time.time()
         logger.info("Agent 4 已启动（由 notify_trade 驱动，无独立循环）")
         try:
             while self._running:
@@ -147,6 +155,8 @@ class Agent4Reviewer:
         async with self._lock:
             try:
                 # 1. 采集数据
+                self._current_activity = "📡 采集复盘数据…"
+                self._last_activity_time = time.time()
                 interval = self._config.agent4_review_interval_trades
                 trades = self._load_recent_trades(interval)
                 market = self._collect_market_context()
@@ -156,6 +166,8 @@ class Agent4Reviewer:
                 prev_reviews = self._review_history[-3:]
 
                 # 2. 构建 Prompt
+                self._current_activity = "📝 构建复盘分析 Prompt"
+                self._last_activity_time = time.time()
                 prompt = self._build_review_prompt(
                     trades=trades,
                     market=market,
@@ -166,12 +178,16 @@ class Agent4Reviewer:
                 )
 
                 # 3. 调 DeepSeek（同步 API，包到线程池）
+                self._current_activity = "🤔 DeepSeek 复盘分析中…"
+                self._last_activity_time = time.time()
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(
                     None, self._deepseek.analyze_review, prompt
                 )
 
                 # 4. 校验并应用参数调整
+                self._current_activity = "🔍 校验并应用参数调整"
+                self._last_activity_time = time.time()
                 applied = []
                 adjustments = result.get("param_adjustments", [])
                 for adj in adjustments[: self._config.agent4_max_param_adjustments]:
@@ -211,6 +227,8 @@ class Agent4Reviewer:
                     self._review_history[-20:]
                 )
 
+                self._current_activity = f"✅ 复盘完成: {result.get('summary', '')[:60]}"
+                self._last_activity_time = time.time()
                 logger.info(
                     f"Agent 4: 复盘完成 — "
                     f"建议 {len(adjustments)} 条，应用 {len(applied)} 条 | "
@@ -219,6 +237,8 @@ class Agent4Reviewer:
 
             except Exception as e:
                 self._stats["total_adjustment_errors"] += 1
+                self._current_activity = f"⚠️ 复盘失败: {str(e)[:50]}"
+                self._last_activity_time = time.time()
                 logger.error(f"Agent 4 复盘失败: {e}", exc_info=True)
 
     # ── 数据采集 ──
@@ -461,6 +481,8 @@ class Agent4Reviewer:
     def get_status(self) -> dict:
         return {
             "running": self._running,
+            "current_activity": self._current_activity,
+            "last_activity_time": self._last_activity_time,
             "trade_count": self._trade_count,
             "last_review_count": self._last_review_count,
             "next_review_in": max(
