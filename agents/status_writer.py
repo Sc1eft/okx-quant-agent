@@ -23,6 +23,7 @@ def write_agent_status(
     agent4_reviewer_status: dict | None = None,
     position_monitor_status: dict | None = None,
     mode: str = "paper",
+    reports: dict | None = None,
 ):
     """将各 Agent 状态写入 JSON 文件（供 Streamlit 面板读取）"""
     data = {
@@ -33,7 +34,16 @@ def write_agent_status(
         "agent3": agent3_status or {},
         "agent4_reviewer": agent4_reviewer_status or {},
         "position_monitor": position_monitor_status or {},
+        "reports": {
+            "last_daily": "",
+            "last_weekly": "",
+            "last_monthly": "",
+            "last_push_ok": False,
+            "last_push_time": "",
+        },
     }
+    if reports:
+        data["reports"].update(reports)
     Path(_STATUS_FILE).parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(_STATUS_FILE, "w", encoding="utf-8") as f:
