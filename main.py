@@ -131,7 +131,15 @@ async def main():
 
     review_gen = ReviewGenerator(
         config=agent_config, db_path=agent_config.db_path,
+        deepseek=deepseek,
     ) if agent_config.review_generator_enabled else None
+
+    # ── ServerChan 推送器 ──
+    from agents.notifier import ServerChanNotifier
+
+    notifier = ServerChanNotifier(
+        sendkey=agent_config.serverchan_sendkey,
+    ) if agent_config.serverchan_enabled else None
 
     # ── 创建 Agent 实例 ──
     agent1 = Agent1(config=agent_config, event_bus=event_bus) if agent_config.agent1_enabled else None
@@ -161,6 +169,7 @@ async def main():
         okx_client=okx_rest,
         review_generator=review_gen,  # Phase 4
         agent4_reviewer=agent4_reviewer,  # Agent 4（替代 param_adapter）
+        notifier=notifier,
     ) if agent_config.agent3_enabled else None
 
     logger.info(f"Agent 1 (技术)={'✅' if agent1 else '❌'}")
