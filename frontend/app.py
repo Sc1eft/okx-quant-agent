@@ -177,6 +177,7 @@ pages = [
     ("🟢 以太坊", "pages/9_🟢_EthereumLive.py"),
     ("💓 ETH 心跳", "pages/10_💓_ETHHeartbeat.py"),
     ("🤖 AI 交易", "pages/11_🤖_AI_Trading.py"),
+    ("📋 交易报告", "pages/13_📋_TradeReport.py"),
 ]
 
 # Use page navigation
