@@ -157,6 +157,134 @@ class DeepSeekTrader:
             logger.error(f"DeepSeek API 调用失败: {e}")
             return self._fallback_decision(context.get("current_price", 0))
 
+    # ── 交易报告分析 ──
+
+    _TRADE_REPORT_SYSTEM_PROMPT = """你是一个量化交易分析 AI。分析以下交易数据，识别盈利和亏损的模式。
+
+【周期信息】
+- 周期类型: {period_type}
+- 时间范围: {period_start} ~ {period_end}
+
+【统计概览】
+- 总交易: {trades} 笔
+- 盈利: {wins} 笔
+- 亏损: {losses} 笔
+- 胜率: {win_rate}%
+- 总盈亏: {total_pnl} USDT
+- 最大回撤: {max_drawdown}%
+
+【盈利交易】
+{win_details}
+
+【亏损交易】
+{loss_details}
+
+请分析以上数据，返回严格的 JSON 格式（不要 markdown 围栏）：
+{{
+    "wins": {{
+        "count": 整数,
+        "total_profit": 浮点数,
+        "patterns": [
+            {{
+                "pattern": "盈利模式描述如'MACD金叉+KDJ超卖共振做多'",
+                "wins_count": 整数,
+                "avg_profit": 浮点数,
+                "takeaway": "这个模式值得继续/加强/注意什么"
+            }}
+        ]
+    }},
+    "losses": {{
+        "count": 整数,
+        "total_loss": 浮点数,
+        "patterns": [
+            {{
+                "pattern": "亏损模式描述如'布林带上轨突破追多'",
+                "loss_count": 整数,
+                "avg_loss": 浮点数,
+                "cause": "亏损原因分析",
+                "suggestion": "具体的调整建议"
+            }}
+        ]
+    }},
+    "summary": "一句话总结（中文，50字内）"
+}}
+
+注意：如果全部盈利则 losses.patterns 为空列表；
+如果全部亏损则 wins.patterns 为空列表。
+"""
+
+    def analyze_trade_report(self, context: dict) -> dict:
+        """分析一段周期内的交易盈亏模式，识别盈利规律和亏损原因。
+
+        context 包含:
+            period_type: "daily" | "weekly" | "monthly"
+            period_start: str (ISO datetime)
+            period_end: str (ISO datetime)
+            stats: { trades, wins, losses, win_rate, total_pnl, max_drawdown_pct }
+            win_trades: [{ pnl, side, reason, entry_price, exit_price }]
+            loss_trades: [{ pnl, side, reason, entry_price, exit_price }]
+
+        Returns:
+            { wins: { count, total_profit, patterns: [...] },
+              losses: { count, total_loss, patterns: [...] },
+              summary: "..." }
+        """
+        self.total_calls += 1
+        stats = context.get("stats", {})
+
+        # 格式化盈利/亏损交易详情
+        def _format_trades(trades, label):
+            if not trades:
+                return f"无{label}交易"
+            lines = []
+            for i, t in enumerate(trades[:10], 1):  # 最多传 10 笔
+                reason = t.get("reason", "")[:60]
+                lines.append(
+                    f"  {i}. 方向:{t.get('side','')} 盈亏:{t.get('pnl',0):+.2f} "
+                    f"入场:{t.get('entry_price','')} 出场:{t.get('exit_price','')} "
+                    f"原因:{reason}"
+                )
+            if len(trades) > 10:
+                lines.append(f"  ... 还有 {len(trades)-10} 笔")
+            return "\n".join(lines)
+
+        prompt_kwargs = {
+            "period_type": context.get("period_type", ""),
+            "period_start": context.get("period_start", ""),
+            "period_end": context.get("period_end", ""),
+            "trades": str(stats.get("trades", 0)),
+            "wins": str(stats.get("wins", 0)),
+            "losses": str(stats.get("losses", 0)),
+            "win_rate": str(stats.get("win_rate", 0)),
+            "total_pnl": str(stats.get("total_pnl", 0)),
+            "max_drawdown": str(stats.get("max_drawdown_pct", 0)),
+            "win_details": _format_trades(context.get("win_trades", []), "盈利"),
+            "loss_details": _format_trades(context.get("loss_trades", []), "亏损"),
+        }
+
+        system_prompt = self._TRADE_REPORT_SYSTEM_PROMPT.format(**prompt_kwargs)
+
+        try:
+            resp = self._client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "请分析以上交易数据。"},
+                ],
+                temperature=0.4,
+                max_tokens=2000,
+            )
+            content = resp.choices[0].message.content or ""
+            return self._parse_json_response(content)
+        except Exception as e:
+            self.total_errors += 1
+            logger.error(f"DeepSeek 交易报告分析失败: {e}")
+            return {
+                "wins": {"count": 0, "total_profit": 0, "patterns": []},
+                "losses": {"count": 0, "total_loss": 0, "patterns": []},
+                "summary": "AI 分析暂不可用",
+            }
+
     # ── Agent 4 复盘分析 ──
 
     def analyze_review(self, prompt_text: str) -> dict:
