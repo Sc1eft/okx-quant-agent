@@ -68,7 +68,7 @@ def _populate_trades(db_path: str, trades: list[dict]):
                 t.get("pnl", 0),
                 t.get("order_id", ""),
                 "ETH-USDT",
-                "{}",
+                t.get("decision", "{}"),
                 t.get("pnl_close", 0),
                 t.get("trade_group_id", ""),
                 t.get("trade_type", "open"),
@@ -132,9 +132,9 @@ class TestReviewGenerator:
         assert report["type"] == "daily"
         assert report["stats"]["trades"] >= 1
 
-        # 验证文件存在
+        # 验证文件存在（新目录结构）
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        report_path = Path(config.review_report_dir) / f"daily_{today}.json"
+        report_path = Path(config.report_dir) / "daily" / f"daily_{today}.json"
         assert report_path.exists()
         with open(str(report_path), encoding="utf-8") as f:
             loaded = json.load(f)
@@ -152,7 +152,7 @@ class TestReviewGenerator:
         assert report["type"] == "weekly"
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        report_path = Path(config.review_report_dir) / f"weekly_{today}.json"
+        report_path = Path(config.report_dir) / "weekly" / f"weekly_{today}.json"
         assert report_path.exists()
 
     def test_report_skipped_below_min_trades(self, config, temp_db):
@@ -189,3 +189,65 @@ class TestReviewGenerator:
         assert "sell" in stats["by_side"]
         assert stats["by_side"]["buy"]["trades"] == 2
         assert stats["by_side"]["buy"]["pnl"] == 5.0
+
+    # ── Task 3: 交易报告扩展测试 ──
+
+    def test_extract_wins_and_losses(self, config, temp_db):
+        """提取盈亏交易"""
+        _populate_trades(temp_db, [
+            {"pnl_close": 10, "side": "buy", "decision": '{"reason": "MACD golden cross"}', "trade_type": "close"},
+            {"pnl_close": -5, "side": "sell", "decision": '{"reason": "Resistance break"}', "trade_type": "close"},
+        ])
+        gen = ReviewGenerator(config, temp_db)
+        conn = sqlite3.connect(temp_db)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM trades").fetchall()
+        conn.close()
+        wins, losses = gen.extract_wins_and_losses(rows)
+        assert len(wins) == 1, f"expected 1 win, got {len(wins)}"
+        assert len(losses) == 1, f"expected 1 loss, got {len(losses)}"
+        assert wins[0]["pnl"] == 10, f"expected pnl 10, got {wins[0]['pnl']}"
+        assert losses[0]["pnl"] == -5, f"expected pnl -5, got {losses[0]['pnl']}"
+        assert wins[0]["reason"], f"expected non-empty reason, got {repr(wins[0]['reason'])} (rows: {[(r['id'], repr(r['decision'])) for r in rows]})"
+        assert "golden cross" in wins[0]["reason"]
+
+    def test_monthly_report_no_trades(self, config, temp_db):
+        """无交易时月度报告返回零值"""
+        gen = ReviewGenerator(config, temp_db)
+        report = gen.generate_monthly_report()
+        assert report["type"] == "monthly"
+        assert report["stats"]["trades"] == 0
+        assert report["pushed"] is False
+        assert "trades" in report
+
+    def test_monthly_report_with_trades(self, config, temp_db):
+        """月度报告包含交易明细"""
+        _populate_trades(temp_db, [
+            {"pnl_close": 10, "side": "buy", "decision": json.dumps({"reason": "MACD cross"}), "trade_type": "close"},
+            {"pnl_close": -3, "side": "sell", "decision": "{}", "trade_type": "close"},
+        ])
+        gen = ReviewGenerator(config, temp_db)
+        report = gen.generate_monthly_report()
+        assert report["stats"]["trades"] >= 1
+        assert len(report["trades"]["wins"]) >= 1
+
+    def test_report_writes_to_new_dir(self, config, temp_db):
+        """报告写入新目录结构 data/reports/{type}/"""
+        _populate_trades(temp_db, [
+            {"pnl_close": 10, "trade_type": "close"},
+        ])
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        gen = ReviewGenerator(config, temp_db)
+        gen.generate_daily_report()
+        path = Path(config.report_dir) / "daily" / f"daily_{today}.json"
+        assert path.exists()
+
+    def test_ai_analysis_not_called_when_no_deepseek(self, config, temp_db):
+        """不传 deepseek 时不调用 AI 分析"""
+        _populate_trades(temp_db, [
+            {"pnl_close": 10, "trade_type": "close"},
+            {"pnl_close": -5, "trade_type": "close"},
+        ])
+        gen = ReviewGenerator(config, temp_db)  # no deepseek passed
+        report = gen.generate_daily_report()
+        assert "ai_analysis" not in report  # deepseek=None 时不添加

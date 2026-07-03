@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.config import AgentSystemConfig
+from agents.deepseek_caller import DeepSeekTrader
 
 logger = logging.getLogger("review_generator")
 
@@ -29,9 +30,11 @@ logger = logging.getLogger("review_generator")
 class ReviewGenerator:
     """复盘报告生成器"""
 
-    def __init__(self, config: AgentSystemConfig, db_path: str):
+    def __init__(self, config: AgentSystemConfig, db_path: str,
+                 deepseek: DeepSeekTrader | None = None):
         self.config = config
         self.db_path = db_path
+        self.deepseek = deepseek
 
     # ── 公共查询方法 ──
 
@@ -72,6 +75,34 @@ class ReviewGenerator:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         stats = self.compute_daily_stats(today)
         report = self._build_report(stats, "daily", today)
+        report["period"] = {
+            "start": f"{today}T00:00:00",
+            "end": f"{today}T23:59:59",
+        }
+
+        # 获取该时间范围的交易行
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE trade_type='close' AND timestamp >= ? AND timestamp <= ?",
+                (f"{today}T00:00:00", f"{today}T23:59:59"),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if rows:
+            win_trades, loss_trades = self.extract_wins_and_losses(rows)
+            report["trades"] = {"wins": win_trades, "losses": loss_trades}
+            if self.deepseek and len(rows) >= self.config.report_min_trades_for_analysis:
+                report["ai_analysis"] = self._analyze_trades_with_deepseek(
+                    win_trades, loss_trades, stats, "daily",
+                    f"{today}T00:00:00", f"{today}T23:59:59",
+                )
+        else:
+            report["trades"] = {"wins": [], "losses": []}
+
+        report["pushed"] = False
+        report["push_time"] = None
         self._write_report(report, "daily", today)
         logger.info(f"每日复盘报告: 胜率 {stats['win_rate']:.1f}%, 盈亏 {stats['total_pnl']:+.2f} USDT")
         return report
@@ -79,8 +110,37 @@ class ReviewGenerator:
     def generate_weekly_report(self) -> dict[str, Any]:
         """生成每周复盘报告并写入 JSON"""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         stats = self.compute_weekly_stats()
         report = self._build_report(stats, "weekly", today)
+        report["period"] = {
+            "start": week_ago,
+            "end": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # 获取该时间范围的交易行
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE trade_type='close' AND timestamp >= ?",
+                (week_ago,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if rows:
+            win_trades, loss_trades = self.extract_wins_and_losses(rows)
+            report["trades"] = {"wins": win_trades, "losses": loss_trades}
+            if self.deepseek and len(rows) >= self.config.report_min_trades_for_analysis:
+                report["ai_analysis"] = self._analyze_trades_with_deepseek(
+                    win_trades, loss_trades, stats, "weekly",
+                    week_ago, datetime.now(timezone.utc).isoformat(),
+                )
+        else:
+            report["trades"] = {"wins": [], "losses": []}
+
+        report["pushed"] = False
+        report["push_time"] = None
         self._write_report(report, "weekly", today)
         logger.info(f"每周复盘报告: 胜率 {stats['win_rate']:.1f}%, 盈亏 {stats['total_pnl']:+.2f} USDT")
         return report
@@ -201,6 +261,131 @@ class ReviewGenerator:
             "by_side": by_side,
         }
 
+    def extract_wins_and_losses(
+        self, rows: list[sqlite3.Row],
+    ) -> tuple[list[dict], list[dict]]:
+        """从 SQLite Row 列表中提取盈利和亏损交易详情
+
+        Returns:
+            (win_trades, loss_trades) — 每个元素是 dict:
+            { pnl, side, reason, entry_price, exit_price, time }
+        """
+        win_trades = []
+        loss_trades = []
+        for r in rows:
+            pnl = r["pnl_close"] or r["pnl"] or 0
+            reason = ""
+            if r["decision"] and r["decision"] != "{}":
+                try:
+                    dec = json.loads(r["decision"])
+                    reason = dec.get("reason", "")
+                except (json.JSONDecodeError, TypeError):
+                    reason = r["decision"][:100] if isinstance(r["decision"], str) else ""
+
+            trade = {
+                "trade_id": r["id"],
+                "pnl": pnl,
+                "side": r["side"],
+                "entry_price": r["price"] or 0,
+                "exit_price": 0,  # 无法从单行推断出场价，后续可扩展
+                "reason": reason,
+                "time": r["timestamp"],
+            }
+            if pnl > 0:
+                win_trades.append(trade)
+            elif pnl < 0:
+                loss_trades.append(trade)
+        return win_trades, loss_trades
+
+    def _analyze_trades_with_deepseek(
+        self,
+        win_trades: list[dict],
+        loss_trades: list[dict],
+        stats: dict,
+        period_type: str,
+        period_start: str,
+        period_end: str,
+    ) -> dict:
+        """调用 DeepSeek 分析盈亏模式"""
+        if not self.deepseek:
+            return {
+                "wins": {"count": len(win_trades), "total_profit": sum(t["pnl"] for t in win_trades),
+                         "patterns": []},
+                "losses": {"count": len(loss_trades), "total_loss": sum(t["pnl"] for t in loss_trades),
+                           "patterns": []},
+                "summary": "",
+            }
+
+        context = {
+            "period_type": period_type,
+            "period_start": period_start,
+            "period_end": period_end,
+            "stats": {
+                "trades": stats["trades"],
+                "wins": stats["wins"],
+                "losses": stats["losses"],
+                "win_rate": stats["win_rate"],
+                "total_pnl": stats["total_pnl"],
+                "max_drawdown_pct": stats["max_drawdown_pct"],
+            },
+            "win_trades": win_trades[:10],
+            "loss_trades": loss_trades[:10],
+        }
+        return self.deepseek.analyze_trade_report(context)
+
+    def generate_monthly_report(self) -> dict[str, Any]:
+        """生成月度复盘报告并写入 JSON"""
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if now.month == 12:
+            next_month = now.replace(year=now.year + 1, month=1, day=1)
+        else:
+            next_month = now.replace(month=now.month + 1, day=1)
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE trade_type='close' AND timestamp >= ? AND timestamp < ?",
+                (month_start.isoformat(), next_month.isoformat()),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        stats = self.compute_monthly_stats()
+        date_str = now.strftime("%Y-%m")
+        report = self._build_report(stats, "monthly", date_str)
+        report["period"] = {
+            "start": month_start.isoformat(),
+            "end": now.isoformat(),
+        }
+
+        # 提取盈亏交易
+        if rows:
+            win_trades, loss_trades = self.extract_wins_and_losses(rows)
+            report["trades"] = {
+                "wins": win_trades,
+                "losses": loss_trades,
+            }
+            # AI 分析
+            if (self.deepseek and
+                len(rows) >= self.config.report_min_trades_for_analysis):
+                report["ai_analysis"] = self._analyze_trades_with_deepseek(
+                    win_trades, loss_trades, stats, "monthly",
+                    month_start.isoformat(), now.isoformat(),
+                )
+        else:
+            report["trades"] = {"wins": [], "losses": []}
+
+        report["pushed"] = False
+        report["push_time"] = None
+
+        self._write_report(report, "monthly", date_str)
+        logger.info(
+            f"月度交易报告: {stats['trades']}笔 胜率{stats['win_rate']:.1f}% "
+            f"盈亏{stats['total_pnl']:+.2f} USDT"
+        )
+        return report
+
     def _fallback_to_pnl(self, conn, days=None, since=None, until=None) -> dict:
         """当 pnl_close 全部为 0 时使用 pnl 字段"""
         conditions: list[str] = []
@@ -294,7 +479,8 @@ class ReviewGenerator:
     def _generate_summary_text(self, stats: dict) -> str:
         """生成可读的中文总结"""
         if stats["trades"] < self.config.review_report_min_trades:
-            return f"交易次数不足 ({stats['trades']} < {self.config.review_report_min_trades}), 暂不生成总结"
+            return (f"交易次数不足 ({stats['trades']} < "
+                    f"{self.config.review_report_min_trades}), 暂不生成总结")
         parts = [
             f"共 {stats['trades']} 笔交易 | 胜率 {stats['win_rate']:.1f}% "
             f"({stats['wins']}胜/{stats['losses']}负)",
@@ -311,11 +497,20 @@ class ReviewGenerator:
         return " | ".join(parts)
 
     def _write_report(self, report: dict, report_type: str, date_str: str):
-        """写入 JSON 文件"""
-        report_dir = Path(self.config.review_report_dir)
-        os.makedirs(str(report_dir), exist_ok=True)
-        suffix = f"daily_{date_str}" if report_type == "daily" else f"weekly_{date_str}"
-        path = report_dir / f"{suffix}.json"
+        """写入 JSON 文件到 data/reports/{type}/"""
+        base_dir = Path(self.config.report_dir) / report_type
+        os.makedirs(str(base_dir), exist_ok=True)
+
+        if report_type == "daily":
+            filename = f"daily_{date_str}.json"
+        elif report_type == "weekly":
+            filename = f"weekly_{date_str}.json"
+        elif report_type == "monthly":
+            filename = f"monthly_{date_str}.json"
+        else:
+            filename = f"{report_type}_{date_str}.json"
+
+        path = base_dir / filename
         with open(str(path), "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
-        logger.debug(f"复盘报告已写入: {path}")
+        logger.debug(f"交易报告已写入: {path}")
