@@ -652,7 +652,7 @@ with st.container():
                 _status.update(label="📊 获取技术指标数据…")
                 _k15 = fetch_klines_with_agg(cfg, limit=30, timeframe="15m", symbol="ETH-USDT")
                 _k1h = fetch_klines_with_agg(cfg, limit=20, timeframe="1h", symbol="ETH-USDT")
-                _k1d = fetch_klines_with_agg(cfg, limit=7, timeframe="1d", symbol="ETH-USDT")
+                _k1d = fetch_klines_with_agg(cfg, limit=60, timeframe="1d", symbol="ETH-USDT")
 
                 _status.update(label="🔄 获取关联币种行情…")
                 _btc = fetch_ticker(cfg, symbol="BTC-USDT")

@@ -45,8 +45,10 @@ _AI_SYSTEM_PROMPT = """你是专业的加密货币交易分析师，综合技术
 2. **中期技术面（1小时 K 线）** — 权重中高
    - 确认趋势方向，过滤短期噪音
 
-3. **长期技术面（日线）** — 权重中
-   - 提供大方向背景，但不作为短线决策主依据
+3. **长期技术面（日线）** — 权重中高
+   - 日线 MACD/KDJ/布林带已完整计算，趋势转折信号参考价值高
+   - 日线 SMA50/SMA200 位置指示大级别牛熊分界线
+   - 日线趋势与短中期方向一致时增强信号可信度
 
 4. **MACD 指标（多周期）** — 权重高
    - 关注 MACD 金叉/死叉信号、柱线方向（扩大/缩小）、零轴位置
@@ -63,10 +65,14 @@ _AI_SYSTEM_PROMPT = """你是专业的加密货币交易分析师，综合技术
    - 布林收口（squeeze）预示大幅波动即将到来
    - 价格沿上轨/下轨运行说明趋势强劲
 
-7. **关联币种（BTC/SOL/DOGE）** — 权重中
+7. **日线 SMA 均线** — 权重中
+   - SMA50 与 SMA200 的排列关系（金叉/死叉）指示牛熊转换
+   - 当前价格在 SMA20/SMA50/SMA200 上方还是下方
+
+8. **关联币种（BTC/SOL/DOGE）** — 权重中
    - BTC 强相关时提高权重，脱离联动时降低
 
-8. **新闻基本面** — 动态权重（按时效和冲击力调整）：
+9. **新闻基本面** — 动态权重（按时效和冲击力调整）：
    - 🚨 **6 小时内 + 高冲击主题**（监管政策 / 安全事件 / ETF /
         协议升级等）→ **最高权重**，可能完全改变短期方向
    - **6~24 小时** → 高权重，尚未完全 priced in
@@ -430,6 +436,19 @@ def _build_ai_analysis_prompt(
     lines.append(_summarize_klines(klines_1h, "中期(1小时)"))
     lines.append(_summarize_klines(klines_1d, "长期(日线)"))
     lines.append("")
+
+    # ── 日线均线（大级别趋势参考） ──
+    if klines_1d is not None and len(klines_1d) >= 20:
+        close_d = klines_1d["close"].astype(float)
+        sma20 = close_d.rolling(20).mean().iloc[-1]
+        lines.append(f"日线 SMA20: {sma20:.2f}")
+        if len(close_d) >= 50:
+            sma50 = close_d.rolling(50).mean().iloc[-1]
+            lines.append(f"日线 SMA50: {sma50:.2f}")
+        if len(close_d) >= 200:
+            sma200 = close_d.rolling(200).mean().iloc[-1]
+            lines.append(f"日线 SMA200: {sma200:.2f}")
+        lines.append("")
 
     # ── MACD 指标 ──
     lines.append("### MACD 指标")

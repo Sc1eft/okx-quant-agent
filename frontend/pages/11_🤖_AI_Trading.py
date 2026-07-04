@@ -584,7 +584,7 @@ with btn_cols[3]:
                 status.update(label="📊 获取技术指标…")
                 k15 = fetch_klines_with_agg(cfg, limit=30, timeframe="15m", symbol=ETH_SYMBOL)
                 k1h = fetch_klines_with_agg(cfg, limit=20, timeframe="1h", symbol=ETH_SYMBOL)
-                k1d = fetch_klines_with_agg(cfg, limit=7, timeframe="1d", symbol=ETH_SYMBOL)
+                k1d = fetch_klines_with_agg(cfg, limit=60, timeframe="1d", symbol=ETH_SYMBOL)
 
                 status.update(label="🔄 关联币种…")
                 btc = fetch_ticker(cfg, symbol="BTC-USDT")
