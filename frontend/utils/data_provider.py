@@ -59,6 +59,7 @@ def fetch_okx_data(
         .dt.tz_convert("Asia/Shanghai")
     )
     df = df.set_index("timestamp")
+    df = df.sort_index()  # OKX 返回 newest-first，统一升序
     df = df.rename(columns={"vol": "volume"})
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     df.index.name = "timestamp"
