@@ -165,12 +165,18 @@ def _start_agent_process(mode: str = "paper") -> bool:
         except Exception:
             pass
 
+    # stderr 输出到日志文件，崩溃后可查看原因
+    stderr_log = PROJECT_ROOT / "logs" / "agent_startup_error.log"
+    stderr_log.parent.mkdir(parents=True, exist_ok=True)
+    stderr_fh = open(stderr_log, "a", encoding="utf-8")
+
     proc = subprocess.Popen(
         [sys.executable or "python", str(script), "--mode", mode],
         cwd=str(PROJECT_ROOT),
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr_fh,
     )
+    logger.info(f"Agent 进程已启动 (PID={proc.pid}), stderr → {stderr_log}")
 
     # 写 PID 文件
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)

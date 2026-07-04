@@ -45,8 +45,12 @@ import os as _os
 for _key in ("OKX_API_KEY", "OKX_SECRET_KEY", "OKX_PASSPHRASE", "DEEPSEEK_API_KEY"):
     try:
         _val = st.secrets[_key]
-        if _val and _val.startswith("sk-"):
-            _os.environ[_key] = _val
+        if not _val:
+            continue
+        # DEEPSEEK_API_KEY 以 "sk-" 开头，OKX 密钥不以 sk- 开头
+        if _key == "DEEPSEEK_API_KEY" and not _val.startswith("sk-"):
+            continue  # 非 sk- 前缀的 DeepSeek Key 跳过（可能是占位符）
+        _os.environ[_key] = _val
     except KeyError:
         pass  # 未配置 secrets 时使用本地默认值
 

@@ -81,7 +81,13 @@ async def main():
     args = parser.parse_args()
 
     # ── 加载配置 ──
-    root_config = Config.load(args.config)
+    config_path = Path(args.config)
+    if config_path.exists():
+        root_config = Config.load(args.config)
+    else:
+        root_config = Config()
+        print(f"[WARN] 配置文件 {args.config} 不存在，使用默认配置。")
+        print(f"[WARN] 通过环境变量 OKX_API_KEY / DEEPSEEK_API_KEY 设置密钥。")
     root_config.mode = args.mode
     agent_config = AgentSystemConfig()
     agent_config.exchange_permissions = root_config.exchange.permissions
