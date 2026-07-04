@@ -72,13 +72,21 @@ logger = logging.getLogger("ai_trading_page")
 
 
 def _pid_is_alive(pid: int) -> bool:
-    """Windows 上用 tasklist 检测进程是否存活（比 os.kill(pid,0) 更可靠）"""
+    """跨平台检测进程是否存活"""
+    # Linux / macOS: os.kill(pid, 0) 发空信号，不杀死进程
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    # Windows: tasklist 更可靠
     try:
         result = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
             capture_output=True, text=True, timeout=5,
         )
-        # tasklist 输出含进程名才表示存活
         return "python" in result.stdout.lower() and str(pid) in result.stdout
     except Exception:
         return False
