@@ -36,6 +36,16 @@ from agents.signal_aligner import SignalAligner
 logger = logging.getLogger("agent3")
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    """安全地将值转换为 float，不可转换时返回 default"""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
 class Agent3:
     """Agent 3 — 交易决策与执行"""
 
@@ -70,10 +80,18 @@ class Agent3:
         self.agent4_reviewer = agent4_reviewer  # Agent 4（替代 param_adapter）
         self.notifier = notifier  # 交易报告推送器
 
+        # Phase 2: 注册平仓回调，使 Agent 3 的 _current_position 随平仓同步更新
+        if self.position_monitor:
+            self.position_monitor.close_callback = self._on_position_closed
+
         # 事件缓冲区
         self._event_buffer: list[AgentEvent] = []
         self._last_decision_time: Optional[datetime] = None
         self._decision_lock = asyncio.Lock()  # re-entrancy guard
+
+        # 最新价格缓存（跨 _build_context 调用持久化，防止事件缓冲区无价格时显示 $0）
+        self._current_price: float = 0.0
+        self._price_refresh_task: Optional[asyncio.Task] = None
 
         # 运行状态
         self._running = False
@@ -114,7 +132,8 @@ class Agent3:
         # Phase 4: 后台协程
         if self.review_gen:
             consumers.append(self._review_scheduler())
-        # Agent 4 替代了 param_adapter 的调参职责
+        # 价格定时刷新（WebSocket 被 Agent1 处理，Agent3 单独用 REST API 兜底价格缓存）
+        consumers.append(self._refresh_current_price())
 
         await asyncio.gather(*consumers)
 
@@ -139,11 +158,16 @@ class Agent3:
                 logger.exception("_consume_a 异常，1s 后重试")
                 await asyncio.sleep(1)
                 continue
+
             idle_ticks = 0
             self._stats["events_received_a"] += 1
             self._current_activity = f"📨 收到技术信号 (#{self._stats['events_received_a']})"
             self._last_activity_time = time.time()
-            await self._on_event(event)
+            try:
+                await self._on_event(event)
+            except Exception:
+                logger.exception("_consume_a: _on_event 异常，跳过该事件")
+                continue
 
     async def _consume_b(self):
         """消费 Queue B（新闻/基本面事件）"""
@@ -156,10 +180,15 @@ class Agent3:
                 logger.exception("_consume_b 异常，1s 后重试")
                 await asyncio.sleep(1)
                 continue
+
             self._stats["events_received_b"] += 1
             self._current_activity = f"📨 收到新闻/链上事件 (#{self._stats['events_received_b']})"
             self._last_activity_time = time.time()
-            await self._on_event(event)
+            try:
+                await self._on_event(event)
+            except Exception:
+                logger.exception("_consume_b: _on_event 异常，跳过该事件")
+                continue
 
     async def _on_event(self, event: AgentEvent):
         """收到新事件后的处理"""
@@ -275,7 +304,6 @@ class Agent3:
             self._current_activity = f"💱 执行 {trade_side} {size_eth:.4f} ETH…"
             self._last_activity_time = time.time()
             logger.info(f"DeepSeek 决策: {decision['action']} (信心 {decision['confidence']}%)")
-            self._stats["trades_executed"] += 1
 
             trade_result = await self.executor.execute_safe(
                 side=trade_side,
@@ -286,6 +314,7 @@ class Agent3:
 
             # ── 6. Layer 3 记录（Phase 4: P&L 跟踪） ──
             if trade_result["success"]:
+                self._stats["trades_executed"] += 1
                 trade_group_id = str(uuid.uuid4())[:8]
                 self.risk.record_trade({
                     "side": trade_side,
@@ -304,8 +333,9 @@ class Agent3:
 
                 # Phase 2: 通知持仓监控器 (Phase 4: 传入 trade_group_id)
                 if self.position_monitor:
-                    stop_loss = float(decision.get("stop_loss", 0))
-                    take_profit = float(decision.get("take_profit", 0))
+                    # 安全解析 stop_loss/take_profit，防止 DeepSeek 返回空字符串导致 float("") 崩溃
+                    stop_loss = _safe_float(decision.get("stop_loss"), 0)
+                    take_profit = _safe_float(decision.get("take_profit"), 0)
                     self.position_monitor.update_position(
                         side=trade_side,
                         size=size_eth,
@@ -331,6 +361,10 @@ class Agent3:
                         "trade_type": "open",
                     }
                     asyncio.create_task(self.agent4_reviewer.notify_trade(trade_record))
+                # 更新当前持仓（供前端和上下文使用）
+                self._current_position["side"] = trade_side
+                self._current_position["size"] = size_eth
+                self._current_position["entry_price"] = trade_result["fill_price"]
                 self._current_activity = f"✅ {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}"
                 self._last_activity_time = time.time()
             else:
@@ -343,7 +377,8 @@ class Agent3:
         """从事件列表构建 DeepSeek 上下文"""
         agent1_lines = []
         agent2_lines = []
-        current_price = 0.0
+        # 从缓存开始（如果没有事件提供价格，沿用上次已知价格）
+        current_price = self._current_price
 
         # Phase 3: 链上数据汇总
         gas_gwei = 0.0
@@ -361,6 +396,7 @@ class Agent3:
                 price = d.get("price", 0)
                 if price:
                     current_price = price
+                    self._current_price = price  # 持久化缓存
                 agent1_lines.append(f"[{tf}] {desc}")
             elif e.source == "agent2":
                 title = d.get("title", "")
@@ -409,7 +445,7 @@ class Agent3:
             "position_direction": self._current_position["side"],
             "position_size": self._current_position["size"],
             "entry_price": self._current_position["entry_price"],
-            "pnl_pct": "",
+            "pnl_pct": self._calc_pnl_pct(current_price),
             "agent1_summary": "\n".join(agent1_lines) if agent1_lines else "暂无技术面信号",
             "agent2_summary": "\n".join(agent2_lines) if agent2_lines else "暂无新闻数据",
             # Phase 3: 链上指标
@@ -433,6 +469,18 @@ class Agent3:
             "adjusted_trade_interval": str(self.config.agent3_min_interval_between_trades),
         }
 
+    def _calc_pnl_pct(self, current_price: float) -> str:
+        """根据当前仓位计算浮盈/浮亏百分比"""
+        direction = self._current_position["side"]
+        entry = self._current_position["entry_price"]
+        if direction != "none" and entry > 0 and current_price > 0:
+            if direction == "long":
+                pnl_pct = (current_price - entry) / entry * 100
+            else:
+                pnl_pct = (entry - current_price) / entry * 100
+            return f"{pnl_pct:+.2f}"
+        return ""
+
     def _suggested_size(self, context: dict) -> float:
         """根据上下文和风控建议仓位大小 (Phase 4: 信号对齐调节)"""
         multiplier = self.risk.get_position_size_multiplier()
@@ -449,6 +497,23 @@ class Agent3:
             # 交易中会通过 _build_context 的 alignment 结果感知风险
 
         return base_size * multiplier
+
+    # ── 价格刷新（后台协程，确保 _current_price 始终有值） ──
+
+    async def _refresh_current_price(self):
+        """后台循环：定期从 OKX API 获取最新价格并缓存"""
+        while self._running:
+            try:
+                if self.okx_client:
+                    ticker = await asyncio.to_thread(
+                        self.okx_client.get_ticker, self.root_config.trading.symbol
+                    )
+                    price = float(ticker.get("last", 0))
+                    if price > 0:
+                        self._current_price = price
+            except Exception:
+                pass  # 静默失败，下次重试
+            await asyncio.sleep(30)  # 每 30s 刷新一次
 
     # ── Phase 4: 复盘报告调度 ──
 
@@ -532,6 +597,18 @@ class Agent3:
             "size": size,
             "entry_price": entry_price,
         }
+
+    def _on_position_closed(self, side: str, size: float, fill_price: float, pnl: float):
+        """仓位监控器平仓后的回调 — 重置 Agent 3 的仓位状态"""
+        self._current_position = {
+            "side": "none",
+            "size": 0.0,
+            "entry_price": 0.0,
+        }
+        logger.info(
+            f"仓位已平仓: {side} {size:.4f} ETH @ ${fill_price:.2f} "
+            f"PnL={pnl:+.2f} USDT — Agent 3 仓位状态已重置"
+        )
 
     def get_status(self) -> dict:
         return {

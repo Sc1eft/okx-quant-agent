@@ -30,11 +30,13 @@ class PositionMonitor:
         risk_manager,
         executor,
         okx_client,
+        close_callback=None,  # 平仓回调: close_callback(side, size, fill_price, pnl)
     ):
         self.config = config
         self.risk = risk_manager
         self.executor = executor
         self.okx = okx_client
+        self.close_callback = close_callback
 
         # 当前持仓信息
         self._has_position: bool = False
@@ -71,6 +73,7 @@ class PositionMonitor:
         entry_price: float,
         stop_loss: float = 0.0,
         take_profit: float = 0.0,
+        trade_group_id: str = "",
     ):
         """更新持仓信息（由 Agent 3 在新开仓后调用）"""
         self._has_position = size > 0
@@ -173,7 +176,7 @@ class PositionMonitor:
                 f"多头止损触发: ${current_price:.2f} <= SL ${self._current_stop_loss:.2f}"
             )
             was_trailing = self._trailing_stop_active
-            await self._close_position("多头止损")
+            await self._close_position("多头止损", current_price)
             self._stats["stop_loss_triggered"] += 1
             if was_trailing:
                 self._stats["trailing_stop_triggered"] += 1
@@ -184,7 +187,7 @@ class PositionMonitor:
             logger.info(
                 f"多头止盈触发: ${current_price:.2f} >= TP ${self._take_profit:.2f}"
             )
-            await self._close_position("多头止盈")
+            await self._close_position("多头止盈", current_price)
             self._stats["take_profit_triggered"] += 1
             return True
 
@@ -213,7 +216,7 @@ class PositionMonitor:
                 f"空头止损触发: ${current_price:.2f} >= SL ${self._current_stop_loss:.2f}"
             )
             was_trailing = self._trailing_stop_active
-            await self._close_position("空头止损")
+            await self._close_position("空头止损", current_price)
             self._stats["stop_loss_triggered"] += 1
             if was_trailing:
                 self._stats["trailing_stop_triggered"] += 1
@@ -224,21 +227,31 @@ class PositionMonitor:
             logger.info(
                 f"空头止盈触发: ${current_price:.2f} <= TP ${self._take_profit:.2f}"
             )
-            await self._close_position("空头止盈")
+            await self._close_position("空头止盈", current_price)
             self._stats["take_profit_triggered"] += 1
             return True
 
         return False
 
-    async def _close_position(self, reason: str):
-        """平仓（按市价卖出/买入）"""
+    async def _close_position(self, reason: str, current_price: float = 0.0):
+        """平仓（按市价卖出/买入）
+
+        Args:
+            reason: 平仓原因描述
+            current_price: 触发平仓时的当前价格（用于 execute_safe 模拟模式）
+        """
         side = "sell" if self._position_side == "long" else "buy"
         size_str = f"{self._position_size:.6f}"
 
         logger.info(f"平仓: {self._position_side} {self._position_size:.4f} ETH (原因: {reason})")
 
         try:
-            result = await self.executor.execute_market(side, size_str)
+            result = await self.executor.execute_safe(
+                side=side,
+                size_eth=self._position_size,
+                signal_price=current_price if current_price > 0 else self._entry_price,
+                prefer_limit=False,  # 平仓用市价单
+            )
             if result["success"]:
                 # Calculate actual PnL
                 fill_price = result.get("fill_price", 0)
@@ -257,6 +270,14 @@ class PositionMonitor:
                     "decision": {"action": side, "reason": reason},
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
+                # 通知 Agent 3 更新仓位状态
+                if self.close_callback:
+                    self.close_callback(
+                        side=side,
+                        size=self._position_size,
+                        fill_price=fill_price,
+                        pnl=round(pnl, 2),
+                    )
             else:
                 logger.error(f"平仓失败: {result.get('error', '')}")
         except Exception as e:

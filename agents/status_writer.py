@@ -45,9 +45,12 @@ def write_agent_status(
     if reports:
         data["reports"].update(reports)
     Path(_STATUS_FILE).parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = _STATUS_FILE + ".tmp"
     try:
-        with open(_STATUS_FILE, "w", encoding="utf-8") as f:
+        # 原子写入：先写 .tmp，再 rename 覆盖，防止前端读到半截文件
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_file, _STATUS_FILE)
     except OSError as e:
         logger.warning(f"写入状态文件失败: {e}")
 

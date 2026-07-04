@@ -137,6 +137,9 @@ class AgentSystemConfig:
     signal_aligner_enabled: bool = True
     signal_aligner_conflict_threshold: float = 0.5
 
+    # ── 交易所权限（决定 TradeExecutor 是否模拟成交）──
+    exchange_permissions: str = "read"  # "read" → 模拟成交, "trade" → 调真实 API
+
     # ── Logging ──
     log_level: str = "INFO"
     log_file: str = "logs/agent_system.log"

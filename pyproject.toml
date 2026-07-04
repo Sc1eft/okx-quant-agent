@@ -44,6 +44,9 @@ python_functions = ["test_*"]
 # 兼容无根 __init__.py 的导入模式
 norecursedirs = [".claude", ".superpowers", ".playwright-mcp", ".workbuddy"]
 
+[project.scripts]
+generate-code-map = "scripts.generate_code_map:main"
+
 [tool.setuptools.packages.find]
 include = [
   "agents*",
@@ -56,6 +59,7 @@ include = [
   "strategies*",
   "data*",
   "tests*",
+  "scripts*",
 ]
 exclude = ["logs*"]
 

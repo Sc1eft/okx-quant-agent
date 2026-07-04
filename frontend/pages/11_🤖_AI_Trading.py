@@ -244,9 +244,8 @@ def _stop_agent_process() -> bool:
 
     _cleanup_pid()
 
-    # 覆写状态文件为空 JSON（比 unlink 更可靠：即使文件被进程锁定，
-    # 写入空内容不会触发 PermissionError）
-    _overwrite_status_empty()
+    # 注意：不覆写 agent_status.json，保留历史数据供前端刷新后查看。
+    # STOP_FLAG 已足够让 _agent_is_running() 返回 False。
 
     # 验证进程真死了（最多等 3 秒）
     if pid:
@@ -627,124 +626,124 @@ with btn_cols[4]:
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════
-# AGENT SYSTEM STATUS
+# AGENT SYSTEM STATUS — 独立 fragment，不触发全页重渲染
 # ════════════════════════════════════════════════════════════════
 
-status_data = _read_agent_status() if agent_running else {}
-agent3 = status_data.get("agent3", {}) if status_data else {}
-risk_status = agent3.get("risk_status", {}) if agent3 else {}
-pm_status = status_data.get("position_monitor", {}) if status_data else {}
-deepseek_stats = agent3.get("deepseek_stats", {}) if agent3 else {}
+@st.fragment(run_every=5 if auto else None)
+def _agent_status_fragment():
+    """独立读取 agent_status.json 渲染 Agent 卡片（不闪烁）"""
+    _running = _agent_is_running()
+    _sd = _read_agent_status() if _running else {}
+    _a3 = _sd.get("agent3", {}) if _sd else {}
 
-st.markdown('<div class="section-card">', unsafe_allow_html=True)
-st.markdown('<div class="section-title">📊 Agent 系统状态</div>', unsafe_allow_html=True)
-
-status_cols = st.columns(6)
-
-with status_cols[0]:
-    mode_text = status_data.get("mode", "—").upper() if status_data else "已停止"
-    st.metric("系统模式", f"{'🟢 运行中' if agent_running else '⏸ 已停止'}", mode_text)
-
-with status_cols[1]:
-    trades_exec = agent3.get("trades_executed", "—") if agent3 else "—"
-    st.metric("Agent 3 成交", str(trades_exec))
-
-with status_cols[2]:
-    skipped = agent3.get("trades_skipped", "—") if agent3 else "—"
-    st.metric("跳过次数", str(skipped))
-
-with status_cols[3]:
-    deepseek_calls = deepseek_stats.get("total_calls", "—") if deepseek_stats else "—"
-    st.metric("DeepSeek 调用", str(deepseek_calls))
-
-with status_cols[4]:
-    pnl = agent3.get("last_monthly_pnl", "—") if agent3 else "—"
-    st.metric("月盈亏", f"{pnl:+.2f}" if isinstance(pnl, (int, float)) else str(pnl))
-
-with status_cols[5]:
-    wr = agent3.get("last_win_rate", "—") if agent3 else "—"
-    st.metric("胜率", f"{wr:.1f}%" if isinstance(wr, (int, float)) else str(wr))
-
-if agent_running and status_data:
-    _render_agent_dashboard(status_data)
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ════════════════════════════════════════════════════════════════
-# DISPLAY — K-line chart + ticker
-# ════════════════════════════════════════════════════════════════
-
-_ticker_d = st.session_state.get("ai_ticker")
-_df_d = st.session_state.get("ai_data")
-_tf_d = st.session_state.get("ai_timeframe", "15分钟")
-_tk_d = TIMEFRAMES.get(_tf_d, "1d")
-
-if _ticker_d:
-    _ch24 = _ticker_d.get("change_24h", 0) or 0
-    _pc = "green" if _ch24 >= 0 else "red"
-    _lp = _ticker_d.get("last", 0) or 0
-    st.markdown(f"""
-    <div class="ticker-bar">
-    <div class="ticker-item"><span class="ticker-label">ETH-USDT</span><span class="ticker-value {_pc}">${_lp:,.2f} {_fmt_change(_ch24)}</span></div>
-    <div class="ticker-item"><span class="ticker-label">买一 / 卖一</span><span class="ticker-value">{f'${_ticker_d.get("bid", 0):,.2f}' if _ticker_d.get("bid") else "N/A"} / {f'${_ticker_d.get("ask", 0):,.2f}' if _ticker_d.get("ask") else "N/A"}</span></div>
-    <div class="ticker-item"><span class="ticker-label">24h 最高 / 最低</span><span class="ticker-value">{f'${_ticker_d.get("high_24h", 0):,.2f}' if _ticker_d.get("high_24h") else "N/A"} / {f'${_ticker_d.get("low_24h", 0):,.2f}' if _ticker_d.get("low_24h") else "N/A"}</span></div>
-    <div class="ticker-item"><span class="ticker-label">24h 成交量</span><span class="ticker-value">{f'{_ticker_d.get("volume_24h", 0):,.0f} ETH'}</span></div>
-    </div>
-    """, unsafe_allow_html=True)
-
-# K 线图 + 交易标记
-if _df_d is not None and not _df_d.empty:
-    _fig = _build_candlestick_fig(_df_d, ticker_data=_ticker_d, tf_key=_tk_d, height=450)
-
-    _entry_markers = st.session_state.get("ai_entry_markers") or []
-    if _entry_markers:
-        _entry_df = pd.DataFrame(_entry_markers)
-        _entry_df["time"] = pd.to_datetime(_entry_df["time"])
-        _fig.add_trace(go.Scatter(
-            x=_entry_df["time"], y=_entry_df["price"],
-            mode="markers", name="入场",
-            marker=dict(color="#059669", size=14, symbol="triangle-up", line=dict(color="white", width=2)),
-        ))
-
-    _exit_markers = st.session_state.get("ai_exit_markers") or []
-    if _exit_markers:
-        _exit_df = pd.DataFrame(_exit_markers)
-        _exit_df["time"] = pd.to_datetime(_exit_df["time"])
-        _fig.add_trace(go.Scatter(
-            x=_exit_df["time"], y=_exit_df["price"],
-            mode="markers", name="出场",
-            marker=dict(color="#dc2626", size=14, symbol="triangle-down", line=dict(color="white", width=2)),
-        ))
-
-    st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
-
-    # KPI row
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    _kpi_sub = st.columns(4)
-    with _kpi_sub[0]: st.metric("当前价", f"${float(_df_d['close'].iloc[-1]):,.2f}")
-    with _kpi_sub[1]: st.metric("时段最高", f"${float(_df_d['high'].max()):,.2f}")
-    with _kpi_sub[2]: st.metric("时段最低", f"${float(_df_d['low'].min()):,.2f}")
-    with _kpi_sub[3]:
-        _vol = float(_df_d['volume'].sum())
-        st.metric("时段成交量", f"{_vol:,.0f}")
+    st.markdown('<div class="section-title">📊 Agent 系统状态</div>', unsafe_allow_html=True)
+
+    sc = st.columns(6)
+    with sc[0]:
+        _mt = _sd.get("mode", "—").upper() if _sd else "已停止"
+        st.metric("系统模式", f"{'🟢 运行中' if _running else '⏸ 已停止'}", _mt)
+    with sc[1]:
+        st.metric("Agent 3 成交", str(_a3.get("trades_executed", "—")))
+    with sc[2]:
+        st.metric("跳过次数", str(_a3.get("trades_skipped", "—")))
+    with sc[3]:
+        _ds = _a3.get("deepseek_stats", {}) or {}
+        st.metric("DeepSeek 调用", str(_ds.get("total_calls", "—")))
+    with sc[4]:
+        _pnl = _a3.get("last_monthly_pnl", "—")
+        st.metric("月盈亏", f"{_pnl:+.2f}" if isinstance(_pnl, (int, float)) else str(_pnl))
+    with sc[5]:
+        _wr = _a3.get("last_win_rate", "—")
+        st.metric("胜率", f"{_wr:.1f}%" if isinstance(_wr, (int, float)) else str(_wr))
+
+    if _running and _sd:
+        _render_agent_dashboard(_sd)
+
     st.markdown('</div>', unsafe_allow_html=True)
-elif _ticker_d is None:
-    st.info("⏳ 加载K线数据…")
+
+_agent_status_fragment()
+
+# 供后续 Phase 4 使用的 agent3 数据（页面加载时读取一次，增量更新走 fragment）
+# 无论 Agent 是否运行都读取状态文件，保证历史数据跨刷新保留
+status_data = _read_agent_status()
+agent3 = status_data.get("agent3", {}) if status_data else {}
+
+# ════════════════════════════════════════════════════════════════
+# DISPLAY — K-line chart + ticker（独立 fragment，不触发全页刷新）
+# ════════════════════════════════════════════════════════════════
+
+refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
+
+@st.fragment(run_every=refresh_interval_s)
+def _chart_fragment():
+    """从 session_state 读取数据渲染 K 线图（独立刷新）"""
+    _t = st.session_state.get("ai_ticker")
+    _d = st.session_state.get("ai_data")
+    _tfl = st.session_state.get("ai_timeframe", "15分钟")
+    _tk = TIMEFRAMES.get(_tfl, "1d")
+
+    if _t:
+        _c24 = _t.get("change_24h", 0) or 0
+        _pc = "green" if _c24 >= 0 else "red"
+        _lp = _t.get("last", 0) or 0
+        st.markdown(f"""
+        <div class="ticker-bar">
+        <div class="ticker-item"><span class="ticker-label">ETH-USDT</span><span class="ticker-value {_pc}">${_lp:,.2f} {_fmt_change(_c24)}</span></div>
+        <div class="ticker-item"><span class="ticker-label">买一 / 卖一</span><span class="ticker-value">{f'${_t.get("bid",0):,.2f}' if _t.get("bid") else "N/A"} / {f'${_t.get("ask",0):,.2f}' if _t.get("ask") else "N/A"}</span></div>
+        <div class="ticker-item"><span class="ticker-label">24h 最高 / 最低</span><span class="ticker-value">{f'${_t.get("high_24h",0):,.2f}' if _t.get("high_24h") else "N/A"} / {f'${_t.get("low_24h",0):,.2f}' if _t.get("low_24h") else "N/A"}</span></div>
+        <div class="ticker-item"><span class="ticker-label">24h 成交量</span><span class="ticker-value">{f'{_t.get("volume_24h",0):,.0f} ETH'}</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if _d is not None and not _d.empty:
+        _fig = _build_candlestick_fig(_d, ticker_data=_t, tf_key=_tk, height=450)
+
+        _entry_markers = st.session_state.get("ai_entry_markers") or []
+        if _entry_markers:
+            _entry_df = pd.DataFrame(_entry_markers)
+            _entry_df["time"] = pd.to_datetime(_entry_df["time"])
+            _fig.add_trace(go.Scatter(
+                x=_entry_df["time"], y=_entry_df["price"],
+                mode="markers", name="入场",
+                marker=dict(color="#059669", size=14, symbol="triangle-up", line=dict(color="white", width=2)),
+            ))
+
+        _exit_markers = st.session_state.get("ai_exit_markers") or []
+        if _exit_markers:
+            _exit_df = pd.DataFrame(_exit_markers)
+            _exit_df["time"] = pd.to_datetime(_exit_df["time"])
+            _fig.add_trace(go.Scatter(
+                x=_exit_df["time"], y=_exit_df["price"],
+                mode="markers", name="出场",
+                marker=dict(color="#dc2626", size=14, symbol="triangle-down", line=dict(color="white", width=2)),
+            ))
+
+        st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
+
+        # KPI row
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        _kpi_sub = st.columns(4)
+        with _kpi_sub[0]: st.metric("当前价", f"${float(_d['close'].iloc[-1]):,.2f}")
+        with _kpi_sub[1]: st.metric("时段最高", f"${float(_d['high'].max()):,.2f}")
+        with _kpi_sub[2]: st.metric("时段最低", f"${float(_d['low'].min()):,.2f}")
+        with _kpi_sub[3]:
+            _vol = float(_d['volume'].sum())
+            st.metric("时段成交量", f"{_vol:,.0f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    elif _t is None:
+        st.info("⏳ 加载K线数据…")
+
+_chart_fragment()
 
 # ════════════════════════════════════════════════════════════════
 # DATA FRAGMENT — 数据更新 + Agent 交易标记读取
 # ════════════════════════════════════════════════════════════════
 
-refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
-
 
 @st.fragment(run_every=refresh_interval_s)
 def _data_fragment():
-    """仅获取数据，刷新不闪烁。"""
-    if st.session_state.get("_ai_rerun_guard"):
-        st.session_state._ai_rerun_guard = False
-        return
-
+    """仅获取数据写入 session_state，不触发全页重渲染。"""
     _tf_label = st.session_state.ai_timeframe
     _t_key = TIMEFRAMES.get(_tf_label, "1d")
     _d_count = st.session_state.ai_data_count
@@ -794,11 +793,6 @@ def _data_fragment():
                         st.session_state.ai_exit_markers = markers
         except Exception:
             pass
-
-    # 触发全页重跑
-    if auto:
-        st.session_state._ai_rerun_guard = True
-        st.rerun()
 
 
 _data_fragment()
@@ -945,10 +939,10 @@ if _res:
         st.rerun()
 
 # ════════════════════════════════════════════════════════════════
-# PHASE 4 — 自学习指标展示（Agent 运行时）
+# PHASE 4 — 自学习指标展示（只要有历史数据就显示）
 # ════════════════════════════════════════════════════════════════
 
-if agent_running and agent3:
+if agent3 and any(k in agent3 for k in ("last_composite_score", "last_monthly_pnl", "last_win_rate")):
     st.markdown("---")
     st.markdown("### 📊 Phase 4 — 自学习指标")
     p4_cols = st.columns(4)
@@ -1034,7 +1028,7 @@ if agent_running and agent3:
 # 交易记录（从 SQLite 读取）
 # ════════════════════════════════════════════════════════════════
 
-_trades_df = _get_trades_df(limit=50) if agent_running else pd.DataFrame()
+_trades_df = _get_trades_df(limit=50)
 
 if not _trades_df.empty:
     st.markdown("---")
@@ -1065,7 +1059,7 @@ if not _trades_df.empty:
 elif agent_running:
     st.info("💡 Agent 系统运行中，暂无交易记录。等待 Agent 3 执行交易…")
 else:
-    st.info("💡 Agent 系统未运行。点击「启动 Agent」开始交易，或点击「一键 AI 分析」获取市场观点。")
+    st.info("💡 Agent 系统未运行。点启动 Agent 开始交易。")
 
 # ════════════════════════════════════════════════════════════════
 # 权益曲线

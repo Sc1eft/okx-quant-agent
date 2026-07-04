@@ -325,7 +325,42 @@ class TradeExecutor:
         signal_price: float,
         prefer_limit: bool = True,
     ) -> dict:
-        """安全执行入口（自动处理size格式、限价→市价降级、滑点保护）"""
+        """安全执行入口（自动处理size格式、限价→市价降级、滑点保护）
+
+        当 exchange_permissions == "read" 时自动切换模拟模式，
+        不调 OKX 真实 API，直接返回模拟成交结果。
+        """
+        # ── 模拟模式：只读权限 / paper 模式，不调真实 API ──
+        if self.config.exchange_permissions == "read":
+            import random
+            import uuid
+
+            # ±0.2% 随机滑点，模拟市价单立即成交
+            simulated_fill_price = round(
+                signal_price * random.uniform(0.998, 1.002), 2
+            )
+            order_id = f"sim_{uuid.uuid4().hex[:12]}"
+            self.total_orders += 1
+            self.last_order = {
+                "side": side,
+                "size": f"{size_eth:.6f}",
+                "order_id": order_id,
+                "fill_price": simulated_fill_price,
+                "filled_size": size_eth,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            logger.info(
+                f"📝 [模拟] {side} {size_eth:.4f} ETH @ ${simulated_fill_price:.2f}"
+            )
+            return {
+                "success": True,
+                "order_id": order_id,
+                "fill_price": simulated_fill_price,
+                "filled_size": size_eth,
+                "error": "",
+                "simulated": True,
+            }
+
         size_str = f"{size_eth:.6f}"
 
         if prefer_limit:

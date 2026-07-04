@@ -84,6 +84,7 @@ async def main():
     root_config = Config.load(args.config)
     root_config.mode = args.mode
     agent_config = AgentSystemConfig()
+    agent_config.exchange_permissions = root_config.exchange.permissions
 
     setup_logging(args.log_level, agent_config.log_file)
     logger = logging.getLogger("main")

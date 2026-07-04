@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as _comps
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -87,7 +88,14 @@ st.session_state.theme_mode = "light" if "亮" in theme_mode else "dark"
 THEME_FILE.parent.mkdir(parents=True, exist_ok=True)
 THEME_FILE.write_text(st.session_state.theme_mode, encoding="utf-8")
 
-# ── Inject dark mode CSS (before pg.run() so it runs on every MPA page load) ──
+# ── Inject dark mode CSS + body class (before pg.run() so it runs on every MPA page load) ──
+# Use components.html to set body.dark-mode class — script runs in parent document
+_st_dark = st.session_state.theme_mode == "dark"
+_comps.html(f"""<script>
+try {{ parent.document.body.classList.toggle('dark-mode', {'true' if _st_dark else 'false'}); }} catch(e) {{}}
+try {{ document.body.classList.toggle('dark-mode', {'true' if _st_dark else 'false'}); }} catch(e) {{}}
+</script>""", height=0)
+
 if st.session_state.theme_mode == "dark":
     st.markdown("""<style>
     :root {
@@ -162,6 +170,9 @@ if st.session_state.theme_mode == "dark":
     .tf-bar-bg { background: #334155 !important; }
     .stPlotlyChart svg { background: #1e293b; }
     .stPlotlyChart .bg { fill: #1e293b !important; }
+    /* Extra overrides from style.css body.dark-mode that need direct selectors */
+    *[style*="color: #1e293b"],*[style*="color:#1e293b"] { color: #f1f5f9 !important; }
+    *[style*="color: #334155"],*[style*="color:#334155"] { color: #94a3b8 !important; }
     </style>""", unsafe_allow_html=True)
 
 # Navigation pages

@@ -935,7 +935,6 @@ def render_agent_cards(status_data: dict, *, show_recent: bool = True):
     .tf-bar-fill {{
         height: 100%;
         border-radius: 4px;
-        transition: width 0.5s ease;
     }}
     .tf-bar-ready {{
         box-shadow: 0 0 6px rgba(34,197,94,0.4);
