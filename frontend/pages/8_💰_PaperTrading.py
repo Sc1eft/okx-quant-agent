@@ -162,6 +162,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 cfg = get_config()
+BASE_CURRENCY = cfg.trading.symbol.split("-")[0]  # "ETH-USDT" → "ETH"
 strategies = _sb.get_available_strategies()
 
 if not strategies:
@@ -194,7 +195,7 @@ if ticker_data:
     st.markdown(f"""
     <div class="ticker-bar">
         <div class="ticker-item">
-            <span class="ticker-label">BTC-USDT</span>
+            <span class="ticker-label">{cfg.trading.symbol}</span>
             <span class="ticker-value {price_color}">${tk['last']:,.2f} {change_str}</span>
         </div>
         <div class="ticker-item">
@@ -203,7 +204,7 @@ if ticker_data:
         </div>
         <div class="ticker-item">
             <span class="ticker-label">24h 成交量</span>
-            <span class="ticker-value">{tk.get('volume_24h', 0):,.0f} BTC</span>
+            <span class="ticker-value">{tk.get('volume_24h', 0):,.0f} {BASE_CURRENCY}</span>
         </div>
         <div style="margin-left:auto; display:flex; align-items:center; gap:0.5rem;">
             <span class="badge badge--green">✅ 实时数据</span>
@@ -511,7 +512,8 @@ if df is not None and paper_state is not None:
         upnl = float(account.get("unrealized_pnl_pct", 0))
         render_metric_card("unrealized_pnl_pct", upnl)
     with kpi_cols[4]:
-        render_metric_card("position_btc", float(account.get("position", 0)))
+        pos_val = float(account.get("position", 0))
+        st.metric(f"持仓 ({BASE_CURRENCY})", f"{pos_val:.6f}")
     with kpi_cols[5]:
         sig = paper_state.get("signal", "hold")
         sig_emoji = {"buy": "🟢", "sell": "🔴", "exit": "⚫", "hold": "⚪"}
@@ -528,7 +530,7 @@ if df is not None and paper_state is not None:
         side = trade.get("side", "")
         price = trade.get("price", 0)
         if side == "buy":
-            st.success(f"✅ **买入执行** ${price:,.2f} | 数量 {trade.get('size', 0):.6f} BTC | 资金 ${account.get('balance', 0):,.2f}")
+            st.success(f"✅ **买入执行** ${price:,.2f} | 数量 {trade.get('size', 0):.6f} {BASE_CURRENCY} | 资金 ${account.get('balance', 0):,.2f}")
         elif side == "sell" and trade.get("pnl"):
             pnl = trade.get("pnl", 0)
             icon = "📈" if pnl > 0 else "📉"
@@ -645,7 +647,8 @@ if df is not None and paper_state is not None:
 
     pos_cols = st.columns(4)
     with pos_cols[0]:
-        render_metric_card("position_btc", float(account.get("position", 0)))
+        pos_val = float(account.get("position", 0))
+        st.metric(f"持仓 ({BASE_CURRENCY})", f"{pos_val:.6f}")
     with pos_cols[1]:
         render_metric_card("balance", float(account.get("balance", 0)))
     with pos_cols[2]:

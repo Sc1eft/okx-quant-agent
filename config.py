@@ -40,7 +40,7 @@ class ExchangeConfig:
 @dataclass
 class TradingConfig:
     """交易参数"""
-    symbol: str = "BTC-USDT"
+    symbol: str = "ETH-USDT"
     market: Literal["spot", "futures"] = "spot"
     timeframes: list[str] = field(default_factory=lambda: ["15m", "1h"])
     primary_timeframe: str = "1h"
