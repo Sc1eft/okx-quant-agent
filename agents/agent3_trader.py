@@ -482,21 +482,36 @@ class Agent3:
         return ""
 
     def _suggested_size(self, context: dict) -> float:
-        """根据上下文和风控建议仓位大小 (Phase 4: 信号对齐调节)"""
-        multiplier = self.risk.get_position_size_multiplier()
-        base_size = 0.01  # 基础 0.01 ETH
+        """根据上下文和风控建议仓位大小
 
-        # Phase 4: 信号对齐调节
-        if self.signal_aligner:
-            alignment = context.get("_alignment_cache", {})
-            if not alignment:
-                # 从上下文中的 alignment 字段推断
-                score = context.get("composite_score", 0)
-                if isinstance(score, (int, float)):
-                    pass  # 后续按需扩展
-            # 交易中会通过 _build_context 的 alignment 结果感知风险
+        计算逻辑:
+          1. 基础 = max_position × 0.5（默认 0.5×0.5=0.25 ETH ≈ $450）
+          2. Agent 4 动态调节乘数（0.1x ~ 3.0x）
+          3. 风控连亏递减（1.0 → 0.75 → 0.5 → ...）
+          4. 硬上限 = max_position
+          5. 下限 = 0.01 ETH（模拟盘最小单）
+        """
+        max_pos = self.config.agent3_max_position_eth  # 默认 0.5 ETH
+        base = max_pos * 0.5  # 基础仓位：最大的一半
 
-        return base_size * multiplier
+        # Agent 4 动态调节（配置中心可调，范围 0.1x~3.0x）
+        agent4_mult = self.config.agent3_position_size_multiplier
+
+        # 风控：连亏递减
+        risk_mult = self.risk.get_position_size_multiplier()
+
+        size = base * agent4_mult * risk_mult
+
+        # 硬上限 / 下限
+        size = min(size, max_pos)
+        size = max(size, 0.01)
+
+        logger.debug(
+            f"仓位计算: max={max_pos} base={base:.4f} "
+            f"agent4=×{agent4_mult:.2f} risk=×{risk_mult:.2f} "
+            f"→ {size:.4f} ETH"
+        )
+        return size
 
     # ── 价格刷新（后台协程，确保 _current_price 始终有值） ──
 
