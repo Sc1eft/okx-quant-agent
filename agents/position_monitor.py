@@ -75,13 +75,24 @@ class PositionMonitor:
         take_profit: float = 0.0,
         trade_group_id: str = "",
     ):
-        """更新持仓信息（由 Agent 3 在新开仓后调用）"""
+        """更新持仓信息（由 Agent 3 在新开仓后调用）
+
+        如果当前有持仓且新方向不同（反转）或清仓，
+        先自动记录平仓盈亏再更新。
+        """
+        # 检测反转/平仓 → 先记 PnL
+        if self._has_position and self._position_size > 0:
+            is_reversal = (size == 0) or (side != self._position_side)
+            if is_reversal and entry_price > 0:
+                self._record_close_pnl(entry_price)
+
         self._has_position = size > 0
         self._position_side = side if self._has_position else "none"
         self._position_size = size
         self._entry_price = entry_price
         self._stop_loss = stop_loss
         self._take_profit = take_profit
+        self._trade_group_id = trade_group_id
 
         # 重置移动止损状态
         self._trailing_stop_active = False
@@ -96,6 +107,53 @@ class PositionMonitor:
             )
         else:
             logger.info("持仓已清空，停止监控")
+
+    def _record_close_pnl(self, close_price: float):
+        """记录现有持仓的平仓盈亏（反转或清仓时调用）"""
+        close_side = "sell" if self._position_side == "long" else "buy"
+
+        if self._position_side == "long":
+            gross_pnl = (close_price - self._entry_price) * self._position_size
+        else:
+            gross_pnl = (self._entry_price - close_price) * self._position_size
+
+        fee_rate = self._fee_rate
+        open_fee = self._position_size * self._entry_price * fee_rate
+        close_fee = self._position_size * close_price * fee_rate
+        total_fee = open_fee + close_fee
+        net_pnl = gross_pnl - total_fee
+
+        # 平仓原因：反转 or 清仓
+        reason = f"平{self._position_side}反手" if self._position_side else "平仓"
+
+        self.risk.record_trade({
+            "side": close_side,
+            "size": self._position_size,
+            "price": close_price,
+            "pnl": round(net_pnl, 2),
+            "pnl_close": round(net_pnl, 2),
+            "fee": round(close_fee, 2),
+            "trade_group_id": self._trade_group_id or "",
+            "trade_type": "close",
+            "order_id": "",
+            "symbol": self.executor.symbol,
+            "decision": {"action": close_side, "reason": reason},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        logger.info(
+            f"📝 反转平仓: {self._position_side} {self._position_size:.4f} ETH "
+            f"@ ${close_price:.2f} → PnL={net_pnl:+.2f} USDT"
+        )
+
+        # 通知 Agent 3 重置仓位状态
+        if self.close_callback:
+            self.close_callback(
+                side=close_side,
+                size=self._position_size,
+                fill_price=close_price,
+                pnl=round(net_pnl, 2),
+            )
 
     def clear_position(self):
         """清空持仓（外部调用，如手动平仓后）"""
@@ -233,6 +291,14 @@ class PositionMonitor:
 
         return False
 
+    @property
+    def _fee_rate(self) -> float:
+        """根据当前交易模式返回对应的 Taker 费率"""
+        mode = getattr(self.executor, 'market_mode', 'spot')
+        if mode == "futures":
+            return self.config.futures_taker_fee_rate
+        return self.config.taker_fee_rate
+
     async def _close_position(self, reason: str, current_price: float = 0.0):
         """平仓（按市价卖出/买入）
 
@@ -241,49 +307,69 @@ class PositionMonitor:
             current_price: 触发平仓时的当前价格（用于 execute_safe 模拟模式）
         """
         side = "sell" if self._position_side == "long" else "buy"
-        size_str = f"{self._position_size:.6f}"
 
         logger.info(f"平仓: {self._position_side} {self._position_size:.4f} ETH (原因: {reason})")
 
+        # 1. 尝试执行平仓
+        success = False
+        fill_price = current_price if current_price > 0 else self._entry_price
+        order_id = ""
         try:
             result = await self.executor.execute_safe(
                 side=side,
                 size_eth=self._position_size,
-                signal_price=current_price if current_price > 0 else self._entry_price,
+                signal_price=fill_price,
                 prefer_limit=False,  # 平仓用市价单
             )
-            if result["success"]:
-                # Calculate actual PnL
-                fill_price = result.get("fill_price", 0)
-                if self._position_side == "long":
-                    pnl = (fill_price - self._entry_price) * self._position_size
-                else:
-                    pnl = (self._entry_price - fill_price) * self._position_size
-
-                self.risk.record_trade({
-                    "side": side,
-                    "size": self._position_size,
-                    "price": fill_price,
-                    "pnl": round(pnl, 2),
-                    "order_id": result["order_id"],
-                    "symbol": self.executor.symbol,
-                    "decision": {"action": side, "reason": reason},
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-                # 通知 Agent 3 更新仓位状态
-                if self.close_callback:
-                    self.close_callback(
-                        side=side,
-                        size=self._position_size,
-                        fill_price=fill_price,
-                        pnl=round(pnl, 2),
-                    )
+            success = result.get("success", False)
+            if success:
+                fill_price = result.get("fill_price", fill_price)
+                order_id = result.get("order_id", "")
             else:
                 logger.error(f"平仓失败: {result.get('error', '')}")
         except Exception as e:
-            logger.error(f"平仓异常: {e}")
+            logger.error(f"平仓异常: {e}, 使用估算价格 {fill_price:.2f} 记录盈亏")
 
-        # 清空持仓标记（不管成功与否都标记）
+        # 2. 计算 PnL（无论 execute_safe 成功与否都记账，确保亏损不丢失）
+        if self._position_side == "long":
+            gross_pnl = (fill_price - self._entry_price) * self._position_size
+        else:
+            gross_pnl = (self._entry_price - fill_price) * self._position_size
+
+        # 按交易模式使用对应费率扣费
+        fee_rate = self._fee_rate
+        open_fee = self._position_size * self._entry_price * fee_rate
+        close_fee = self._position_size * fill_price * fee_rate
+        total_fee = open_fee + close_fee
+        net_pnl = gross_pnl - total_fee
+
+        # 3. 记录平仓到风控系统（trade_type='close'，Agent 4 复盘依赖此记录）
+        self.risk.record_trade({
+            "side": side,
+            "size": self._position_size,
+            "price": fill_price,
+            "pnl": round(net_pnl, 2),
+            "pnl_close": round(net_pnl, 2),
+            "fee": round(close_fee, 2),
+            "trade_group_id": self._trade_group_id or "",
+            "trade_type": "close",
+            "order_id": order_id,
+            "symbol": self.executor.symbol,
+            "decision": {"action": side, "reason": reason},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        # 4. 通知 Agent 3 更新仓位状态（仅成功时）
+        if success and self.close_callback:
+            self.close_callback(
+                side=side,
+                size=self._position_size,
+                fill_price=fill_price,
+                pnl=round(net_pnl, 2),
+            )
+
+        # 5. 清空持仓标记（先清状态标记，防止 clear_position → update_position 重复记账）
+        self._has_position = False
         self.clear_position()
 
     def get_status(self) -> dict:

@@ -108,7 +108,6 @@ def _render_report_card(report: dict):
             st.json(report)
 
 
-st.set_page_config(page_title="交易报告", page_icon="📋", layout="wide")
 st.title("📋 交易报告")
 
 # ── 顶部操作栏 ──

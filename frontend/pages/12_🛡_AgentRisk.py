@@ -20,7 +20,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from agents.status_writer import read_agent_status, get_status_file_path
 from agents.config import AgentSystemConfig
 
-st.set_page_config(page_title="Agent 风控", page_icon="🛡", layout="wide")
 st.title("🛡 Agent 风控监控面板")
 st.markdown("实时展示三 Agent 系统的风控状态、交易记录和持仓监控。**只读面板**，不参与决策。")
 

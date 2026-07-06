@@ -148,8 +148,18 @@ class DataStore:
         start_ts: Optional[int] = None,
         end_ts: Optional[int] = None,
         limit: Optional[int] = None,
+        descending: bool = False,
     ) -> pd.DataFrame:
-        """加载 K 线为 DataFrame（索引为 datetime）"""
+        """加载 K 线为 DataFrame（索引为 datetime）
+
+        Args:
+            symbol: 交易对
+            timeframe: 周期
+            start_ts: 起始时间戳（毫秒）
+            end_ts: 结束时间戳（毫秒）
+            limit: 最大返回条数
+            descending: 是否按时间戳降序取最新 N 条（默认 False = ASC）
+        """
         conditions = ["symbol = ?", "timeframe = ?"]
         params = [symbol, timeframe]
 
@@ -160,13 +170,18 @@ class DataStore:
             conditions.append("timestamp <= ?")
             params.append(end_ts)
 
-        sql = f"SELECT * FROM klines WHERE {' AND '.join(conditions)} ORDER BY timestamp ASC"
+        order = "DESC" if descending else "ASC"
+        sql = f"SELECT * FROM klines WHERE {' AND '.join(conditions)} ORDER BY timestamp {order}"
         if limit:
             sql += f" LIMIT {limit}"
 
         df = pd.read_sql_query(sql, self.conn, params=params)
         if df.empty:
             return df
+
+        # DESC → 翻转为升序（调用方期望正序）
+        if descending:
+            df = df.iloc[::-1]
 
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         df.set_index("datetime", inplace=True)

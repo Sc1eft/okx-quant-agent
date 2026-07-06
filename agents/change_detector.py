@@ -105,6 +105,19 @@ class ChangeDetector:
                     signals.append(self._signal("macd_hist_negative", tf, "high", 0.7,
                                                  f"MACD {tf} 柱线转负", price))
 
+        # 柱线方向变化（rising↔falling）— 弱信号
+        prev_dir = prev.get("hist_direction")
+        cur_dir = cur.get("hist_direction")
+        if prev_dir is not None and cur_dir is not None and prev_dir != cur_dir:
+            if cur_dir == "rising":
+                if self._can_push(tf, "macd_hist_momentum_up", ts):
+                    signals.append(self._signal("macd_hist_momentum_up", tf, "low", 0.4,
+                                                 f"MACD {tf} 柱线动量转强 ↑", price))
+            elif cur_dir == "falling":
+                if self._can_push(tf, "macd_hist_momentum_down", ts):
+                    signals.append(self._signal("macd_hist_momentum_down", tf, "low", 0.4,
+                                                 f"MACD {tf} 柱线动量转弱 ↓", price))
+
         return signals
 
     # ── KDJ 检测 ──
@@ -138,6 +151,19 @@ class ChangeDetector:
                     signals.append(self._signal("kdj_oversold", tf, "medium", 0.6,
                                                  f"KDJ {tf} 进入超卖区 🔻", price))
 
+        # K 值穿越 50 中轴线 — 弱信号
+        prev_k = prev.get("k")
+        cur_k = cur.get("k")
+        if prev_k is not None and cur_k is not None:
+            if prev_k <= 50 < cur_k:
+                if self._can_push(tf, "kdj_k_above_50", ts):
+                    signals.append(self._signal("kdj_k_above_50", tf, "low", 0.4,
+                                                 f"KDJ {tf} K值上穿50中轴 ↗", price))
+            elif prev_k >= 50 > cur_k:
+                if self._can_push(tf, "kdj_k_below_50", ts):
+                    signals.append(self._signal("kdj_k_below_50", tf, "low", 0.4,
+                                                 f"KDJ {tf} K值下穿50中轴 ↘", price))
+
         return signals
 
     # ── 布林带检测 ──
@@ -166,6 +192,19 @@ class ChangeDetector:
             if self._can_push(tf, "boll_squeeze", ts):
                 signals.append(self._signal("boll_squeeze", tf, "medium", 0.65,
                                              f"布林收口 {tf} 🌀", price))
+
+        # position_pct 穿越阈值 — 弱信号（接近上轨/下轨的预警）
+        prev_pct = prev.get("position_pct")
+        cur_pct = cur.get("position_pct")
+        if prev_pct is not None and cur_pct is not None:
+            if prev_pct <= 75 < cur_pct:
+                if self._can_push(tf, "boll_upper_approach", ts):
+                    signals.append(self._signal("boll_upper_approach", tf, "low", 0.35,
+                                                 f"布林 {tf} 价格偏向上轨 (pos={cur_pct:.0f}%)", price))
+            elif prev_pct >= 25 > cur_pct:
+                if self._can_push(tf, "boll_lower_approach", ts):
+                    signals.append(self._signal("boll_lower_approach", tf, "low", 0.35,
+                                                 f"布林 {tf} 价格偏向下轨 (pos={cur_pct:.0f}%)", price))
 
         return signals
 

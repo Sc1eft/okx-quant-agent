@@ -14,15 +14,49 @@ Streamlit 监控面板保持独立运行:
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import signal
 import sys
+import os
+import atexit
+import subprocess
 from pathlib import Path
 from argparse import ArgumentParser
 from datetime import datetime, timezone
 
 # 修正导入路径（项目尚无根 __init__.py）
 sys.path.insert(0, "")
+
+# ── PID 文件锁：防止多实例冲突 ──
+_BASE_DIR = Path(__file__).parent.resolve()
+_PID_FILE = _BASE_DIR / "data" / "agent.pid"
+
+def _acquire_pid_lock():
+    """杀旧进程 + 写入当前 PID，保证全局唯一实例。"""
+    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    if _PID_FILE.exists():
+        try:
+            old_pid = int(_PID_FILE.read_text().strip())
+            if old_pid > 0 and old_pid != os.getpid():
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", str(old_pid)],
+                    capture_output=True, timeout=10,
+                )
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            pass
+
+    _PID_FILE.write_text(str(os.getpid()))
+    atexit.register(_release_pid_lock)
+
+def _release_pid_lock():
+    """退出时清理 PID 文件（仅当是自己写的才删）。"""
+    try:
+        if _PID_FILE.exists() and _PID_FILE.read_text().strip() == str(os.getpid()):
+            _PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 from config import Config, CONFIG_PATH
 from agents.config import AgentSystemConfig
@@ -40,6 +74,11 @@ from okx_client import OKXClient
 def setup_logging(level: str = "INFO", log_file: str = ""):
     """配置日志"""
     fmt = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+    # 终端编码修正：Windows GBK 无法输出 emoji
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    elif hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     handlers = [logging.StreamHandler(sys.stdout)]
     if log_file:
         import os
@@ -81,6 +120,9 @@ async def main():
     )
     args = parser.parse_args()
 
+    # ── PID 文件锁（确保唯一实例） ──
+    _acquire_pid_lock()
+
     # ── 加载配置 ──
     config_path = Path(args.config)
     if config_path.exists():
@@ -108,11 +150,23 @@ async def main():
     # 风控
     risk_manager = RiskManager(agent_config)
 
+    # 合约账户（合约模拟模式使用）
+    futures_account = None
+    if agent_config.market_mode == "futures":
+        from execution.futures_paper import FuturesAccount
+        futures_account = FuturesAccount(
+            wallet_balance=10000.0,
+            taker_fee_rate=agent_config.futures_taker_fee_rate,
+        )
+
     # 交易执行器
     trade_executor = TradeExecutor(
         okx_client=okx_rest,
         symbol=root_config.trading.symbol,
         config=agent_config,
+        market_mode=agent_config.market_mode,
+        leverage=agent_config.futures_leverage,
+        futures_account=futures_account,
     )
 
     # ── Phase 2: 持仓监控器 ──
@@ -150,7 +204,7 @@ async def main():
     ) if agent_config.serverchan_enabled else None
 
     # ── 创建 Agent 实例 ──
-    agent1 = Agent1(config=agent_config, event_bus=event_bus) if agent_config.agent1_enabled else None
+    agent1 = Agent1(config=agent_config, event_bus=event_bus, okx_client=okx_rest) if agent_config.agent1_enabled else None
     agent2 = Agent2(
         config=agent_config, event_bus=event_bus,
         okx_client=okx_rest,  # Phase 3: 链上数据
@@ -248,47 +302,97 @@ async def _status_reporter(agent1, agent2, agent3, agent4_reviewer=None, positio
     """定期报告系统状态并写入 JSON（每 5s，保证前端实时更新）"""
     while True:
         await asyncio.sleep(5)
-        lines = ["\n--- 系统状态 ---"]
+
+        # ── 采集各 Agent 状态 ──
         s1 = s2 = s3 = s4 = pm = {}
-        if agent1:
-            s1 = agent1.get_status()
-            lines.append(f"  Agent 1: running={s1['running']}, "
-                         f"ticks={s1.get('ticks_received',0)}, "
-                         f"signals={s1.get('signals_pushed',0)}")
-        if agent2:
-            s2 = agent2.get_status()
-            lines.append(f"  Agent 2: running={s2['running']}, "
-                         f"fetches={s2.get('fetch_count',0)}, "
-                         f"pushed={s2.get('news_pushed',0)}, "
-                         f"onchain={s2.get('onchain_events_pushed',0)}")
-        if agent3:
-            s3 = agent3.get_status()
-            lines.append(f"  Agent 3: running={s3['running']}, "
-                         f"trades={s3.get('trades_executed',0)}, "
-                         f"skipped={s3.get('trades_skipped',0)}, "
-                         f"composite={s3.get('last_composite_score','—')}, "
-                         f"win_rate={s3.get('last_win_rate','—')}%")
-        if position_monitor:
-            pm = position_monitor.get_status()
-            lines.append(f"  Position Monitor: running={pm['running']}, "
-                         f"has_position={pm['has_position']}, "
-                         f"SL={pm['stop_loss_triggered']} TP={pm['take_profit_triggered']} "
-                         f"trailing={pm['trailing_stop_triggered']}")
-        if agent4_reviewer:
-            s4 = agent4_reviewer.get_status()
-            lines.append(f"  Agent 4: running={s4['running']}, "
-                         f"reviews={s4.get('total_reviews',0)}, "
-                         f"adjustments={s4.get('total_adjustments',0)}, "
-                         f"errors={s4.get('total_adjustment_errors',0)}")
+        if agent1: s1 = agent1.get_status()
+        if agent2: s2 = agent2.get_status()
+        if agent3: s3 = agent3.get_status()
+        if agent4_reviewer: s4 = agent4_reviewer.get_status()
+        if position_monitor: pm = position_monitor.get_status()
+
+        # ── 构建可视化面板 ──
+        lines = ["\n" + "=" * 60]
+
+        # 头部：整体状态
+        pos = s3.get("position", {})
+        has_pos = pos.get("size", 0) > 0
+        dir_icon = "🟢" if pos.get("side") == "buy" else "🔴" if pos.get("side") == "sell" else "⚪"
+
+        price_str = ""
+        if s1:
+            indicators = s1.get("latest_indicators", {})
+            for tf in ("3m", "5m", "15m", "1h"):
+                if tf in indicators and indicators[tf] and indicators[tf].get("close"):
+                    price_str = f"ETH ${indicators[tf]['close']}"
+                    break
+
+        lines.append(f"  OKX Quant Agent  |  模式: {mode}  |  {price_str}")
+
+        # 第二行：Agent 运行状态
+        a1 = f"{'✅' if s1.get('running') else '❌'} Tech"
+        a2 = f"{'✅' if s2.get('running') else '❌'} News"
+        a3 = f"{'✅' if s3.get('running') else '❌'} Trader"
+        a4 = f"{'✅' if s4.get('running') else '❌'} Review"
+        lines.append(f"  Agent  {a1}  |  {a2}  |  {a3}  |  {a4}")
+        lines.append("-" * 60)
+
+        # ── 持仓面板（放在最显眼位置） ──
+        risk = s3.get("risk_status", {})
+        pnl = pos.get("pnl", 0)
+        pnl_pct = pos.get("pnl_pct", 0)
+        monthly_pnl = s3.get("last_monthly_pnl", 0)
+
+        if has_pos:
+            side = pos.get("side", "")
+            size = pos.get("size", 0)
+            entry = pos.get("entry_price", 0)
+            cur = pos.get("current_price", 0)
+            mode_label = "🟢 多头" if side == "buy" else "🔴 空头"
+            sl = pm.get("stop_loss", 0)
+            tp = pm.get("take_profit", 0)
+            daily_trades = risk.get("daily_trade_count", 0)
+
+            # PnL 颜色指示
+            pnl_icon = "💰" if pnl > 0 else "📉" if pnl < 0 else "⚪"
+            pnl_sign = "+" if pnl > 0 else ""
+
+            lines.append(f"  📈 持仓  {mode_label}  {size} ETH  |  入场 ${entry}  |  现价 ${cur}")
+            lines.append(f"  {pnl_icon} 浮动盈亏  ${pnl_sign}{pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)")
+            if sl or tp:
+                lines.append(f"      🛑 止损 ${sl:.2f}  {'⚠️ 触发!' if pm.get('stop_loss_triggered') else ''}  |  🎯 止盈 ${tp:.2f}  {'💰 触发!' if pm.get('take_profit_triggered') else ''}")
+            lines.append(f"      今日交易: {daily_trades} 笔")
+        else:
+            lines.append(f"  ⚪ 无持仓  |  今日交易: {risk.get('daily_trade_count', 0)} 笔  |  💰 月累计 ${monthly_pnl:+.2f}" if monthly_pnl else f"  ⚪ 无持仓  |  今日交易: {risk.get('daily_trade_count', 0)} 笔")
+        lines.append("-" * 60)
+
+        # ── Agent 最近活动 ──
+        # 活动文本开头自带 emoji，和前缀图标重复时去掉
+        def _show(a):
+            return a[1:].strip()[:55] if a and len(a) > 1 and ord(a[0]) > 8000 else (a or "")[:55]
+        if s1.get("running"): lines.append(f"  📡 {_show(s1.get('current_activity', ''))}")
+        if s2.get("running"): lines.append(f"  📰 {_show(s2.get('current_activity', ''))}")
+        if s3.get("running"): lines.append(f"  🤖 {_show(s3.get('current_activity', ''))}")
+        if s4.get("running"): lines.append(f"  📋 {_show(s4.get('current_activity', ''))}")
+
+        # 底部：风控 + 累计盈亏
+        loss_usdt = risk.get("daily_loss_usdt", 0)
+        consec = risk.get("consecutive_losses", 0)
+        monthly_pnl = s3.get("last_monthly_pnl", 0)
+        m_pnl_icon = "💰" if monthly_pnl > 0 else "📉" if monthly_pnl < 0 else ""
+        lines.append(f"  🛡 日亏损 ${loss_usdt:.2f}{'⚠️' if loss_usdt > 0 else ''}  |  连亏 {consec} 次{'⚠️' if consec > 0 else ''}" +
+                     f"  |  📊 月累计 {m_pnl_icon} ${monthly_pnl:+.2f}")
+
+        lines.append("=" * 60)
         logging.getLogger("main").info("\n".join(lines))
 
         # 写入状态 JSON 供 Streamlit 面板读取
         write_agent_status(
-            agent1_status=s1 if agent1 else None,
-            agent2_status=s2 if agent2 else None,
-            agent3_status=s3 if agent3 else None,
-            agent4_reviewer_status=s4 if agent4_reviewer else None,
-            position_monitor_status=pm if position_monitor else None,
+            agent1_status=s1,
+            agent2_status=s2,
+            agent3_status=s3,
+            agent4_reviewer_status=s4,
+            position_monitor_status=pm,
             mode=mode,
         )
 

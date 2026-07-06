@@ -12,6 +12,24 @@ from pathlib import Path
 from typing import Literal, Optional
 
 # ──────────────────────────────────────────────
+# 合约配置
+# ──────────────────────────────────────────────
+
+@dataclass
+class FuturesConfig:
+    """合约（交割/永续）参数"""
+    leverage: int = 10
+    margin_mode: Literal["isolated", "cross"] = "isolated"
+    maintenance_margin_ratio: float = 0.005  # 维持保证金率 0.5%（≤10x）
+
+    def __post_init__(self):
+        if self.leverage < 1:
+            raise ValueError("杠杆倍数不能小于 1")
+        if self.margin_mode not in ("isolated", "cross"):
+            raise ValueError("保证金模式必须是 isolated 或 cross")
+
+
+# ──────────────────────────────────────────────
 # 交易所配置
 # ──────────────────────────────────────────────
 
@@ -181,6 +199,7 @@ class Config:
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    futures: FuturesConfig = field(default_factory=FuturesConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
     log_dir: str = "logs"
@@ -213,6 +232,8 @@ class Config:
                     setattr(cfg, k, v)
             else:
                 setattr(cfg, k, v)
+        # __post_init__ 中可能触发校验
+        cfg.futures.__post_init__()
         # 环境变量覆盖配置文件中对应的值（最高优先级）
         for _env_key, _cfg_path in [
             ("OKX_API_KEY", ("exchange", "api_key")),
@@ -243,5 +264,16 @@ DEFAULT_CONFIG = Config()
 
 # 可通过 configs/default.json 覆盖
 CONFIG_PATH = "configs/default.json"
+
+
+def _test_futures_config() -> None:
+    """快速验证合约配置的 __post_init__ 校验"""
+    _ = FuturesConfig(leverage=10, margin_mode="isolated")
+    try:
+        FuturesConfig(leverage=-1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("负杠杆未触发校验")
 if Path(CONFIG_PATH).exists():
     DEFAULT_CONFIG = Config.load(CONFIG_PATH)

@@ -21,14 +21,21 @@ def test_basic_tick_to_15m():
     assert len(completed) == 0
     assert builder.get_current_candle("15m") is not None
 
-    # 跳过一个 15m 窗口
+    # 跳过一个 15m 窗口（同时也会触发 3m/5m 周期完成）
     next_window = base_ts + 15 * 60 + 1
     builder.add_tick(3010.0, next_window)
 
-    # 应该触发了一根 15m K 线完成
+    # 应触发多个时间周期的 K 线完成（3m/5m/15m/1h/1d 中跨越边界的）
     assert len(completed) >= 1
-    tf, bar = completed[0]
-    assert tf == "15m"
+    # 第一个完成的 K 线可能是 3m（TIMEFRAMES 中最短周期）
+    # 验证 15m 在完成的列表里
+    completed_tfs = {tf for tf, _ in completed}
+    assert "15m" in completed_tfs, f"15m not in completed: {completed_tfs}"
+
+    # 验证第一个 15m bar 的数据
+    fifteen_min_bars = [(tf, bar) for tf, bar in completed if tf == "15m"]
+    assert len(fifteen_min_bars) >= 1
+    _, bar = fifteen_min_bars[0]
     assert bar["open"] == 3000.0
     assert bar["close"] == 3000.9  # 最后一秒的值
     assert bar["high"] == 3000.9

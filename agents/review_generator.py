@@ -176,7 +176,7 @@ class ReviewGenerator:
         使用 pnl_close (平仓盈亏) 而非 pnl (开仓记录中的 0)。
         回退: 若 pnl_close 全为 0, 则使用 pnl 字段。
         """
-        conditions = ["pnl_close != 0"]
+        conditions = ["trade_type = 'close'"]
         params: list = []
 
         if days is not None:
@@ -192,7 +192,7 @@ class ReviewGenerator:
 
         where = " AND ".join(conditions) if conditions else "1=1"
 
-        # 总览统计
+        # 总览统计（只统计 close 记录，避免 open 被 _update_pnl_close 回填后双倍计数）
         row = conn.execute(
             f"""
             SELECT
@@ -200,6 +200,7 @@ class ReviewGenerator:
                 SUM(CASE WHEN pnl_close > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN pnl_close < 0 THEN 1 ELSE 0 END) as losses,
                 ROUND(SUM(pnl_close), 2) as total_pnl,
+                ROUND(SUM(fee), 2) as total_fee,
                 ROUND(AVG(pnl_close), 2) as avg_pnl,
                 MAX(pnl_close) as best_trade,
                 MIN(pnl_close) as worst_trade
@@ -212,6 +213,7 @@ class ReviewGenerator:
         wins = row["wins"] or 0
         losses = row["losses"] or 0
         total_pnl = row["total_pnl"] or 0.0
+        total_fee = row["total_fee"] or 0.0
 
         # 如果 pnl_close 全部为 0 (旧数据), 回退到 pnl 字段
         if total == 0 or (total > 0 and total_pnl == 0):
@@ -229,7 +231,7 @@ class ReviewGenerator:
                 COUNT(*) as cnt,
                 SUM(CASE WHEN pnl_close > 0 THEN 1 ELSE 0 END) as side_wins,
                 ROUND(SUM(pnl_close), 2) as side_pnl
-            FROM trades WHERE {where} AND pnl_close != 0
+            FROM trades WHERE {where}
             GROUP BY side
             """,
             params,
@@ -254,6 +256,7 @@ class ReviewGenerator:
             "losses": losses,
             "win_rate": win_rate,
             "total_pnl": total_pnl,
+            "total_fee": total_fee,
             "avg_pnl": row["avg_pnl"] or 0.0,
             "best_trade": row["best_trade"] or 0.0,
             "worst_trade": row["worst_trade"] or 0.0,
@@ -326,6 +329,7 @@ class ReviewGenerator:
                 "losses": stats["losses"],
                 "win_rate": stats["win_rate"],
                 "total_pnl": stats["total_pnl"],
+                "total_fee": stats.get("total_fee", 0),
                 "max_drawdown_pct": stats["max_drawdown_pct"],
             },
             "win_trades": win_trades[:10],
@@ -426,6 +430,7 @@ class ReviewGenerator:
             "losses": losses,
             "win_rate": win_rate,
             "total_pnl": total_pnl,
+            "total_fee": 0.0,
             "avg_pnl": row["avg_pnl"] or 0.0,
             "best_trade": 0.0,
             "worst_trade": 0.0,
@@ -489,6 +494,9 @@ class ReviewGenerator:
             parts.append(f"总盈亏 +{stats['total_pnl']:.2f} USDT")
         else:
             parts.append(f"总盈亏 {stats['total_pnl']:.2f} USDT")
+        total_fee = stats.get("total_fee", 0)
+        if total_fee > 0:
+            parts.append(f"手续费 {total_fee:.2f} USDT")
         parts.append(f"最大回撤 {stats['max_drawdown_pct']:.2f}%")
         if stats.get("by_side"):
             for side, s in stats["by_side"].items():

@@ -184,6 +184,60 @@ class KlineBuilder:
         if len(self._history[timeframe]) > self._max_history:
             self._history[timeframe] = self._history[timeframe][-self._max_history:]
 
+    def add_history_batch(self, timeframe: str, bars: list[dict]) -> None:
+        """批量注入已完成的历史 K 线（用于启动预热）
+
+        Args:
+            timeframe: 周期标识（"3m", "5m", "15m", "1h", "1d"）
+            bars: K 线列表，每根需包含 timestamp, open, high, low, close,
+                  volume（兼容 OKX API 的 vol 字段名）
+        """
+        if timeframe not in self.TIMEFRAMES:
+            logger.warning(f"add_history_batch: 未知周期 {timeframe}，跳过")
+            return
+
+        # 标准化字段名（OKX 的 vol → volume；OKX 的 timestamp 是毫秒）
+        normalized = []
+        for b in bars:
+            try:
+                ts = int(b["timestamp"])
+                if ts > 1_000_000_000_00:  # ms → s
+                    ts //= 1000
+                n = {
+                    "timestamp": ts,
+                    "open": float(b["open"]),
+                    "high": float(b["high"]),
+                    "low": float(b["low"]),
+                    "close": float(b["close"]),
+                    "volume": float(b.get("volume", b.get("vol", 0))),
+                }
+                normalized.append(n)
+            except (KeyError, ValueError, TypeError) as e:
+                logger.debug(f"跳过异常 K 线: {e}")
+
+        if not normalized:
+            logger.warning(f"add_history_batch({timeframe}): 无有效 K 线")
+            return
+
+        # 按时间戳排序（API 返回正序，安全起见排序一次）
+        normalized.sort(key=lambda x: x["timestamp"])
+
+        # 注入历史（不超过上限）
+        self._history[timeframe] = normalized[-self._max_history:]
+
+        # 记录最后周期边界，让下一根真实 tick 的周期翻转自然触发 K线完成回调
+        span = self.TIMEFRAMES[timeframe]
+        last_ts = normalized[-1]["timestamp"]
+        boundary = (last_ts // span) * span
+
+        self._last_boundary[timeframe] = boundary
+        # 不设 _candles——第一根真实 tick 会自然创建
+
+        logger.info(
+            f"预热 {timeframe}: 注入 {len(normalized)} 根 K 线 "
+            f"(最后边界: {boundary})"
+        )
+
     def get_current_candle(self, timeframe: str) -> Optional[dict]:
         """获取当前进行中的 K 线"""
         return self._candles.get(timeframe)

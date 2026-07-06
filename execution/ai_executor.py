@@ -9,60 +9,16 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import pandas as pd
 
 from config import Config
 from execution.paper import PaperAccount, PaperEngine
+from indicators import calc_rsi, calc_sma, calc_ema, calc_macd, calc_bollinger, calc_price_change, resolve_indicator
 from risk.rules import RiskEngine
 
 logger = logging.getLogger("execution.ai")
-
-# ── 指标计算（纯 pandas） ──
-
-
-def _calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """RSI 指标"""
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.rolling(window=period, min_periods=1).mean()
-    avg_loss = loss.rolling(window=period, min_periods=1).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-
-def _calc_sma(series: pd.Series, period: int) -> pd.Series:
-    return series.rolling(window=period, min_periods=1).mean()
-
-
-def _calc_ema(series: pd.Series, period: int) -> pd.Series:
-    return series.ewm(span=period, adjust=False).mean()
-
-
-def _calc_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, pd.Series]:
-    ema_fast = _calc_ema(series, fast)
-    ema_slow = _calc_ema(series, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = _calc_ema(macd_line, signal)
-    histogram = macd_line - signal_line
-    return {"macd": macd_line, "signal": signal_line, "histogram": histogram}
-
-
-def _calc_bollinger(series: pd.Series, period: int = 20, std: float = 2.0) -> Dict[str, pd.Series]:
-    sma = _calc_sma(series, period)
-    std_dev = series.rolling(window=period, min_periods=1).std()
-    return {
-        "middle": sma,
-        "upper": sma + std * std_dev,
-        "lower": sma - std * std_dev,
-    }
-
-
-def _calc_price_change(series: pd.Series, period: int = 1) -> pd.Series:
-    return series.pct_change(period) * 100
 
 
 # ── 条件引擎 ──
@@ -216,87 +172,13 @@ def _evaluate_condition(cond: dict, indicators: dict) -> bool:
 
 def _calc_indicators(df: pd.DataFrame) -> dict:
     """对 DataFrame 计算所有常见指标，返回 {indicator_name: pd.Series}"""
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-    volume = df["volume"]
-
-    ind: Dict[str, pd.Series] = {
-        "close": close,
-        "high": high,
-        "low": low,
-        "volume": volume,
-    }
-
-    # RSI 多个周期
-    for p in [6, 14, 20]:
-        if len(close) >= p:
-            ind[f"rsi_{p}"] = _calc_rsi(close, p)
-
-    # SMA 多个周期
-    for p in [5, 10, 20, 50, 200]:
-        if len(close) >= p:
-            ind[f"sma_{p}"] = _calc_sma(close, p)
-            ind[f"ema_{p}"] = _calc_ema(close, p)
-
-    # MACD
-    if len(close) >= 26:
-        macd = _calc_macd(close)
-        ind["macd"] = macd["macd"]
-        ind["macd_signal"] = macd["signal"]
-        ind["macd_histogram"] = macd["histogram"]
-
-    # 布林带
-    for p in [20]:
-        if len(close) >= p:
-            bb = _calc_bollinger(close, p)
-            ind["bb_middle"] = bb["middle"]
-            ind["bb_upper"] = bb["upper"]
-            ind["bb_lower"] = bb["lower"]
-
-    # 价格变动百分比
-    ind["price_change_pct"] = _calc_price_change(close, 1)
-    ind["price_change_5"] = _calc_price_change(close, 5)
-
-    # ── K线实体波动率（用于波动率触发策略） ──
-    open_series = df["open"]
-    body_size = (close - open_series).abs()
-    ind["body_size"] = body_size
-    ind["body_sum_2"] = body_size.rolling(window=2, min_periods=1).sum()
-    # body_direction: 1=阴线(close<open, 做多), -1=阳线(close>open, 做空), 0=平盘
-    direction = pd.Series(0, index=close.index)
-    direction[close < open_series] = 1
-    direction[close > open_series] = -1
-    ind["body_direction"] = direction
-
-    return ind
+    from indicators import calc_indicators
+    return calc_indicators(df)
 
 
 def _resolve_indicator_series(indicator_name: str, indicators: dict) -> Optional[pd.Series]:
     """将条件中的 indicator 名映射到实际计算出的 Series"""
-    # 直接匹配（优先）
-    if indicator_name in indicators:
-        return indicators[indicator_name]
-
-    # 带默认参数的简写
-    if indicator_name == "rsi":
-        return indicators.get("rsi_14")
-    elif indicator_name == "sma":
-        return indicators.get("sma_20")
-    elif indicator_name == "ema":
-        return indicators.get("ema_20")
-    elif indicator_name == "bb_upper":
-        return indicators.get("bb_upper")
-    elif indicator_name == "bb_lower":
-        return indicators.get("bb_lower")
-    elif indicator_name == "bb_middle":
-        return indicators.get("bb_middle")
-    elif indicator_name == "macd_histogram":
-        return indicators.get("macd_histogram")
-    elif indicator_name == "macd_signal":
-        return indicators.get("macd_signal")
-
-    return None
+    return resolve_indicator(indicator_name, indicators)
 
 
 def _check_conditions(conditions: List[dict], indicators: dict) -> List[dict]:

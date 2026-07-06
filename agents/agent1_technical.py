@@ -41,9 +41,10 @@ MAX_SIGNAL_HISTORY = 20
 class Agent1:
     """Agent 1 — 技术分析师"""
 
-    def __init__(self, config: AgentSystemConfig, event_bus: EventBus):
+    def __init__(self, config: AgentSystemConfig, event_bus: EventBus, okx_client=None):
         self.config = config
         self.bus = event_bus
+        self.okx_client = okx_client  # 预热用（可选）
         self.kline_builder = KlineBuilder()
         self.change_detector = ChangeDetector(default_cooldown=config.agent1_change_cooldown)
         self.ws_client = OKXWebSocketClient(
@@ -79,6 +80,11 @@ class Agent1:
         """启动 Agent 1 主循环"""
         self._running = True
         self._stats["start_time"] = datetime.now(timezone.utc).isoformat()
+
+        # 启动预热：拉取历史 K 线，让指标立即可用
+        if self.okx_client:
+            await self._warmup()
+
         logger.info("Agent 1 (技术分析师) 启动")
 
         # 启动 WebSocket 连接（阻塞直到断开）
@@ -121,7 +127,7 @@ class Agent1:
         history.append(bar)  # 把刚完成的这根也算进去
 
         # 各周期所需最小 K 线数（自适应：短周期快出信号，长周期多积累）
-        _MIN_BARS = {"3m": 10, "5m": 10, "15m": 15, "1h": 15, "1d": 30}
+        _MIN_BARS = {"3m": 5, "5m": 5, "15m": 8, "1h": 10, "1d": 20}
         min_bars = _MIN_BARS.get(timeframe, 15)
         if len(history) < min_bars:
             logger.debug(f"{timeframe} 数据不足 ({len(history)}/{min_bars}), 跳过指标计算")
@@ -188,6 +194,134 @@ class Agent1:
             self._current_activity = f"📊 推送 {timeframe} {sig['description']} (⚡{urgency})"
             self._last_activity_time = time.time()
             logger.info(f"📊 Agent 1 push: {sig['description']} (urgency={urgency})")
+
+    async def _warmup(self):
+        """启动预热：本地 SQLite 缓存优先 → OKX REST API 保底 → 持久化
+
+        流程:
+        1. 检查本地 SQLite 数据库中是否已有足量历史 K 线
+        2. 缓存充足 → 直接加载到 KlineBuilder，零 API 开销
+        3. 缓存不足 → 从 OKX REST API 分批拉取 → 存入 SQLite → 加载
+        4. 启动后指标即可计算，不再依赖实时数据积累
+        """
+        try:
+            from pathlib import Path
+            from config import Config, CONFIG_PATH
+            from data.storage import DataStore
+
+            cfg_path = Path(CONFIG_PATH)
+            cfg = Config.load(str(cfg_path)) if cfg_path.exists() else Config()
+            store = DataStore(cfg)
+
+            # 预热目标：各周期至少 N 根 K 线（足够计算 MACD/KDJ/BOLL）
+            targets = {"3m": 500, "5m": 500, "15m": 300, "1h": 200, "1d": 100}
+            symbol = self.config.ws_symbol
+
+            for tf, needed in targets.items():
+                # ── Step 1: 检查本地 SQLite 缓存 ──
+                cached = store.count_klines(symbol, tf)
+
+                if cached >= needed:
+                    df = store.load_klines(
+                        symbol=symbol, timeframe=tf,
+                        limit=needed, descending=True,
+                    )
+                    if not df.empty:
+                        bars = [
+                            {
+                                "timestamp": int(r["timestamp"]),
+                                "open": float(r["open"]),
+                                "high": float(r["high"]),
+                                "low": float(r["low"]),
+                                "close": float(r["close"]),
+                                "volume": float(r["volume"]),
+                            }
+                            for _, r in df.iterrows()
+                        ]
+                        self.kline_builder.add_history_batch(tf, bars)
+                        self._current_activity = (
+                            f"💾 预热 {tf}: {len(bars)} 根 (缓存)"
+                        )
+                        self._last_activity_time = time.time()
+                        logger.info(
+                            "预热 %s: 从本地缓存加载 %d 根 K 线",
+                            tf, len(bars),
+                        )
+                        continue
+
+                # ── Step 2: 缓存不足 → 从 OKX API 分批下载 ──
+                remaining = needed
+                before: int | None = None
+                fetched_bars: list[dict] = []
+
+                while remaining > 0:
+                    batch_size = min(300, remaining)
+                    try:
+                        batch = await asyncio.to_thread(
+                            self.okx_client.get_klines,
+                            symbol=symbol,
+                            timeframe=tf,
+                            limit=batch_size,
+                            before=before,
+                        )
+                    except Exception as e:
+                        logger.warning("预热 %s: API 请求失败: %s", tf, e)
+                        break
+
+                    if not batch:
+                        break  # 没有更多数据了
+
+                    fetched_bars.extend(batch)
+                    remaining -= len(batch)
+
+                    # 更新翻页参数（获取更早的数据）
+                    last_ts = batch[-1].get("timestamp", 0)
+                    before = int(last_ts) if last_ts else None
+                    if not before:
+                        break
+
+                    await asyncio.sleep(0.2)  # OKX API 限速
+
+                if fetched_bars:
+                    # 落地 SQLite 持久化，下次重启直接读缓存
+                    inserted = store.insert_klines(symbol, tf, fetched_bars)
+
+                    # 重新从 SQLite 读取（保证时序正确）
+                    df = store.load_klines(
+                        symbol=symbol, timeframe=tf,
+                        limit=needed, descending=True,
+                    )
+                    if not df.empty:
+                        bars = [
+                            {
+                                "timestamp": int(r["timestamp"]),
+                                "open": float(r["open"]),
+                                "high": float(r["high"]),
+                                "low": float(r["low"]),
+                                "close": float(r["close"]),
+                                "volume": float(r["volume"]),
+                            }
+                            for _, r in df.iterrows()
+                        ]
+                        self.kline_builder.add_history_batch(tf, bars)
+                        self._current_activity = (
+                            f"🌐 预热 {tf}: {len(bars)} 根"
+                        )
+                        self._last_activity_time = time.time()
+                        logger.info(
+                            "预热 %s: OKX 下载 %d 根（新增 %d），"
+                            "加载 %d 根到内存",
+                            tf, len(fetched_bars), inserted, len(bars),
+                        )
+                else:
+                    logger.warning("预热 %s: OKX API 未返回数据", tf)
+
+            store.close()
+            logger.info("预热完成：所有周期历史数据已就绪")
+
+        except Exception as e:
+            logger.warning("预热失败（非致命，继续冷启动）: %s", e)
+            self._current_activity = "❄️ 冷启动（预热失败）"
 
     def _indicator_summary(self, tf: str, macd: dict, kdj: dict, boll: dict) -> str:
         """生成一行指标摘要（供 current_activity 使用）"""

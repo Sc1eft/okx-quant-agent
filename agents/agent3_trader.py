@@ -87,6 +87,8 @@ class Agent3:
         # 事件缓冲区
         self._event_buffer: list[AgentEvent] = []
         self._last_decision_time: Optional[datetime] = None
+        self._last_event_time: float = time.time()  # 上次收到事件的时间
+        self._last_idle_decision_time: float = 0.0  # 上次强制空闲决策时间
         self._decision_lock = asyncio.Lock()  # re-entrancy guard
 
         # 最新价格缓存（跨 _build_context 调用持久化，防止事件缓冲区无价格时显示 $0）
@@ -101,6 +103,17 @@ class Agent3:
             "side": "none",
             "size": 0.0,
             "entry_price": 0.0,
+            "current_price": 0.0,
+            # ── 浮动盈亏 ──
+            "pnl": 0.0,       # 未实现盈亏 (USDT)
+            "pnl_pct": 0.0,   # 未实现盈亏 (%)
+            # ── 合约模式字段 ──
+            "market_mode": self.config.market_mode,
+            "leverage": self.config.futures_leverage,
+            "margin": 0.0,
+            "liquidation_price": 0.0,
+            "position_value": 0.0,
+            "margin_rate": 0.0,
         }
         self._stats = {
             "events_received_a": 0,
@@ -134,6 +147,8 @@ class Agent3:
             consumers.append(self._review_scheduler())
         # 价格定时刷新（WebSocket 被 Agent1 处理，Agent3 单独用 REST API 兜底价格缓存）
         consumers.append(self._refresh_current_price())
+        # 空闲定时决策（长时间无事件时强制触发评估）
+        consumers.append(self._idle_decision_loop())
 
         await asyncio.gather(*consumers)
 
@@ -193,6 +208,7 @@ class Agent3:
     async def _on_event(self, event: AgentEvent):
         """收到新事件后的处理"""
         self._event_buffer.append(event)
+        self._last_event_time = time.time()
         buf = len(self._event_buffer)
 
         if event.urgency == "high":
@@ -222,6 +238,45 @@ class Agent3:
             logger.info(f"缓冲区满 ({len(self._event_buffer)} 事件) 触发决策")
             await self._make_decision()
 
+    async def _idle_decision_loop(self):
+        """空闲定时决策循环 — 长时间无事件时强制触发 DeepSeek 评估"""
+        interval = self.config.agent3_idle_decision_interval_seconds
+        while self._running:
+            await asyncio.sleep(30)  # 每 30s 检查一次
+            now = time.time()
+            # 没有持仓时才做空闲评估（有持仓时 position_monitor 在管）
+            if self._current_position.get("side", "none") != "none":
+                continue
+            idle_since = now - self._last_event_time
+            if idle_since < interval:
+                continue
+            # 距离上次空闲决策不要太近
+            if now - self._last_idle_decision_time < interval * 0.5:
+                continue
+            # 如果缓冲区已有事件或有锁，让事件驱动流程处理
+            if self._event_buffer or self._decision_lock.locked():
+                continue
+            # 构造合成事件触发一次评估
+            self._last_idle_decision_time = now
+            logger.info(f"⏰ 空闲触发定期评估 ({idle_since:.0f}s 无事件)")
+            self._current_activity = f"⏰ 空闲 {idle_since:.0f}s 触发定期评估"
+            self._last_activity_time = now
+            event = AgentEvent(
+                type=AgentEventType.TECHNICAL_SIGNAL,
+                source="agent3",
+                data={
+                    "signal": "idle_evaluation",
+                    "timeframe": "5m",
+                    "description": f"定时评估（{idle_since:.0f}s 无事件）",
+                    "price": self._current_price,
+                },
+                confidence=0.3,
+                urgency="low",
+            )
+            self._event_buffer.append(event)
+            self._last_event_time = now  # 抑制重复触发
+            await self._make_decision()
+
     async def _make_decision(self):
         """执行一次完整的交易决策周期"""
         if self._decision_lock.locked():
@@ -247,6 +302,15 @@ class Agent3:
                     self._stats["trades_skipped"] += 1
                     return
 
+            # ── 0b. 快速风控预检（方向无关，在 DeepSeek 前拦截，节省 API 费用） ──
+            ok, reason = self.risk.check_layer1_pre()
+            if not ok:
+                self._current_activity = f"⏭ 风控预检跳过: {reason[:40]}"
+                self._last_activity_time = time.time()
+                logger.info(f"风控预检拒绝: {reason}")
+                self._stats["trades_skipped"] += 1
+                return
+
             # ── 1. 构建上下文摘要（不含方向） ──
             self._current_activity = "🧠 构建 DeepSeek 上下文 ({len(events)} 事件)"
             self._last_activity_time = time.time()
@@ -268,7 +332,7 @@ class Agent3:
 
             # ── 3. 从 DeepSeek 输出获取交易方向 ──
             trade_side = "buy" if decision["action"] == "buy" else "sell"
-            size_eth = self._suggested_size(context)
+            size_eth = self._suggested_size(context, decision)
             self._current_activity = f"📐 决策: {decision['action']} {size_eth:.4f} ETH (信心 {decision['confidence']}%)"
             self._last_activity_time = time.time()
 
@@ -316,28 +380,46 @@ class Agent3:
             if trade_result["success"]:
                 self._stats["trades_executed"] += 1
                 trade_group_id = str(uuid.uuid4())[:8]
-                self.risk.record_trade({
+                trade_record = {
                     "side": trade_side,
                     "size": size_eth,
                     "price": trade_result["fill_price"],
                     "pnl": 0,
                     "pnl_close": 0,
+                    "fee": round(size_eth * trade_result["fill_price"] * self.config.taker_fee_rate, 2),
                     "trade_group_id": trade_group_id,
                     "trade_type": "open",
                     "order_id": trade_result["order_id"],
                     "symbol": self.executor.symbol,
                     "decision": decision,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
+                }
+                if trade_side == "sell":
+                    trade_record["short"] = True
+                self.risk.record_trade(trade_record)
                 logger.info(f"交易成功: {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}")
 
                 # Phase 2: 通知持仓监控器 (Phase 4: 传入 trade_group_id)
                 if self.position_monitor:
-                    # 安全解析 stop_loss/take_profit，防止 DeepSeek 返回空字符串导致 float("") 崩溃
+                    # 从 DeepSeek 获取止损止盈（buy/sell 时是必填，但保底用配置默认值）
                     stop_loss = _safe_float(decision.get("stop_loss"), 0)
                     take_profit = _safe_float(decision.get("take_profit"), 0)
+                    current_px = context.get("current_price", trade_result["fill_price"])
+                    if stop_loss == 0:
+                        if trade_side == "buy":
+                            stop_loss = current_px * (1 - self.config.agent3_default_stop_loss_pct / 100)
+                        else:
+                            stop_loss = current_px * (1 + self.config.agent3_default_stop_loss_pct / 100)
+                        logger.info(f"DeepSeek 未提供止损，使用默认 {self.config.agent3_default_stop_loss_pct}% → ${stop_loss:.2f}")
+                    if take_profit == 0:
+                        if trade_side == "buy":
+                            take_profit = current_px * (1 + self.config.agent3_default_take_profit_pct / 100)
+                        else:
+                            take_profit = current_px * (1 - self.config.agent3_default_take_profit_pct / 100)
+                        logger.info(f"DeepSeek 未提供止盈，使用默认 {self.config.agent3_default_take_profit_pct}% → ${take_profit:.2f}")
+                    pos_side = "long" if trade_side == "buy" else "short"
                     self.position_monitor.update_position(
-                        side=trade_side,
+                        side=pos_side,
                         size=size_eth,
                         entry_price=trade_result["fill_price"],
                         stop_loss=stop_loss,
@@ -362,9 +444,18 @@ class Agent3:
                     }
                     asyncio.create_task(self.agent4_reviewer.notify_trade(trade_record))
                 # 更新当前持仓（供前端和上下文使用）
-                self._current_position["side"] = trade_side
+                self._current_position["side"] = "long" if trade_side == "buy" else "short"
                 self._current_position["size"] = size_eth
                 self._current_position["entry_price"] = trade_result["fill_price"]
+                self._current_position["current_price"] = context.get("current_price", trade_result["fill_price"])
+                # 合约模式：额外记录保证金/强平价等
+                if trade_result.get("market_mode") == "futures":
+                    self._current_position["market_mode"] = "futures"
+                    self._current_position["leverage"] = trade_result.get("leverage", 0)
+                    self._current_position["margin"] = trade_result.get("margin", 0)
+                    self._current_position["liquidation_price"] = trade_result.get("liquidation_price", 0)
+                    self._current_position["position_value"] = trade_result.get("position_value", 0)
+                    self._current_position["margin_rate"] = trade_result.get("margin_rate", 0)
                 self._current_activity = f"✅ {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}"
                 self._last_activity_time = time.time()
             else:
@@ -446,7 +537,12 @@ class Agent3:
             "position_size": self._current_position["size"],
             "entry_price": self._current_position["entry_price"],
             "pnl_pct": self._calc_pnl_pct(current_price),
-            "agent1_summary": "\n".join(agent1_lines) if agent1_lines else "暂无技术面信号",
+            # ── 合约模式字段 ──
+            "market_mode": self._current_position.get("market_mode", "spot"),
+            "leverage": self._current_position.get("leverage", 0),
+            "liquidation_price": self._current_position.get("liquidation_price", 0),
+            "margin_rate": self._current_position.get("margin_rate", 0),
+            "agent1_summary": self._summarize_agent1(agent1_lines, agent2_lines, events),
             "agent2_summary": "\n".join(agent2_lines) if agent2_lines else "暂无新闻数据",
             # Phase 3: 链上指标
             "gas_gwei": round(gas_gwei, 1),
@@ -467,10 +563,28 @@ class Agent3:
             "adjusted_max_trades": str(self.config.agent3_max_daily_trades),
             "adjusted_debounce": str(self.config.agent3_debounce_seconds),
             "adjusted_trade_interval": str(self.config.agent3_min_interval_between_trades),
+            "max_position_eth": self.config.agent3_max_position_eth,
         }
 
+    def _summarize_agent1(self, agent1_lines: list, agent2_lines: list, events: list) -> str:
+        """智能构建技术面摘要 — 区分空闲触发、新闻驱动等场景"""
+        if agent1_lines:
+            return "\n".join(agent1_lines)
+        # 检查是否有定时评估合成事件
+        has_idle = any(
+            isinstance(e, AgentEvent) and e.source == "agent3"
+            and isinstance(e.data, dict) and e.data.get("signal") == "idle_evaluation"
+            for e in events
+        )
+        if has_idle:
+            return "【定时评估】当前无技术面事件触发，基于已有数据做例行检查"
+        # 有新闻/链上事件但无技术面事件
+        if agent2_lines:
+            return "（非技术触发）当前无技术面信号，以下为新闻/链上数据驱动的评估"
+        return "暂无技术面信号"
+
     def _calc_pnl_pct(self, current_price: float) -> str:
-        """根据当前仓位计算浮盈/浮亏百分比"""
+        """根据当前仓位计算浮盈/浮亏百分比（合约模式含杠杆放大）"""
         direction = self._current_position["side"]
         entry = self._current_position["entry_price"]
         if direction != "none" and entry > 0 and current_price > 0:
@@ -478,31 +592,40 @@ class Agent3:
                 pnl_pct = (current_price - entry) / entry * 100
             else:
                 pnl_pct = (entry - current_price) / entry * 100
+            # 合约模式：PnL 百分比含杠杆乘数
+            if self._current_position.get("market_mode") == "futures":
+                leverage = self._current_position.get("leverage", 1)
+                if leverage > 0:
+                    pnl_pct *= leverage
             return f"{pnl_pct:+.2f}"
         return ""
 
-    def _suggested_size(self, context: dict) -> float:
-        """根据上下文和风控建议仓位大小
+    def _suggested_size(self, context: dict, decision: dict = None) -> float:
+        """根据 DeepSeek 把握程度 + 风控建议仓位大小
 
-        计算逻辑:
-          1. 基础 = max_position × 0.5（默认 0.5×0.5=0.25 ETH ≈ $450）
-          2. Agent 4 动态调节乘数（0.1x ~ 3.0x）
-          3. 风控连亏递减（1.0 → 0.75 → 0.5 → ...）
-          4. 硬上限 = max_position
-          5. 下限 = 0.01 ETH（模拟盘最小单）
+        DeepSeek 返回 position_size_pct (0-100)：
+          - 高把握 (70-100) → 接近打满 max_position
+          - 中等 (30-70)  → 正常仓位
+          - 低把握 (5-30)  → 小仓试水
+
+        最终再经风控连亏递减 × Agent 4 长期乘数调整。
         """
         max_pos = self.config.agent3_max_position_eth  # 默认 0.5 ETH
-        base = max_pos * 0.5  # 基础仓位：最大的一半
 
-        # Agent 4 动态调节（配置中心可调，范围 0.1x~3.0x）
+        # DeepSeek 把握程度 → 仓位比例
+        deepseek_pct_str = "50"
+        if decision and decision.get("position_size_pct"):
+            deepseek_pct_str = str(decision["position_size_pct"])
+        deepseek_pct = _safe_float(deepseek_pct_str, 50)
+        deepseek_pct = max(5, min(100, deepseek_pct))  # 钳位 5%~100%
+
+        base = max_pos * (deepseek_pct / 100)  # DeepSeek 决定基础比例
+
+        # Agent 4 长期乘数 / 风控连亏递减
         agent4_mult = self.config.agent3_position_size_multiplier
-
-        # 风控：连亏递减
         risk_mult = self.risk.get_position_size_multiplier()
 
         size = base * agent4_mult * risk_mult
-
-        # 硬上限 / 下限
         size = min(size, max_pos)
         size = max(size, 0.01)
 
@@ -605,27 +728,69 @@ class Agent3:
 
     # Agent 4 替代了 param_adapter 的调参职责
 
-    def update_position(self, side: str, size: float, entry_price: float):
+    def update_position(self, side: str, size: float, entry_price: float,
+                        market_mode: str = "spot", leverage: int = 0,
+                        margin: float = 0, liquidation_price: float = 0,
+                        position_value: float = 0, margin_rate: float = 0):
         """更新当前持仓（供外部或 main.py 调用）"""
         self._current_position = {
             "side": side,
             "size": size,
             "entry_price": entry_price,
+            "market_mode": market_mode,
+            "leverage": leverage,
+            "margin": margin,
+            "liquidation_price": liquidation_price,
+            "position_value": position_value,
+            "margin_rate": margin_rate,
         }
 
     def _on_position_closed(self, side: str, size: float, fill_price: float, pnl: float):
         """仓位监控器平仓后的回调 — 重置 Agent 3 的仓位状态"""
         self._current_position = {
-            "side": "none",
-            "size": 0.0,
-            "entry_price": 0.0,
+            "side": "none", "size": 0.0, "entry_price": 0.0,
+            "current_price": 0.0, "pnl": 0.0, "pnl_pct": 0.0,
         }
         logger.info(
             f"仓位已平仓: {side} {size:.4f} ETH @ ${fill_price:.2f} "
             f"PnL={pnl:+.2f} USDT — Agent 3 仓位状态已重置"
         )
 
+    def _update_position_pnl(self):
+        """用当前价格实时计算浮动盈亏，写入 _current_position
+
+        合约模式：pnl_pct 按保证金比计算（含杠杆放大）。
+        """
+        pos = self._current_position
+        pos["current_price"] = self._current_price
+        entry = pos.get("entry_price", 0)
+        size = pos.get("size", 0)
+        direction = pos.get("side", "none")
+        price = self._current_price
+
+        if direction != "none" and entry > 0 and price > 0 and size > 0:
+            if direction in ("buy", "long"):
+                diff = price - entry
+            else:
+                diff = entry - price
+            raw_pnl = diff * size
+            pos["pnl"] = round(raw_pnl, 2)
+            # 原始百分比（按总仓位价值算）
+            raw_pct = diff / entry * 100
+            # 合约模式：百分比按保证金比算（含杠杆）
+            if pos.get("market_mode") == "futures":
+                lev = pos.get("leverage", 1)
+                if lev > 0:
+                    raw_pct *= lev
+            pos["pnl_pct"] = round(raw_pct, 2)
+        else:
+            pos["pnl"] = 0.0
+            pos["pnl_pct"] = 0.0
+
     def get_status(self) -> dict:
+        # ── 实时计算浮动盈亏写入 _current_position ──
+        self._update_position_pnl()
+
         return {
             "running": self._running,
             "current_activity": self._current_activity,

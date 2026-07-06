@@ -1,4 +1,4 @@
-"""
+﻿"""
 🤖 AI 自动交易 — 三 Agent 系统控制面板
 
 将 Streamlit 前端与后端三 Agent 系统打通：
@@ -23,14 +23,16 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from frontend.components.metrics_display import render_metric_card
 from frontend.components.charts import equity_curve_chart
 from frontend.utils.data_provider import fetch_klines_with_agg, fetch_ticker
 from frontend.utils.session_state import get_config
 
+from frontend.components.layout import inject_mask_hider_js
+from frontend.utils.helpers import ss as _ss, fmt_change as _fmt_change, ETH_SYMBOL
 from frontend.utils.eth_news import _fetch_crypto_news, _fmt_relative_time
 from frontend.utils.eth_ai_analysis import (
     _call_ai_analysis,
@@ -40,11 +42,10 @@ from frontend.utils.eth_ai_analysis import (
     _summarize_klines,
 )
 from frontend.components.eth_charts import (
-    COLORS,
     TIMEFRAMES,
     TIMEFRAME_REFRESH_S,
-    _build_candlestick_fig,
-    _friendly_tf,
+    TV_INTERVAL_MAP,
+    _build_tradingview_html,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -55,7 +56,6 @@ if str(PROJECT_ROOT) not in sys.path:
 # CONSTANTS
 # ════════════════════════════════════════════════════════════════
 
-ETH_SYMBOL = "ETH-USDT"
 DEFAULT_TF_LABEL = "15分钟"
 PID_FILE = PROJECT_ROOT / "data" / "agent.pid"
 STATUS_FILE = PROJECT_ROOT / "data" / "agent_status.json"
@@ -309,39 +309,67 @@ def _get_trades_df(limit: int = 50) -> pd.DataFrame:
 
 
 def _get_trade_stats() -> dict:
-    """从 SQLite 统计交易数据"""
+    """从 SQLite 统计交易数据（仅统计 close 记录，避免 _update_pnl_close 双倍计数）"""
     if not DB_FILE.exists():
         return {}
     try:
         conn = sqlite3.connect(str(DB_FILE))
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*), COALESCE(SUM(pnl_close), 0) FROM trades WHERE pnl_close != 0")
-        total, total_pnl = cur.fetchone()
-        cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_close > 0")
-        wins = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_close < 0")
-        losses = cur.fetchone()[0]
+        # 只用 close 记录统计已平仓交易
+        cur.execute(
+            "SELECT COUNT(*), COALESCE(SUM(pnl_close), 0), "
+            "COALESCE(SUM(fee), 0) "
+            "FROM trades WHERE trade_type = 'close'"
+        )
+        total, total_pnl, total_fee = cur.fetchone()
+        total = total or 0
+
+        # 当 close 记录为 0 时回退到所有记录（兼容旧数据）
+        if total == 0:
+            cur.execute("SELECT COUNT(*), COALESCE(SUM(pnl), 0) FROM trades WHERE pnl != 0")
+            total, total_pnl = cur.fetchone()
+            total = total or 0
+            cur.execute("SELECT COUNT(*) FROM trades WHERE pnl > 0")
+            wins = cur.fetchone()[0] or 0
+            cur.execute("SELECT COUNT(*) FROM trades WHERE pnl < 0")
+            losses = cur.fetchone()[0] or 0
+            conn.close()
+            return {
+                "total": total,
+                "wins": wins,
+                "losses": losses,
+                "total_pnl": total_pnl or 0.0,
+                "total_fee": 0.0,
+                "net_pnl": total_pnl or 0.0,
+                "win_rate": (wins / (wins + losses) * 100) if (wins + losses) else 0,
+            }
+
+        # 正常统计 close 记录
+        cur.execute("SELECT COUNT(*) FROM trades WHERE trade_type = 'close' AND pnl_close > 0")
+        wins = cur.fetchone()[0] or 0
+        cur.execute("SELECT COUNT(*) FROM trades WHERE trade_type = 'close' AND pnl_close < 0")
+        losses = cur.fetchone()[0] or 0
         conn.close()
+
+        total_pnl = total_pnl or 0.0
+        total_fee = total_fee or 0.0
+        closed = wins + losses
         return {
-            "total": total or 0,
-            "wins": wins or 0,
-            "losses": losses or 0,
-            "total_pnl": total_pnl or 0.0,
-            "win_rate": (wins / total * 100) if total else 0,
+            "total": total,
+            "wins": wins,
+            "losses": losses,
+            "total_pnl": total_pnl,
+            "total_fee": total_fee,
+            "net_pnl": total_pnl,  # pnl_close 已经是扣费后的净值
+            "win_rate": (wins / closed * 100) if closed else 0,
         }
     except Exception:
         return {}
 
 
 # ════════════════════════════════════════════════════════════════
-# SESSION STATE HELPERS
+# SESSION STATE INIT
 # ════════════════════════════════════════════════════════════════
-
-
-def _ss(key: str, default=None):
-    if key not in st.session_state:
-        st.session_state[key] = default
-    return st.session_state[key]
 
 
 def _init_state():
@@ -362,12 +390,8 @@ def _init_state():
     _ss("ai_entry_markers", [])
     _ss("ai_exit_markers", [])
     _ss("ai_error", None)
-
-
-def _fmt_change(c: float | None) -> str:
-    if c is None:
-        return ""
-    return f"{c:+.2f}%"
+    _ss("ai_market_mode", "futures")
+    _ss("ai_leverage", 10)
 
 
 def _render_agent_dashboard(status_data: dict):
@@ -387,83 +411,7 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# ── 隐藏自动刷新的加载蒙版 ──
-import streamlit.components.v1 as _comps
-_comps.html("""
-<script>
-(function() {
-    'use strict';
-    var doc;
-    try { doc = parent.document; } catch(e) { doc = document; }
-    if (!doc) return;
-    var style = doc.createElement('style');
-    style.setAttribute('data-mask-killer', '');
-    style.textContent = [
-        '[data-testid*="Status"], [data-testid*="status"],',
-        '[data-testid*="Loading" i], [data-testid*="loading" i],',
-        '[data-testid*="Spinner"], [data-testid*="spinner"],',
-        '[data-testid*="Blocking"], [data-testid*="blocking"],',
-        '[data-testid*="stStatusWidget"],',
-        'div[class*="stAppLoading"],',
-        'div[class*="stBlock"],',
-        'div[class*="stStatus"],',
-        'div[class*="stSpinner"],',
-        'div[class*="stLoading"],',
-        'aside[data-testid*="stStatus"],',
-        'aside[class*="stStatus"],',
-        'iframe[title*="stStatus"],',
-        'iframe[title*="loading" i],',
-        'div[class*="stAppViewBlocking"],',
-        'div[data-testid*="stFragment"] > div[class*="loading"]',
-    ].join('') + ' {' +
-        'display: none !important;' +
-        'visibility: hidden !important;' +
-        'opacity: 0 !important;' +
-        'pointer-events: none !important;' +
-        'z-index: -9999 !important;' +
-        'width: 0 !important;' +
-        'height: 0 !important;' +
-        'overflow: hidden !important;' +
-        'position: fixed !important;' +
-    '}';
-    doc.head.appendChild(style);
-    var TARGETS = [
-        '[data-testid*="Status"]', '[data-testid*="status"]',
-        '[data-testid*="Loading" i]', '[data-testid*="loading" i]',
-        '[data-testid*="Spinner"]', '[data-testid*="spinner"]',
-        '[data-testid*="Blocking"]', '[data-testid*="blocking"]',
-    ];
-    var combined = TARGETS.join(',');
-    function kill() {
-        var els = doc.querySelectorAll(combined);
-        for (var i = 0; i < els.length; i++) {
-            var el = els[i];
-            if (el.style.display !== 'none') {
-                el.style.setProperty('display', 'none', 'important');
-                el.style.setProperty('z-index', '-9999', 'important');
-            }
-        }
-    }
-    var observer = new MutationObserver(function(muts) {
-        for (var m = 0; m < muts.length; m++) {
-            if (muts[m].type === 'attributes' ||
-                (muts[m].addedNodes && muts[m].addedNodes.length > 0)) {
-                kill(); break;
-            }
-        }
-    });
-    var target = doc.body || doc.documentElement;
-    if (target) {
-        observer.observe(target, {
-            childList: true, subtree: true, attributes: true,
-            attributeFilter: ['style', 'class', 'data-testid'],
-        });
-    }
-    setInterval(kill, 300);
-    kill();
-})();
-</script>
-""", height=0)
+inject_mask_hider_js()
 
 cfg = get_config()
 _init_state()
@@ -637,6 +585,28 @@ with btn_cols[4]:
         step=1000.0,
     )
 
+# ── 交易模式 + 杠杆 ──
+mode_cols = st.columns([1.5, 1.5, 4])
+with mode_cols[0]:
+    st.session_state.ai_market_mode = st.selectbox(
+        "交易模式", ["spot", "futures"],
+        index=0 if st.session_state.ai_market_mode == "spot" else 1,
+        key="ai_mode_sel",
+    )
+with mode_cols[1]:
+    is_futures = st.session_state.ai_market_mode == "futures"
+    st.session_state.ai_leverage = st.number_input(
+        "杠杆", min_value=1, max_value=125,
+        value=st.session_state.ai_leverage,
+        step=1, disabled=not is_futures,
+        key="ai_lev_sel",
+    )
+with mode_cols[2]:
+    st.caption(
+        "💡 合约模式：USDT 本位永续合约，含杠杆、保证金、强平价模拟"
+        if is_futures else "💡 现货模式：全额交易，无杠杆"
+    )
+
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════
@@ -674,9 +644,145 @@ def _agent_status_fragment():
     if _running and _sd:
         _render_agent_dashboard(_sd)
 
+        # ── 合约模式 KPI（当 agent3 持仓方向非 none 且 market_mode=futures 时显示） ──
+        _pos = _a3.get("position", {}) or {}
+        _pos_side = _pos.get("side", "none")
+        _market_mode = _pos.get("market_mode", "spot")
+        if _market_mode == "futures" and _pos_side not in ("none", "flat", ""):
+            fc = st.columns(4)
+            with fc[0]:
+                lev = _pos.get("leverage", 0)
+                st.metric("杠杆", f"{lev}x")
+            with fc[1]:
+                liq = _pos.get("liquidation_price", 0)
+                st.metric("强平价", f"${liq:,.2f}" if liq else "—")
+            with fc[2]:
+                mr = _pos.get("margin_rate", 0) or 0
+                mr_color = "inverse" if mr < 5 else "off"
+                st.metric("保证金率", f"{mr:.1f}%", delta_color=mr_color)
+            with fc[3]:
+                pv = _pos.get("position_value", 0)
+                st.metric("仓位价值", f"${pv:,.2f}" if pv else "—")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 _agent_status_fragment()
+
+# 全页面共享的刷新间隔（供后续 fragment 使用）
+refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
+
+# ════════════════════════════════════════════════════════════════
+# P&L DASHBOARD — 持仓盈亏看板（独立 fragment，实时刷新）
+# ════════════════════════════════════════════════════════════════
+
+
+@st.fragment(run_every=refresh_interval_s)
+def _pnl_dashboard_fragment():
+    """持仓盈亏看板 — 独立刷新，不触发全页重渲染"""
+    _running = _agent_is_running()
+    _sd = _read_agent_status() if _running else {}
+    a3 = _sd.get("agent3", {}) if _sd else {}
+    pos = a3.get("position", {}) or {}
+    risk = a3.get("risk_status", {}) or {}
+
+    has_pos = pos.get("size", 0) > 0
+    monthly_pnl = a3.get("last_monthly_pnl", 0) or 0
+    daily_trades = risk.get("daily_trade_count", 0) or 0
+    consec = risk.get("consecutive_losses", 0) or 0
+
+    # 当内存无持仓时，从 SQLite 读取历史累积盈亏
+    stats = _get_trade_stats() if not has_pos else {}
+    db_total_pnl = stats.get("total_pnl", 0) or 0
+    db_total_trades = stats.get("total", 0) or 0
+    db_win_rate = stats.get("win_rate", 0) or 0
+    db_wins = stats.get("wins", 0) or 0
+    db_losses = stats.get("losses", 0) or 0
+
+    # 取最大值：agent 内存累计 or 数据库累计
+    effective_pnl = monthly_pnl if has_pos else (monthly_pnl or db_total_pnl)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">💰 持仓盈亏看板</div>', unsafe_allow_html=True)
+
+    if has_pos:
+        side = pos.get("side", "")
+        size = pos.get("size", 0)
+        entry = pos.get("entry_price", 0)
+        cur = pos.get("current_price", 0)
+        pnl = pos.get("pnl", 0) or 0
+        pnl_pct = pos.get("pnl_pct", 0) or 0
+        market_mode = pos.get("market_mode", "spot")
+
+        cols = st.columns(5)
+
+        with cols[0]:
+            side_icon = "🟢" if side == "buy" else "🔴"
+            side_text = "多头" if side == "buy" else "空头"
+            st.markdown(f"<div style='font-size:0.8rem;color:#64748b;'>方向</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size:1.2rem;font-weight:700;'>{side_icon} {side_text}</div>", unsafe_allow_html=True)
+            st.caption(f"{size} ETH · {market_mode.upper()}")
+
+        with cols[1]:
+            st.metric("入场价", f"${entry:,.2f}")
+
+        with cols[2]:
+            price_diff = cur - entry
+            price_dir = "▲" if price_diff >= 0 else "▼"
+            st.metric("现价", f"${cur:,.2f}", f"{price_dir} ${abs(price_diff):,.2f}")
+
+        with cols[3]:
+            pnl_color = "normal" if pnl >= 0 else "inverse"
+            st.metric("浮动盈亏", f"${pnl:+,.2f}", f"{pnl_pct:+,.2f}%", delta_color=pnl_color)
+
+        with cols[4]:
+            st.metric("月累计", f"${monthly_pnl:+,.2f}")
+
+        # 止损止盈信息
+        pm = _sd.get("position_monitor", {}) or {}
+        sl = pm.get("stop_loss", 0)
+        tp = pm.get("take_profit", 0)
+        if sl or tp:
+            extra = st.columns(4)
+            with extra[0]:
+                st.caption(f"🛑 止损: ${sl:.2f}" if sl else "🛑 止损: 未设置")
+            with extra[1]:
+                st.caption(f"🎯 止盈: ${tp:.2f}" if tp else "🎯 止盈: 未设置")
+            with extra[2]:
+                st.caption(f"📊 今日交易: {daily_trades} 笔")
+            with extra[3]:
+                mpt = risk.get("max_trades_per_hour", 4)
+                st.caption(f"⏱ HFT上限: {mpt}笔/时")
+    else:
+        m_color = "#059669" if effective_pnl >= 0 else "#dc2626"
+        # 如果只有数据库有数据，显示历史统计
+        if db_total_trades > 0 and monthly_pnl == 0:
+            # 有已平仓盈亏才显示胜率，否则只显示总笔数和历史盈亏
+            if db_wins + db_losses > 0:
+                win_str = f"胜率 {db_win_rate:.0f}% ({db_wins}胜/{db_losses}负) &nbsp;|&nbsp; "
+            else:
+                win_str = ""
+            st.markdown(
+                f"<div style='text-align:center;padding:8px 0;color:#64748b;'>"
+                f"⚪ 当前无持仓 &nbsp;|&nbsp; "
+                f"历史盈亏 <span style='color:{m_color};font-weight:600;'>${effective_pnl:+,.2f}</span>"
+                f" &nbsp;|&nbsp; {win_str}累计 {db_total_trades} 笔"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div style='text-align:center;padding:8px 0;color:#64748b;'>"
+                f"⚪ 无持仓 &nbsp;|&nbsp; "
+                f"月累计 <span style='color:{m_color};font-weight:600;'>${monthly_pnl:+,.2f}</span>"
+                f" &nbsp;|&nbsp; 今日 {daily_trades} 笔交易"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+_pnl_dashboard_fragment()
 
 # 供后续 Phase 4 使用的 agent3 数据（页面加载时读取一次，增量更新走 fragment）
 # 无论 Agent 是否运行都读取状态文件，保证历史数据跨刷新保留
@@ -687,16 +793,10 @@ agent3 = status_data.get("agent3", {}) if status_data else {}
 # DISPLAY — K-line chart + ticker（独立 fragment，不触发全页刷新）
 # ════════════════════════════════════════════════════════════════
 
-refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
-
 @st.fragment(run_every=refresh_interval_s)
-def _chart_fragment():
-    """从 session_state 读取数据渲染 K 线图（独立刷新）"""
+def _ticker_fragment():
+    """独立刷新 ticker 价格条"""
     _t = st.session_state.get("ai_ticker")
-    _d = st.session_state.get("ai_data")
-    _tfl = st.session_state.get("ai_timeframe", "15分钟")
-    _tk = TIMEFRAMES.get(_tfl, "1d")
-
     if _t:
         _c24 = _t.get("change_24h", 0) or 0
         _pc = "green" if _c24 >= 0 else "red"
@@ -704,51 +804,26 @@ def _chart_fragment():
         st.markdown(f"""
         <div class="ticker-bar">
         <div class="ticker-item"><span class="ticker-label">ETH-USDT</span><span class="ticker-value {_pc}">${_lp:,.2f} {_fmt_change(_c24)}</span></div>
-        <div class="ticker-item"><span class="ticker-label">买一 / 卖一</span><span class="ticker-value">{f'${_t.get("bid",0):,.2f}' if _t.get("bid") else "N/A"} / {f'${_t.get("ask",0):,.2f}' if _t.get("ask") else "N/A"}</span></div>
-        <div class="ticker-item"><span class="ticker-label">24h 最高 / 最低</span><span class="ticker-value">{f'${_t.get("high_24h",0):,.2f}' if _t.get("high_24h") else "N/A"} / {f'${_t.get("low_24h",0):,.2f}' if _t.get("low_24h") else "N/A"}</span></div>
-        <div class="ticker-item"><span class="ticker-label">24h 成交量</span><span class="ticker-value">{f'{_t.get("volume_24h",0):,.0f} ETH'}</span></div>
+        <div class="ticker-item"><span class="ticker-label">买一 / 卖一</span><span class="ticker-value">{'${:,.2f}'.format(_t['bid']) if _t.get('bid') else "N/A"} / {'${:,.2f}'.format(_t['ask']) if _t.get('ask') else "N/A"}</span></div>
+        <div class="ticker-item"><span class="ticker-label">24h 最高 / 最低</span><span class="ticker-value">{'${:,.2f}'.format(_t['high_24h']) if _t.get('high_24h') else "N/A"} / {'${:,.2f}'.format(_t['low_24h']) if _t.get('low_24h') else "N/A"}</span></div>
+        <div class="ticker-item"><span class="ticker-label">24h 成交量</span><span class="ticker-value">{f'{_t["volume_24h"]:,.0f} ETH' if _t.get("volume_24h") else "N/A"}</span></div>
         </div>
         """, unsafe_allow_html=True)
+    elif not _t:
+        st.info("⏳ 加载行情数据…")
 
-    if _d is not None and not _d.empty:
-        _fig = _build_candlestick_fig(_d, ticker_data=_t, tf_key=_tk, height=450)
 
-        _entry_markers = st.session_state.get("ai_entry_markers") or []
-        if _entry_markers:
-            _entry_df = pd.DataFrame(_entry_markers)
-            _entry_df["time"] = pd.to_datetime(_entry_df["time"])
-            _fig.add_trace(go.Scatter(
-                x=_entry_df["time"], y=_entry_df["price"],
-                mode="markers", name="入场",
-                marker=dict(color="#059669", size=14, symbol="triangle-up", line=dict(color="white", width=2)),
-            ))
+_ticker_fragment()
 
-        _exit_markers = st.session_state.get("ai_exit_markers") or []
-        if _exit_markers:
-            _exit_df = pd.DataFrame(_exit_markers)
-            _exit_df["time"] = pd.to_datetime(_exit_df["time"])
-            _fig.add_trace(go.Scatter(
-                x=_exit_df["time"], y=_exit_df["price"],
-                mode="markers", name="出场",
-                marker=dict(color="#dc2626", size=14, symbol="triangle-down", line=dict(color="white", width=2)),
-            ))
+# ── TRADINGVIEW 专业图表（独立 iframe，仅切换周期时重建） ──
+_tfl = st.session_state.get("ai_timeframe", "15分钟")
+_tk = TIMEFRAMES.get(_tfl, "1d")
+_tv_interval = TV_INTERVAL_MAP.get(_tk, "15")
 
-        st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
-
-        # KPI row
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        _kpi_sub = st.columns(4)
-        with _kpi_sub[0]: st.metric("当前价", f"${float(_d['close'].iloc[-1]):,.2f}")
-        with _kpi_sub[1]: st.metric("时段最高", f"${float(_d['high'].max()):,.2f}")
-        with _kpi_sub[2]: st.metric("时段最低", f"${float(_d['low'].min()):,.2f}")
-        with _kpi_sub[3]:
-            _vol = float(_d['volume'].sum())
-            st.metric("时段成交量", f"{_vol:,.0f}")
-        st.markdown('</div>', unsafe_allow_html=True)
-    elif _t is None:
-        st.info("⏳ 加载K线数据…")
-
-_chart_fragment()
+components.html(
+    _build_tradingview_html(interval=_tv_interval, theme="dark"),
+    height=560,
+)
 
 # ════════════════════════════════════════════════════════════════
 # DATA FRAGMENT — 数据更新 + Agent 交易标记读取
@@ -758,25 +833,11 @@ _chart_fragment()
 @st.fragment(run_every=refresh_interval_s)
 def _data_fragment():
     """仅获取数据写入 session_state，不触发全页重渲染。"""
-    _tf_label = st.session_state.ai_timeframe
-    _t_key = TIMEFRAMES.get(_tf_label, "1d")
-    _d_count = st.session_state.ai_data_count
-
-    # Ticker
+    # Ticker（供顶部价格条使用）
     try:
         st.session_state.ai_ticker = fetch_ticker(cfg, symbol=ETH_SYMBOL)
     except Exception:
-        if st.session_state.get("ai_data") is None:
-            st.warning("获取 ticker 失败")
-
-    # K 线
-    try:
-        _new_df = fetch_klines_with_agg(cfg, limit=_d_count, timeframe=_t_key, symbol=ETH_SYMBOL)
-        if _new_df is not None and not _new_df.empty:
-            st.session_state.ai_data = _new_df
-    except Exception as e:
-        if st.session_state.get("ai_data") is None:
-            st.error(f"获取数据失败: {e}")
+        pass
 
     # 如果 Agent 在运行，从 SQLite 读取交易标记
     if _agent_is_running():
@@ -1064,12 +1125,16 @@ if not _trades_df.empty:
     # 统计
     stats = _get_trade_stats()
     if stats["total"]:
-        stat_cols = st.columns(5)
-        stat_cols[0].metric("总盈亏", f"${stats['total_pnl']:+,.2f}")
-        stat_cols[1].metric("胜率", f"{stats['win_rate']:.1f}%")
-        stat_cols[2].metric("盈利次数", stats["wins"])
-        stat_cols[3].metric("亏损次数", stats["losses"])
-        stat_cols[4].metric("总交易", stats["total"])
+        total_fee = stats.get("total_fee", 0) or 0
+        net_pnl = stats.get("net_pnl", stats["total_pnl"])
+        gross_pnl = net_pnl + total_fee  # 还原毛盈亏
+        stat_cols = st.columns(6)
+        stat_cols[0].metric("净盈亏", f"${net_pnl:+,.2f}")
+        stat_cols[1].metric("手续费", f"${total_fee:+,.2f}")
+        stat_cols[2].metric("胜率", f"{stats['win_rate']:.1f}%")
+        stat_cols[3].metric("盈利次数", stats["wins"])
+        stat_cols[4].metric("亏损次数", stats["losses"])
+        stat_cols[5].metric("总交易", stats["total"])
 elif agent_running:
     st.info("💡 Agent 系统运行中，暂无交易记录。等待 Agent 3 执行交易…")
 else:

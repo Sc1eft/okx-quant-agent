@@ -163,6 +163,8 @@ class TestBeijingSettlement:
 
     def test_no_reset_within_same_day(self, manager):
         """同一天内不重复重置"""
+        # 初始化 CST 日期到测试日期，避免 __init__ 的当前日期干扰
+        manager._current_cst_date = datetime(2026, 6, 24, tzinfo=timezone.utc).date()
         manager._daily_trade_count = 3
 
         t1 = datetime(2026, 6, 24, 8, 0, tzinfo=timezone.utc)

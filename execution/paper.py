@@ -62,6 +62,11 @@ class PaperAccount:
         return long_pnl + short_pnl
 
     @property
+    def total_realized_pnl(self) -> float:
+        """所有已平仓交易的总盈亏"""
+        return round(sum(t.get("pnl", 0) for t in self.trades if t.get("pnl") is not None), 2)
+
+    @property
     def unrealized_pnl_pct(self) -> float:
         """未实现盈亏 (%) — 根据当前持仓类型计算"""
         if self.position > 0.001 and self.position_cost > 0:
@@ -218,6 +223,7 @@ class PaperAccount:
             "equity": round(self.equity, 2),
             "unrealized_pnl": round(self.unrealized_pnl, 2),
             "unrealized_pnl_pct": round(self.unrealized_pnl_pct, 2),
+            "total_realized_pnl": round(self.total_realized_pnl, 2),
             "total_trades": len(self.trades),
             "trades": self.trades[-50:],
             "equity_history": self.equity_history[-200:],

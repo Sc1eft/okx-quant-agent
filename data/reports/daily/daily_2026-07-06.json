@@ -1,0 +1,66 @@
+{
+  "type": "daily",
+  "date": "2026-07-06",
+  "generated_at": "2026-07-06T19:41:15.863196+00:00",
+  "stats": {
+    "trades": 1,
+    "wins": 0,
+    "losses": 1,
+    "win_rate": 0.0,
+    "total_pnl": -3.15,
+    "total_fee": 0.45,
+    "avg_pnl": -3.15,
+    "best_trade": -3.15,
+    "worst_trade": -3.15,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 1,
+        "win_rate": 0.0,
+        "pnl": -3.15
+      }
+    }
+  },
+  "summary": "交易次数不足 (1 < 5), 暂不生成总结",
+  "period": {
+    "start": "2026-07-06T00:00:00",
+    "end": "2026-07-06T23:59:59"
+  },
+  "trades": {
+    "wins": [],
+    "losses": [
+      {
+        "trade_id": 371,
+        "pnl": -3.15,
+        "side": "buy",
+        "entry_price": 1795.42,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '空头止损'}",
+        "time": "2026-07-06T17:18:16.790287+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 0,
+      "total_profit": 0.0,
+      "patterns": []
+    },
+    "losses": {
+      "count": 1,
+      "total_loss": 3.15,
+      "patterns": [
+        {
+          "pattern": "空头止损：空头仓位在价格向上突破止损线时触发买入平仓",
+          "loss_count": 1,
+          "avg_loss": 3.15,
+          "cause": "空头仓位未按预期下跌，反而上涨触发止损，导致买入平仓亏损",
+          "suggestion": "重新评估止损点位设置，考虑更大的容忍度或结合支撑阻力优化止损位置，避免频繁被扫损"
+        }
+      ]
+    },
+    "summary": "当日仅有一笔交易，因空头止损被触发，亏损3.15 USDT，建议优化止损策略。"
+  },
+  "pushed": false,
+  "push_time": null
+}

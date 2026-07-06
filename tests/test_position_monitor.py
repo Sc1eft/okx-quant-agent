@@ -32,12 +32,12 @@ def mock_risk_manager():
 
 @pytest.fixture
 def mock_executor():
-    ex = AsyncMock()
+    ex = MagicMock()
     ex.symbol = "ETH-USDT"
-    # Mock execute_market to return success
-    ex.execute_market.return_value = {
+    # Use explicit AsyncMock for async method to avoid auto-creation warnings
+    ex.execute_market = AsyncMock(return_value={
         "success": True, "order_id": "sl123", "fill_price": 3400.0,
-    }
+    })
     return ex
 
 

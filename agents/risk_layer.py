@@ -107,19 +107,77 @@ class RiskManager:
             remaining = (self._api_breaker_until - now).total_seconds()
             return False, f"API 熔断中，剩余 {remaining:.0f}s"
 
+        # 8. HFT 防护：每小时交易频率上限
+        if not self._check_hft(now):
+            return False, f"交易频率过高（每小时上限 {self.config.max_trades_per_hour} 笔）"
+
         return True, ""
+
+    def _check_hft(self, now: datetime) -> bool:
+        """检查过去一小时内交易是否超过上限"""
+        if not self._db_conn:
+            return True  # 无数据库时不拦截
+        try:
+            hour_ago = (now - timedelta(hours=1)).isoformat()
+            cur = self._db_conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE timestamp >= ? AND trade_type = 'open'",
+                (hour_ago,)
+            )
+            count = cur.fetchone()[0] or 0
+            return count < self.config.max_trades_per_hour
+        except Exception as e:
+            logger.warning(f"HFT 检查异常，保守拦截: {e}")
+            return False  # DB 异常时保守拦截，不放行
 
     # ── Layer 2: 交易中保护 ──
 
-    def check_layer2(
+    def check_layer1_pre(
         self,
-        signal_price: float,
-        actual_fill_price: float,
+        now: Optional[datetime] = None,
     ) -> Tuple[bool, str]:
-        """检查滑点是否可接受"""
-        slippage = abs(actual_fill_price - signal_price) / signal_price * 100
-        if slippage > 0.3:
-            return False, f"滑点 {slippage:.2f}% 超过 0.3% 上限"
+        """交易前快速预检（方向无关项，在 DeepSeek API 调用前执行）
+
+        检查项:
+          1. API 熔断
+          2. 每日交易次数上限
+          3. 每日亏损上限
+          4. 连续亏损
+          5. 最小交易间隔
+          6. HFT 防护（每小时频率上限）
+
+        返回 (通过?, 原因)
+        """
+        now = now or datetime.now(timezone.utc)
+        self._check_date_reset(now)
+
+        # 1. API 熔断
+        if self._api_breaker_until and now < self._api_breaker_until:
+            remaining = (self._api_breaker_until - now).total_seconds()
+            return False, f"API 熔断中，剩余 {remaining:.0f}s"
+
+        # 2. 每日交易次数
+        if self._daily_trade_count >= self.config.agent3_max_daily_trades:
+            return False, f"今日交易已达上限 ({self._daily_trade_count} 次)"
+
+        # 3. 每日亏损上限
+        if self._daily_loss_usdt >= self.config.agent3_max_daily_loss_usdt:
+            return False, f"今日亏损已达上限 ({self._daily_loss_usdt:.2f} USDT)"
+
+        # 4. 连续亏损
+        if self._consecutive_losses >= self.config.agent3_max_consecutive_losses:
+            return False, f"连续亏损 {self._consecutive_losses} 次，交易暂停"
+
+        # 5. 最小交易间隔
+        if self._last_trade_time:
+            elapsed = (now - self._last_trade_time).total_seconds()
+            if elapsed < self.config.agent3_min_interval_between_trades:
+                remaining = self.config.agent3_min_interval_between_trades - int(elapsed)
+                return False, f"交易间隔未到，还需 {remaining}s"
+
+        # 6. HFT 防护
+        if not self._check_hft(now):
+            return False, f"交易频率过高（每小时上限 {self.config.max_trades_per_hour} 笔）"
+
         return True, ""
 
     def report_api_error(self):
@@ -144,6 +202,7 @@ class RiskManager:
             trade_group_id (str): 开平配对 ID
             trade_type (str): 'open' / 'close'
             pnl_close (float): 平仓时实际盈亏
+            fee (float): 该笔交易的手续费，开仓和平仓各记一次
         """
         self._last_trade_time = datetime.now(timezone.utc)
         self._daily_trade_count += 1
@@ -236,6 +295,7 @@ class RiskManager:
             "position_size_multiplier": self.get_position_size_multiplier(),
             "position_eth": round(self._current_position_eth, 6),
             "position_side": self._current_position_side,
+            "max_trades_per_hour": self.config.max_trades_per_hour,
         }
 
     # ── Phase 2: BTC 波动检查 ──
@@ -368,11 +428,12 @@ class RiskManager:
                     decision TEXT
                 )
             """)
-            # Phase 4 迁移: 新增 P&L 跟踪列
+            # Phase 4 迁移: 新增 P&L 跟踪列 + 手续费列
             for col, col_def in [
                 ("pnl_close", "REAL DEFAULT 0"),
                 ("trade_group_id", "TEXT DEFAULT ''"),
                 ("trade_type", "TEXT DEFAULT 'open'"),
+                ("fee", "REAL DEFAULT 0.0"),
             ]:
                 try:
                     self._db_conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_def}")
@@ -384,14 +445,14 @@ class RiskManager:
             self._db_conn = None
 
     def _log_trade_sync(self, trade_data: dict):
-        """同步写入交易到 SQLite（含 Phase 4 P&L 列）"""
+        """同步写入交易到 SQLite（含 Phase 4 P&L 列 + 手续费）"""
         if not self._db_conn:
             return
         try:
             self._db_conn.execute(
                 "INSERT INTO trades (timestamp, side, size, price, pnl, order_id, symbol, decision, "
-                "pnl_close, trade_group_id, trade_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "pnl_close, trade_group_id, trade_type, fee) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     trade_data.get("timestamp", ""),
                     trade_data.get("side", ""),
@@ -404,6 +465,7 @@ class RiskManager:
                     trade_data.get("pnl_close", 0),
                     trade_data.get("trade_group_id", ""),
                     trade_data.get("trade_type", "open"),
+                    trade_data.get("fee", 0.0),
                 )
             )
             self._db_conn.commit()

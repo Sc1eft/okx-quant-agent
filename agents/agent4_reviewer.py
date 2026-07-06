@@ -244,12 +244,12 @@ class Agent4Reviewer:
     # ── 数据采集 ──
 
     def _load_recent_trades(self, n: int = 5) -> list[dict]:
-        """从 SQLite 加载最近 N 笔已完成交易"""
+        """从 SQLite 加载最近 N 笔已完成交易（只读 close 记录，open 记录的 pnl 为 0）"""
         try:
             conn = sqlite3.connect(self._db_path)
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT * FROM trades ORDER BY id DESC LIMIT ?", (n,)
+                "SELECT * FROM trades WHERE trade_type='close' ORDER BY id DESC LIMIT ?", (n,)
             )
             rows = [dict(row) for row in cursor.fetchall()]
             conn.close()

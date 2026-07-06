@@ -1,0 +1,29 @@
+{
+  "type": "weekly",
+  "date": "2026-07-05",
+  "generated_at": "2026-07-05T18:57:24.759788+00:00",
+  "stats": {
+    "trades": 42,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": 0.0,
+    "total_pnl": 0.0,
+    "avg_pnl": 0.0,
+    "best_trade": 0.0,
+    "worst_trade": 0.0,
+    "max_drawdown_pct": 0.0,
+    "by_side": {},
+    "_fallback": true
+  },
+  "summary": "共 42 笔交易 | 胜率 0.0% (0胜/0负) | 总盈亏 +0.00 USDT | 最大回撤 0.00%",
+  "period": {
+    "start": "2026-06-28T18:57:24.758787+00:00",
+    "end": "2026-07-05T18:57:24.759788+00:00"
+  },
+  "trades": {
+    "wins": [],
+    "losses": []
+  },
+  "pushed": false,
+  "push_time": null
+}

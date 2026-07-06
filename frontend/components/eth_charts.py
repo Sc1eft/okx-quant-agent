@@ -13,8 +13,10 @@ __all__ = [
     "COLORS",
     "TIMEFRAMES",
     "TIMEFRAME_REFRESH_S",
+    "TV_INTERVAL_MAP",
     "_build_candlestick_fig",
     "_build_sparkline",
+    "_build_tradingview_html",
     "_friendly_tf",
     "_fmt_uptime",
 ]
@@ -54,6 +56,53 @@ COLORS = {
     "green": "#059669",
     "red": "#dc2626",
 }
+
+# TradingView 周期代码映射（内部 key → TradingView interval）
+TV_INTERVAL_MAP: dict[str, str] = {
+    "1s": "1S", "1m": "1", "2m": "2", "3m": "3", "5m": "5",
+    "15m": "15", "30m": "30", "1h": "60", "2h": "120", "4h": "240",
+    "6h": "360", "12h": "720", "1d": "D", "2d": "2D", "3d": "3D", "15d": "15D",
+}
+
+
+def _build_tradingview_html(
+    symbol: str = "OKX:ETHUSDT",
+    interval: str = "15",
+    theme: str = "dark",
+    height: int = 500,
+) -> str:
+    """生成 TradingView 专业图表嵌入 HTML（给 streamlit.components.v1.html 用）"""
+    return f"""<!-- TradingView Widget BEGIN -->
+<div class="tradingview-widget-container" style="position:relative;">
+  <div id="tv_chart" style="height:{height}px;"></div>
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+  <script type="text/javascript">
+  new TradingView.widget({{
+    "container_id": "tv_chart",
+    "width": "100%",
+    "height": {height},
+    "symbol": "{symbol}",
+    "interval": "{interval}",
+    "timezone": "Asia/Shanghai",
+    "theme": "{theme}",
+    "style": "1",
+    "locale": "zh_CN",
+    "toolbar_bg": "#f1f3f6",
+    "enable_publishing": false,
+    "hide_top_toolbar": false,
+    "hide_legend": false,
+    "save_image": false,
+    "withdateranges": true,
+    "studies": [
+      "MACD@tv-basicstudies",
+      "RSI@tv-basicstudies"
+    ],
+    "disabled_features": ["header_symbol_search"],
+    "enabled_features": ["study_templates"]
+  }});
+  </script>
+</div>
+<!-- TradingView Widget END -->"""
 
 
 # ════════════════════════════════════════════════════════════════

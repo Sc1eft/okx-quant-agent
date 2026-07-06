@@ -8,9 +8,10 @@ Refactored: shared modules extracted to utils/ and components/.
 """
 
 from __future__ import annotations
-import streamlit.components.v1 as _comps
+from frontend.components.layout import inject_mask_hider_js
 from frontend.components.metrics_display import render_metric_card
 from frontend.utils.data_provider import fetch_klines_with_agg, fetch_ticker
+from frontend.utils.helpers import ss as _ss, fmt_change as _fmt_change, ETH_SYMBOL
 from frontend.utils.session_state import get_config
 
 # ── Extracted shared modules ──
@@ -47,23 +48,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # ── Page-specific constants ──
-ETH_SYMBOL = "ETH-USDT"
 DEFAULT_TF_LABEL = "15分钟"
-
-
-# ── Page-specific helpers ──
-
-
-def _ss(key: str, default=None):
-    if key not in st.session_state:
-        st.session_state[key] = default
-    return st.session_state[key]
-
-
-def _fmt_change(c: float | None) -> str:
-    if c is None:
-        return ""
-    return f"{c:+.2f}%"
 
 
 # ════════════════════════════════════════════════════════════════
@@ -78,105 +63,7 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# ── 隐藏自动刷新的加载蒙版（Streamlit 1.58 兼容） ──
-# CSS 基础防御 + JS 实时清除，双层保障
-_comps.html("""
-<script>
-(function() {
-    'use strict';
-    var doc;
-    try { doc = parent.document; } catch(e) { doc = document; }
-    if (!doc) return;
-
-    // 1) 注入全局样式到 <head> —— 比 Streamlit 内联样式优先级高
-    var style = doc.createElement('style');
-    style.setAttribute('data-mask-killer', '');
-    style.textContent = [
-        /* Streamlit 状态/加载/阻塞指示器 */
-        '[data-testid*="Status"], [data-testid*="status"],',
-        '[data-testid*="Loading" i], [data-testid*="loading" i],',
-        '[data-testid*="Spinner"], [data-testid*="spinner"],',
-        '[data-testid*="Blocking"], [data-testid*="blocking"],',
-        '[data-testid*="stStatusWidget"],',
-        'div[class*="stAppLoading"],',
-        'div[class*="stBlock"],',
-        'div[class*="stStatus"],',
-        'div[class*="stSpinner"],',
-        'div[class*="stLoading"],',
-        'div[class*="StyledThumb"],',
-        'aside[data-testid*="stStatus"],',
-        'aside[class*="stStatus"],',
-        /* iframe loading mask */
-        'iframe[title*="stStatus"],',
-        'iframe[title*="loading" i],',
-        /* Fragment 刷新时的阻塞层 */
-        'div[class*="stAppViewBlocking"],',
-        'div[class*="stFragment"][class*="loading"],',
-        'div[data-testid*="stFragment"] > div[class*="loading"]',
-    ].join('') + ' {' +
-        'display: none !important;' +
-        'visibility: hidden !important;' +
-        'opacity: 0 !important;' +
-        'pointer-events: none !important;' +
-        'z-index: -9999 !important;' +
-        'width: 0 !important;' +
-        'height: 0 !important;' +
-        'overflow: hidden !important;' +
-        'position: fixed !important;' +
-    '}';
-    doc.head.appendChild(style);
-
-    // 2) MutationObserver 实时拦截动态插入的蒙版
-    var TARGET_SELECTORS = [
-        '[data-testid*="Status"]',
-        '[data-testid*="status"]',
-        '[data-testid*="Loading" i]',
-        '[data-testid*="loading" i]',
-        '[data-testid*="Spinner"]',
-        '[data-testid*="spinner"]',
-        '[data-testid*="Blocking"]',
-        '[data-testid*="blocking"]',
-    ];
-    var combined = TARGET_SELECTORS.join(',');
-
-    function kill() {
-        var els = doc.querySelectorAll(combined);
-        for (var i = 0; i < els.length; i++) {
-            var el = els[i];
-            if (el.style.display !== 'none') {
-                el.style.setProperty('display', 'none', 'important');
-                el.style.setProperty('z-index', '-9999', 'important');
-            }
-        }
-    }
-
-    // 监听 DOM 增删和属性变化（class / style / data-testid 变更）
-    var observer = new MutationObserver(function(muts) {
-        for (var m = 0; m < muts.length; m++) {
-            if (muts[m].type === 'attributes' ||
-                (muts[m].addedNodes && muts[m].addedNodes.length > 0)) {
-                kill();
-                break;
-            }
-        }
-    });
-    var target = doc.body || doc.documentElement;
-    if (target) {
-        observer.observe(target, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['style', 'class', 'data-testid'],
-        });
-    }
-
-    // 3) 兜底轮询（低频，防止 MutationObserver 漏网）
-    setInterval(kill, 300);
-
-    kill();
-})();
-</script>
-""", height=0)
+inject_mask_hider_js()
 
 cfg = get_config()
 

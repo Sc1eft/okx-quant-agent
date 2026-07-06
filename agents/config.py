@@ -27,10 +27,19 @@ class AgentSystemConfig:
     agent3_enabled: bool = True
     agent3_debounce_seconds: float = 30.0  # 事件缓冲窗口
     agent3_min_interval_between_trades: int = 300  # 最小交易间隔：5分钟
-    agent3_max_daily_trades: int = 10
+    agent3_max_daily_trades: int = 20  # 每日最大交易次数（实盘建议 10-20）
     agent3_max_daily_loss_usdt: float = 100.0
     agent3_max_consecutive_losses: int = 3
     agent3_max_position_eth: float = 0.5  # 单笔最大 0.5 ETH
+    agent3_idle_decision_interval_seconds: int = 600  # 空闲定时决策：10分钟
+
+    # ── 手续费率（OKX 标准费率）──
+    # Spot: maker 0.08%, taker 0.10%（ETH-USDT Group 1）
+    taker_fee_rate: float = 0.001    # 0.10%
+    maker_fee_rate: float = 0.0008   # 0.08%
+
+    # ── HFT 防护：交易频率上限 ──
+    max_trades_per_hour: int = 4     # 每小时最多 4 笔有效交易
 
     # ── Phase 3: 链上数据监控 ──
     agent2_onchain_enabled: bool = True
@@ -95,13 +104,19 @@ class AgentSystemConfig:
             "macd_bearish_cross": -0.8,
             "macd_hist_positive": 0.5,
             "macd_hist_negative": -0.5,
+            "macd_hist_momentum_up": 0.2,
+            "macd_hist_momentum_down": -0.2,
             "kdj_bullish_cross": 0.6,
             "kdj_bearish_cross": -0.6,
             "kdj_overbought": -0.4,
             "kdj_oversold": 0.4,
+            "kdj_k_above_50": 0.15,
+            "kdj_k_below_50": -0.15,
             "boll_break_upper": 0.3,
             "boll_break_lower": -0.3,
             "boll_squeeze": 0.0,
+            "boll_upper_approach": 0.15,
+            "boll_lower_approach": -0.15,
         }
     )
 
@@ -136,6 +151,22 @@ class AgentSystemConfig:
     # SignalAligner（信号对齐）
     signal_aligner_enabled: bool = True
     signal_aligner_conflict_threshold: float = 0.5
+
+    # ── ParamAdapter（参数自适应，被 Agent 4 替代但保留兼容）──
+    param_adapter_enabled: bool = False
+    param_adapter_min_trades_for_adjust: int = 3
+    param_adapter_adjust_interval_hours: int = 24
+    param_adapter_max_trades_range: list = field(default_factory=lambda: [5, 20])
+    param_adapter_win_rate_target: float = 0.50
+
+    # ── 市场模式（决定 TradeExecutor 使用现货还是合约模拟）──
+    market_mode: str = "futures"  # "spot" | "futures"
+    futures_leverage: int = 10  # 1x-125x
+
+    # ── 合约费率（OKX USDT 本位永续合约标准费率）──
+    # Futures: maker 0.02%, taker 0.05%（ETH-USDT 永续）
+    futures_taker_fee_rate: float = 0.0005   # 0.05%
+    futures_maker_fee_rate: float = 0.0002   # 0.02%
 
     # ── 交易所权限（决定 TradeExecutor 是否模拟成交）──
     exchange_permissions: str = "read"  # "read" → 模拟成交, "trade" → 调真实 API

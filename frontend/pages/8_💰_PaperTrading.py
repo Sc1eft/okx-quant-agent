@@ -35,17 +35,13 @@ from frontend.utils.session_state import get_config
 from frontend.utils.data_provider import fetch_latest_klines, fetch_ticker
 from frontend.components.charts import equity_curve_chart
 from frontend.components.metrics_display import render_metric_card
+from frontend.utils.helpers import ss as _ss
+from execution.futures_paper import FuturesPaperEngine
 
 
 # ════════════════════════════════════════════════════════════════
 # HELPERS
 # ════════════════════════════════════════════════════════════════
-
-def _ss(key, default=None):
-    if key not in st.session_state:
-        st.session_state[key] = default
-    return st.session_state[key]
-
 
 def _refresh_interval_s(tf: str) -> int:
     return {"15m": 5, "1h": 10, "4h": 30, "1d": 60}.get(tf, 10)
@@ -265,6 +261,8 @@ with row2[0]:
 
 with row2[1]:
     _ss("paper_position_size_pct", 10.0)
+    _ss("paper_market_mode", "spot")
+    _ss("paper_leverage", 10)
     position_size_pct = st.slider(
         "📊 单笔仓位比例",
         1.0, 100.0, st.session_state.paper_position_size_pct,
@@ -311,6 +309,33 @@ if not paper_running:
         _fund_hint += f" | 止盈{_params.get('take_profit_pct', 6.0)}% 止损{_params.get('stop_loss_pct', 2.0)}%"
     st.caption(f"💡 当前配置: {_fund_hint}")
 
+# ── Row 3.5: 市场模式 + 杠杆 ──
+st.markdown('<div style="height:0.25rem"></div>', unsafe_allow_html=True)
+mode_cols = st.columns([1.5, 2, 3])
+with mode_cols[0]:
+    market_mode = st.selectbox(
+        "📊 交易模式",
+        ["spot", "futures"],
+        index=0 if st.session_state.paper_market_mode == "spot" else 1,
+        disabled=paper_running,
+        key="paper_market_selector",
+        format_func=lambda m: {"spot": "💵 现货", "futures": "📈 合约"}[m],
+    )
+    st.session_state.paper_market_mode = market_mode
+
+with mode_cols[1]:
+    if market_mode == "futures":
+        leverage = st.slider(
+            "🔧 杠杆倍数",
+            min_value=1, max_value=125,
+            value=st.session_state.paper_leverage,
+            step=1, disabled=paper_running,
+            key="paper_leverage_slider",
+            help="OKX ETH-USDT 永续合约最大 125x")
+        st.session_state.paper_leverage = leverage
+    else:
+        st.markdown("""<div style="padding:1.5rem 0; color:#94a3b8; font-size:0.85rem;">现货全额交易</div>""", unsafe_allow_html=True)
+
 # ── Row 4: Buttons ──
 st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 row4 = st.columns([1.3, 1, 1, 1.2])
@@ -324,12 +349,19 @@ with row4[0]:
             st.session_state.paper_running = True
             st.session_state.paper_strategy = selected_strategy
 
-            # Create fresh engine with user-set funding
-            engine = _paper.PaperEngine(
-                cfg,
-                initial_balance=initial_balance,
-                position_size_pct=position_size_pct / 100.0,
-            )
+            if market_mode == "futures":
+                engine = FuturesPaperEngine(
+                    cfg,
+                    wallet_balance=initial_balance,
+                    leverage=leverage,
+                    position_size_pct=position_size_pct / 100.0,
+                )
+            else:
+                engine = _paper.PaperEngine(
+                    cfg,
+                    initial_balance=initial_balance,
+                    position_size_pct=position_size_pct / 100.0,
+                )
             st.session_state.paper_engine = engine
 
             # Create strategy with user-modified params
@@ -389,6 +421,8 @@ if paper_running:
         <div class="status-item">
             <span style="color:#64748b;">周期</span>
             <span style="font-weight:600;">{_friendly_tf(timeframe)}</span>
+            <span style="color:#64748b;">模式</span>
+            <span style="font-weight:600;">{'📈 合约 ' + str(st.session_state.paper_leverage) + 'x' if st.session_state.paper_market_mode == 'futures' else '💵 现货'}</span>
         </div>
         <div class="status-item">
             <span style="color:#64748b;">策略</span>
@@ -501,40 +535,92 @@ if df is not None and paper_state is not None:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">📊 当前状态</div>', unsafe_allow_html=True)
 
-    kpi_cols = st.columns(6)
-    with kpi_cols[0]:
-        render_metric_card("price", float(paper_state.get("price", 0)))
-    with kpi_cols[1]:
-        render_metric_card("equity", float(account.get("equity", 0)))
-    with kpi_cols[2]:
-        render_metric_card("balance", float(account.get("balance", 0)))
-    with kpi_cols[3]:
-        upnl = float(account.get("unrealized_pnl_pct", 0))
-        render_metric_card("unrealized_pnl_pct", upnl)
-    with kpi_cols[4]:
-        pos_val = float(account.get("position", 0))
-        st.metric(f"持仓 ({BASE_CURRENCY})", f"{pos_val:.6f}")
-    with kpi_cols[5]:
-        sig = paper_state.get("signal", "hold")
-        sig_emoji = {"buy": "🟢", "sell": "🔴", "exit": "⚫", "hold": "⚪"}
-        render_metric_card("signal", f"{sig_emoji.get(sig, '⚪')} {sig.upper()}")
+    is_futures = st.session_state.paper_market_mode == "futures"
+
+    if is_futures:
+        kpi_cols = st.columns(8)
+        with kpi_cols[0]:
+            render_metric_card("price", float(paper_state.get("price", 0)))
+        with kpi_cols[1]:
+            render_metric_card("equity", float(account.get("equity", 0)))
+        with kpi_cols[2]:
+            wb = account.get("wallet_balance", 0)
+            st.metric("钱包余额", f"${wb:,.2f}")
+        with kpi_cols[3]:
+            upnl = float(account.get("unrealized_pnl_pct", 0))
+            render_metric_card("unrealized_pnl_pct", upnl)
+        with kpi_cols[4]:
+            rpnl = float(account.get("total_realized_pnl", 0))
+            render_metric_card("total_pnl", rpnl)
+        with kpi_cols[5]:
+            direction = account.get("direction", "flat")
+            pos_val = float(account.get("position", 0))
+            dir_emoji = {"long": "🟢", "short": "🔴", "flat": "⚪"}
+            st.metric(f"持仓 {dir_emoji.get(direction, '')}",
+                      f"{pos_val:.6f}" if pos_val > 0 else "-")
+        with kpi_cols[6]:
+            lev = account.get("leverage", 0)
+            st.metric("杠杆", f"{lev}x" if lev else "-")
+        with kpi_cols[7]:
+            sig = paper_state.get("signal", "hold")
+            sig_emoji = {"buy": "🟢", "sell": "🔴", "exit": "⚫", "hold": "⚪"}
+            render_metric_card("signal", f"{sig_emoji.get(sig, '⚪')} {sig.upper()}")
+    else:
+        kpi_cols = st.columns(7)
+        with kpi_cols[0]:
+            render_metric_card("price", float(paper_state.get("price", 0)))
+        with kpi_cols[1]:
+            render_metric_card("equity", float(account.get("equity", 0)))
+        with kpi_cols[2]:
+            render_metric_card("balance", float(account.get("balance", 0)))
+        with kpi_cols[3]:
+            upnl = float(account.get("unrealized_pnl_pct", 0))
+            render_metric_card("unrealized_pnl_pct", upnl)
+        with kpi_cols[4]:
+            rpnl = float(account.get("total_realized_pnl", 0))
+            render_metric_card("total_pnl", rpnl)
+        with kpi_cols[5]:
+            pos_val = float(account.get("position", 0))
+            st.metric(f"持仓 ({BASE_CURRENCY})", f"{pos_val:.6f}")
+        with kpi_cols[6]:
+            sig = paper_state.get("signal", "hold")
+            sig_emoji = {"buy": "🟢", "sell": "🔴", "exit": "⚫", "hold": "⚪"}
+            render_metric_card("signal", f"{sig_emoji.get(sig, '⚪')} {sig.upper()}")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── 5b. Risk & Trade Notification ──
+    # ── 5b. Risk, Liquidation & Trade Notification ──
     if not paper_state.get("risk_ok", True):
         st.warning(f"⚠️ 风控拒绝: {paper_state.get('risk_reason', '未知')}")
+
+    liq = paper_state.get("liquidation")
+    if liq:
+        st.error(f"💥 **强平触发!** {liq.get('direction', '').upper()} @ ${liq.get('price', 0):,.2f} | 损失 ${liq.get('margin_lost', 0):,.2f}")
 
     trade = paper_state.get("trade")
     if trade:
         side = trade.get("side", "")
         price = trade.get("price", 0)
-        if side == "buy":
+        note = trade.get("note", "")
+        if note and note.startswith("no_"):
+            pass  # 忽略无效信号
+        elif side == "buy":
             st.success(f"✅ **买入执行** ${price:,.2f} | 数量 {trade.get('size', 0):.6f} {BASE_CURRENCY} | 资金 ${account.get('balance', 0):,.2f}")
         elif side == "sell" and trade.get("pnl"):
             pnl = trade.get("pnl", 0)
             icon = "📈" if pnl > 0 else "📉"
             st.info(f"{icon} **卖出执行** ${price:,.2f} | PnL ${pnl:.2f} | 资金 ${account.get('balance', 0):,.2f}")
+        elif side == "open_long":
+            st.success(f"🟢 **开多** ${price:,.2f} | 数量 {trade.get('size', 0):.6f} {BASE_CURRENCY} | 保证金 ${trade.get('margin', 0):,.2f}")
+        elif side == "open_short":
+            st.info(f"🔴 **开空** ${price:,.2f} | 数量 {trade.get('size', 0):.6f} {BASE_CURRENCY} | 保证金 ${trade.get('margin', 0):,.2f}")
+        elif side in ("close_long", "close_short"):
+            pnl = trade.get("pnl", 0)
+            icon = "📈" if pnl > 0 else "📉"
+            dir_label = "平多" if side == "close_long" else "平空"
+            st.info(f"{icon} **{dir_label}** ${price:,.2f} | PnL ${pnl:,.2f} | 钱包 ${account.get('wallet_balance', 0):,.2f}")
+        elif side == "liquidation" and trade.get("pnl"):
+            st.error(f"💥 **强平** {trade.get('direction', '').upper()} @ ${price:,.2f} | PnL ${trade['pnl']:,.2f}")
 
     st.divider()
 
@@ -645,17 +731,45 @@ if df is not None and paper_state is not None:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">📋 持仓详情</div>', unsafe_allow_html=True)
 
-    pos_cols = st.columns(4)
-    with pos_cols[0]:
-        pos_val = float(account.get("position", 0))
-        st.metric(f"持仓 ({BASE_CURRENCY})", f"{pos_val:.6f}")
-    with pos_cols[1]:
-        render_metric_card("balance", float(account.get("balance", 0)))
-    with pos_cols[2]:
-        upnl_usd = account.get("unrealized_pnl", 0)
-        render_metric_card("total_pnl", float(upnl_usd) if upnl_usd else 0.0)
-    with pos_cols[3]:
-        render_metric_card("equity", float(account.get("equity", 0)))
+    is_futures = st.session_state.paper_market_mode == "futures"
+
+    if is_futures:
+        pos_cols = st.columns(5)
+        with pos_cols[0]:
+            direction = account.get("direction", "flat")
+            pos_val = float(account.get("position", 0))
+            dir_emoji = {"long": "🟢", "short": "🔴", "flat": "⚪"}
+            st.metric(f"持仓 {dir_emoji.get(direction, '')}",
+                      f"{pos_val:.6f}" if pos_val > 0 else "-")
+        with pos_cols[1]:
+            st.metric("钱包余额", f"${account.get('wallet_balance', 0):,.2f}")
+        with pos_cols[2]:
+            st.metric("可用余额", f"${account.get('available_balance', 0):,.2f}")
+        with pos_cols[3]:
+            liq = float(account.get("liquidation_price", 0))
+            price = float(paper_state.get("price", 0))
+            if liq > 0 and price > 0:
+                dist = abs(price - liq) / price * 100
+                danger = "🔴" if dist < 5 else "🟡" if dist < 15 else "⚪"
+                st.metric(f"强平价 {danger}", f"${liq:,.2f}",
+                          delta=f"{dist:.1f}%" if price > liq else "⚠️ 已触发",
+                          delta_color="inverse" if price > liq else "off")
+            else:
+                st.metric("强平价", "-")
+        with pos_cols[4]:
+            render_metric_card("total_pnl", float(account.get("total_realized_pnl", 0)))
+    else:
+        pos_cols = st.columns(4)
+        with pos_cols[0]:
+            pos_val = float(account.get("position", 0))
+            st.metric(f"持仓 ({BASE_CURRENCY})", f"{pos_val:.6f}")
+        with pos_cols[1]:
+            render_metric_card("balance", float(account.get("balance", 0)))
+        with pos_cols[2]:
+            rpnl = float(account.get("total_realized_pnl", 0))
+            render_metric_card("total_pnl", rpnl)
+        with pos_cols[3]:
+            render_metric_card("equity", float(account.get("equity", 0)))
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -666,7 +780,12 @@ if df is not None and paper_state is not None:
     if hasattr(engine, "account") and engine.account.trades:
         df_trades = pd.DataFrame(engine.account.trades)
         df_trades = df_trades.iloc[::-1].reset_index(drop=True)
-        display_cols = ["time", "side", "price", "size", "pnl", "fee", "balance_after"]
+        is_fut = st.session_state.paper_market_mode == "futures"
+        display_cols = ["time", "side", "price", "size", "pnl", "fee"]
+        if is_fut:
+            display_cols += ["margin", "leverage", "wallet_after"]
+        else:
+            display_cols += ["balance_after"]
         existing = [c for c in display_cols if c in df_trades.columns]
         df_display = df_trades[existing]
 
@@ -693,13 +812,32 @@ if df is not None and paper_state is not None:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">📖 账户与策略信息</div>', unsafe_allow_html=True)
 
+    is_futures = st.session_state.paper_market_mode == "futures"
     total_bars = len(strategy._bar_buffer) if strategy and hasattr(strategy, "_bar_buffer") and strategy._bar_buffer is not None else 0
     info_cols = st.columns(5)
     info_cols[0].metric("策略", selected_strategy)
     info_cols[1].metric("已处理 K 线", total_bars)
     info_cols[2].metric("交易次数", len(engine.account.trades))
-    info_cols[3].metric("初始资金", f"${engine.account.initial_balance:,.0f}")
-    info_cols[4].metric("当前权益", f"${engine.account.equity:,.2f}")
+    if is_futures:
+        info_cols[3].metric("钱包余额", f"${getattr(engine.account, 'wallet_balance', 0):,.2f}")
+        info_cols[4].metric("总权益", f"${engine.account.total_equity:,.2f}")
+    else:
+        info_cols[3].metric("初始资金", f"${engine.account.initial_balance:,.0f}")
+        info_cols[4].metric("当前权益", f"${engine.account.equity:,.2f}")
+
+    # 合约强平预警
+    if is_futures:
+        liq_price = float(account.get("liquidation_price", 0))
+        curr_price = float(paper_state.get("price", 0))
+        if liq_price > 0 and curr_price > 0:
+            direction = account.get("direction", "")
+            dist = abs(curr_price - liq_price) / curr_price * 100
+            if direction == "long" and curr_price > liq_price:
+                if dist < 10:
+                    st.warning(f"⚠️ 距强平价仅 {dist:.1f}% (强平 ${liq_price:,.2f})")
+            elif direction == "short" and curr_price < liq_price:
+                if dist < 10:
+                    st.warning(f"⚠️ 距强平价仅 {dist:.1f}% (强平 ${liq_price:,.2f})")
 
     if ticker_data:
         st.caption(f"OKX 实时价格: ${ticker_data['last']:,.2f} | "
@@ -726,14 +864,15 @@ if df is not None and paper_state is not None:
             stats_cols[5].metric("平均亏损", f"${avg_loss:+.2f}")
 
             # ROI
-            roi = total_pnl / engine.account.initial_balance * 100 if engine.account.initial_balance > 0 else 0
+            init_cap = engine.account.initial_balance if hasattr(engine.account, 'initial_balance') else engine.account.initial_wallet
+            roi = total_pnl / init_cap * 100 if init_cap > 0 else 0
             roi_color = "#059669" if roi > 0 else "#dc2626"
             st.markdown(
                 f"**投资回报率 (ROI):** "
                 f"<span style='color:{roi_color}; font-weight:700; font-size:1.2rem;'>"
                 f"{roi:+.2f}%</span>"
-                f"&nbsp;&nbsp;(初始 ${engine.account.initial_balance:,.0f} → "
-                f"当前 ${engine.account.equity:,.2f})",
+                f"&nbsp;&nbsp;(初始 ${init_cap:,.0f} → "
+                f"当前 ${engine.account.total_equity if hasattr(engine.account, 'total_equity') else engine.account.equity:,.2f})",
                 unsafe_allow_html=True)
 
 else:

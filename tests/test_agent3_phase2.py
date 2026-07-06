@@ -45,6 +45,7 @@ def mock_deepseek():
 def mock_risk_manager():
     rm = MagicMock()
     rm.check_layer1.return_value = (True, "")
+    rm.check_layer1_pre.return_value = (True, "")  # Phase 2 快速预检
     rm.get_position_size_multiplier.return_value = 1.0
     rm.get_status.return_value = {
         "daily_trade_count": 2,
@@ -375,8 +376,8 @@ class TestPositionMonitorNotify:
         await agent3._make_decision()
         mock_monitor.update_position.assert_called_once()
         args, kwargs = mock_monitor.update_position.call_args
-        assert kwargs.get("side") == "buy"
-        assert kwargs.get("size") == 0.01  # default suggested size
+        assert kwargs.get("side") == "long"  # "buy" → "long" (Fix 3: 方向字段一致性)
+        assert kwargs.get("size") == 0.25  # default suggested size (0.5 ETH max × 0.5 × 1.0 × 1.0)
         assert kwargs.get("entry_price") == 3500.0
         assert kwargs.get("stop_loss") == 3450.0
         assert kwargs.get("take_profit") == 3600.0

@@ -22,7 +22,6 @@ from pathlib import Path
 
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -36,60 +35,12 @@ from data.heartbeat_db import (
     stop_collector,
 )
 from frontend.utils.data_provider import fetch_ticker
-
-# ════════════════════════════════════════════════════════════════
-# CONSTANTS
-# ════════════════════════════════════════════════════════════════
-
-ETH_SYMBOL = "ETH-USDT"
-
-COLORS = {
-    "purple": "#627eea",
-    "green": "#059669",
-    "red": "#dc2626",
-    "dark": "#0f172a",
-    "gray": "#64748b",
-    "light_bg": "#f8fafc",
-}
-
+from frontend.utils.helpers import ss as _ss, fmt_change as _fmt_change, fmt_uptime as _fmt_uptime, fmt_price as _fmt_price, ETH_SYMBOL
+from frontend.components.eth_charts import COLORS, _build_sparkline
 
 # ════════════════════════════════════════════════════════════════
 # HELPERS
 # ════════════════════════════════════════════════════════════════
-
-def _ss(key: str, default=None):
-    if key not in st.session_state:
-        st.session_state[key] = default
-    return st.session_state[key]
-
-
-def _fmt_price(p: float) -> str:
-    return f"${p:,.2f}"
-
-
-def _fmt_change(c: float | None) -> str:
-    if c is None:
-        return ""
-    return f"{c:+.2f}%"
-
-
-def _fmt_uptime(started_at_str: str | None) -> str:
-    if not started_at_str:
-        return "-"
-    try:
-        start = datetime.fromisoformat(started_at_str)
-        delta = datetime.now(timezone.utc) - start
-        total_sec = int(delta.total_seconds())
-        h, r = divmod(total_sec, 3600)
-        m, s = divmod(r, 60)
-        if h > 0:
-            return f"{h}h {m}m {s}s"
-        elif m > 0:
-            return f"{m}m {s}s"
-        return f"{s}s"
-    except Exception:
-        return "-"
-
 
 def _calc_ticks_per_second(status: dict) -> str:
     """根据 tick_count 和 started_at 算每秒平均 ticks。"""
@@ -103,78 +54,6 @@ def _calc_ticks_per_second(status: dict) -> str:
         return f"{tc / elapsed:.1f}"
     except Exception:
         return "0"
-
-
-def _build_sparkline(ticks: list[dict], height: int = 100) -> go.Figure:
-    """迷你走势图 — 最近 N 条 tick 的 price 连线。"""
-    if not ticks:
-        fig = go.Figure()
-        fig.update_layout(height=height)
-        return fig
-
-    df = pd.DataFrame(ticks)
-    df = df.sort_values("ts_ms")
-    prices = df["price"].values
-    times = pd.to_datetime(df["ts"])
-
-    color = COLORS["green"] if prices[-1] >= prices[0] else COLORS["red"]
-    fill_color = f"rgba(98, 126, 234, 0.15)"
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=times, y=prices,
-        mode="lines",
-        line=dict(color=color, width=2.5),
-        fill="tozeroy",
-        fillcolor=fill_color,
-        name="ETH",
-        hovertemplate="%{x|%H:%M:%S}<br>$%{y:,.2f}<extra></extra>",
-    ))
-
-    # Current price annotation
-    fig.add_annotation(
-        x=times.iloc[-1], y=prices[-1],
-        text=f"${prices[-1]:,.2f}",
-        showarrow=True,
-        arrowhead=0,
-        ax=0, ay=-30,
-        font=dict(size=11, color=color),
-        bgcolor="rgba(255,255,255,0.9)",
-        bordercolor=color,
-        borderwidth=1,
-    )
-
-    # 紧凑 Y 轴范围（数据范围 +0.3% 边距）
-    y_min = min(prices)
-    y_max = max(prices)
-    y_pad = max((y_max - y_min) * 0.3, y_min * 0.001)
-    y_range = [y_min - y_pad, y_max + y_pad]
-
-    fig.update_layout(
-        height=height,
-        margin=dict(l=0, r=0, t=0, b=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(
-            showgrid=False,
-            visible=False,
-            showticklabels=False,
-        ),
-        yaxis=dict(
-            range=y_range,
-            showgrid=True,
-            gridcolor="rgba(148, 163, 184, 0.2)",
-            zeroline=False,
-            tickformat="$,.0f",
-            side="right",
-        ),
-        hovermode="x unified",
-        hoverlabel=dict(
-            bgcolor="#1e293b",
-            font=dict(color="white", size=11),
-        ),
-    )
-    return fig
 
 
 # ════════════════════════════════════════════════════════════════

@@ -6,12 +6,14 @@
   - 滑点保护、撤单重下
   - 重试机制（网络失败重试 3 次）
   - 部分成交处理
+  - 合约模式（逐仓 USDT 永续合约模拟）
   - 交易日志
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
@@ -24,7 +26,7 @@ class TradeExecutor:
     """交易执行器
 
     封装 OKXClient.place_order，添加保护逻辑。
-    支持现货 (cash) 模式。
+    支持现货 (cash) 和合约 (isolated) 模拟模式。
     """
 
     def __init__(
@@ -32,17 +34,26 @@ class TradeExecutor:
         okx_client,
         symbol: str = "ETH-USDT",
         config: Optional[AgentSystemConfig] = None,
+        market_mode: str = "spot",
+        leverage: int = 10,
+        futures_account=None,
     ):
         """
         Args:
             okx_client: OKXClient 实例（来自 okx_client.py）
             symbol: 交易对
             config: AgentSystemConfig 配置（可选）
+            market_mode: "spot"(现货模拟) / "futures"(合约模拟)
+            leverage: 合约杠杆倍数
+            futures_account: FuturesAccount 实例（合约模式使用）
         """
         self._client = okx_client
         self.symbol = symbol
         self.max_retries = 3
         self.config = config or AgentSystemConfig()
+        self.market_mode = market_mode
+        self.leverage = leverage
+        self.futures_account = futures_account
 
         # 统计
         self.total_orders = 0
@@ -330,10 +341,51 @@ class TradeExecutor:
         当 exchange_permissions == "read" 时自动切换模拟模式，
         不调 OKX 真实 API，直接返回模拟成交结果。
         """
+        # ── 合约模式：走 FuturesAccount 模拟 ──
+        if self.market_mode == "futures" and self.futures_account is not None:
+            if side == "buy":
+                trade = self.futures_account.open_long(
+                    price=signal_price, size=size_eth, leverage=self.leverage,
+                )
+            elif side == "sell":
+                trade = self.futures_account.open_short(
+                    price=signal_price, size=size_eth, leverage=self.leverage,
+                )
+            else:
+                return {"success": False, "error": f"未知方向: {side}"}
+
+            pos = self.futures_account.position
+            order_id = f"fut_sim_{uuid.uuid4().hex[:12]}"
+            fill_price = trade.get("price", signal_price)
+            filled_size = trade.get("size", size_eth)
+
+            self.total_orders += 1
+            self.last_order = {
+                "side": side, "size": f"{filled_size:.6f}", "order_id": order_id,
+                "fill_price": fill_price, "filled_size": filled_size,
+                "market_mode": "futures",
+                "leverage": self.leverage,
+                "margin": trade.get("margin", 0),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            logger.info(
+                f"📝 [合约模拟] {side} {filled_size:.4f} ETH × {self.leverage}x "
+                f"@ ${fill_price:.2f}"
+            )
+            return {
+                "success": True, "order_id": order_id,
+                "fill_price": fill_price, "filled_size": filled_size,
+                "leverage": self.leverage,
+                "margin": trade.get("margin", 0),
+                "liquidation_price": pos.liquidation_price if pos and pos.is_active else 0,
+                "position_value": pos.position_value if pos and pos.is_active else 0,
+                "margin_rate": pos.margin_rate(signal_price) if pos and pos.is_active else 0,
+                "error": "", "simulated": True, "market_mode": "futures",
+            }
+
         # ── 模拟模式：只读权限 / paper 模式，不调真实 API ──
         if self.config.exchange_permissions == "read":
-            import random
-            import uuid
+            import random  # nosec
 
             # ±0.2% 随机滑点，模拟市价单立即成交
             simulated_fill_price = round(

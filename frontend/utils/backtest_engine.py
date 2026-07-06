@@ -16,44 +16,13 @@ import pandas as pd
 logger = logging.getLogger("backtest_engine")
 
 # ──────────────────────────────────────────────
-# Indicator calculations (pure pandas)
+# Indicator calculations (shared module)
 # ──────────────────────────────────────────────
 
 
-def _calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.rolling(window=period, min_periods=1).mean()
-    avg_loss = loss.rolling(window=period, min_periods=1).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    return 100 - (100 / (1 + rs))
-
-
-def _calc_sma(series: pd.Series, period: int) -> pd.Series:
-    return series.rolling(window=period, min_periods=1).mean()
-
-
-def _calc_ema(series: pd.Series, period: int) -> pd.Series:
-    return series.ewm(span=period, adjust=False).mean()
-
-
-def _calc_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> dict[str, pd.Series]:
-    ema_fast = _calc_ema(series, fast)
-    ema_slow = _calc_ema(series, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = _calc_ema(macd_line, signal)
-    return {"macd": macd_line, "signal": signal_line, "histogram": macd_line - signal_line}
-
-
-def _calc_bollinger(series: pd.Series, period: int = 20, std: float = 2.0) -> dict[str, pd.Series]:
-    sma = _calc_sma(series, period)
-    std_dev = series.rolling(window=period, min_periods=1).std()
-    return {"middle": sma, "upper": sma + std * std_dev, "lower": sma - std * std_dev}
-
-
-def _calc_price_change(series: pd.Series, period: int = 1) -> pd.Series:
-    return series.pct_change(period) * 100
+from indicators import (  # noqa: E402
+    calc_rsi, calc_sma, calc_ema, calc_macd, calc_bollinger, calc_price_change,
+)
 
 
 # ──────────────────────────────────────────────
@@ -163,48 +132,8 @@ def _evaluate_condition(cond: dict, indicators: dict) -> bool:
 
 
 def _calc_indicators(df: pd.DataFrame) -> dict[str, pd.Series]:
-    close = df["close"]
-    volume = df["volume"]
-
-    ind: dict[str, pd.Series] = {
-        "close": close,
-        "high": df["high"],
-        "low": df["low"],
-        "volume": volume,
-    }
-
-    for p in [6, 14, 20]:
-        if len(close) >= p:
-            ind[f"rsi_{p}"] = _calc_rsi(close, p)
-
-    for p in [5, 10, 20, 50, 200]:
-        if len(close) >= p:
-            ind[f"sma_{p}"] = _calc_sma(close, p)
-            ind[f"ema_{p}"] = _calc_ema(close, p)
-
-    if len(close) >= 26:
-        macd = _calc_macd(close)
-        ind["macd"] = macd["macd"]
-        ind["macd_signal"] = macd["signal"]
-        ind["macd_histogram"] = macd["histogram"]
-
-    if len(close) >= 20:
-        bb = _calc_bollinger(close)
-        ind["bb_middle"] = bb["middle"]
-        ind["bb_upper"] = bb["upper"]
-        ind["bb_lower"] = bb["lower"]
-
-    ind["price_change_pct"] = _calc_price_change(close, 1)
-
-    body_size = (close - df["open"]).abs()
-    ind["body_size"] = body_size
-    ind["body_sum_2"] = body_size.rolling(window=2, min_periods=1).sum()
-    direction_s = pd.Series(0, index=close.index)
-    direction_s[close < df["open"]] = 1
-    direction_s[close > df["open"]] = -1
-    ind["body_direction"] = direction_s
-
-    return ind
+    from indicators import calc_indicators
+    return calc_indicators(df)
 
 
 def _check_conditions(conditions: list[dict], indicators: dict) -> list[dict]:

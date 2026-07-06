@@ -21,6 +21,98 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DB_FILE = PROJECT_ROOT / "data" / "agent_trades.db"
 
+# Shared CSS for detail sections rendered inside Streamlit expanders (main page, not iframe)
+_DETAIL_STYLE = """<style>
+.detail-section-title {
+    font-weight: 600;
+    font-size: 0.82rem;
+    color: #64748b;
+    margin: 0.45rem 0 0.25rem;
+    padding-bottom: 0.1rem;
+    border-bottom: 1px solid #f1f5f9;
+}
+.detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.12rem 0;
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+.detail-row .label {
+    color: #64748b;
+}
+.detail-row .value {
+    color: #0f172a;
+    font-family: monospace;
+    font-size: 0.78rem;
+    text-align: right;
+}
+.detail-sep {
+    height: 1px;
+    background: #f1f5f9;
+    margin: 0.35rem 0;
+}
+/* ── Pipeline flow ── */
+.pipeline-flow {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    margin: 0.25rem 0;
+}
+.pipeline-step {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.4rem;
+    border-radius: 8px;
+    background: #f8fafc;
+    min-width: 0;
+}
+.pipeline-step .step-dot { font-size: 0.85rem; }
+.pipeline-step .step-content { flex: 1; min-width: 0; }
+.pipeline-step .step-label {
+    font-size: 0.62rem;
+    color: #64748b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pipeline-step .step-value {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #0f172a;
+    font-family: monospace;
+}
+.pipeline-arrow {
+    color: #94a3b8;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+/* ── Per-timeframe progress bars ── */
+.tf-progress { margin: 0.25rem 0; }
+.tf-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.68rem;
+    margin-bottom: 0.15rem;
+}
+.tf-name { font-weight: 600; color: #0f172a; }
+.tf-status { color: #64748b; font-family: monospace; font-size: 0.65rem; }
+.tf-bar-bg {
+    height: 5px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #f1f5f9;
+}
+.tf-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+}
+.tf-bar-ready { box-shadow: 0 0 6px rgba(34,197,94,0.4); }
+</style>"""
+
 
 def _uptime(start_str: str) -> str:
     """Format uptime from ISO start time string."""
@@ -681,8 +773,7 @@ def render_agent_cards(status_data: dict, *, show_recent: bool = True):
     a4_act = (a4_status.get("current_activity") or "") if a4_status else ""
 
     # ── Render ──
-    st.markdown(f"""
-    <style>
+    _ag_html = f"""<style>
     .agent-grid {{
         display: grid;
         grid-template-columns: repeat(2, 1fr);
@@ -805,39 +896,7 @@ def render_agent_cards(status_data: dict, *, show_recent: bool = True):
         display: flex;
         justify-content: space-between;
     }}
-    /* ── Expandable detail sections ── */
-    .agent-details {{
-        margin-top: 0.5rem;
-        border-top: 1px solid var(--border-light, #f1f5f9);
-        padding-top: 0.3rem;
-    }}
-    .agent-details[open] {{
-        padding-bottom: 0.2rem;
-    }}
-    .agent-details summary {{
-        font-size: 0.72rem;
-        color: var(--text-muted, #94a3b8);
-        cursor: pointer;
-        padding: 0.2rem 0.3rem;
-        border-radius: 6px;
-        display: flex;
-        align-items: center;
-        gap: 0.3rem;
-        user-select: none;
-        transition: background 0.15s, color 0.15s;
-    }}
-    .agent-details summary:hover {{
-        background: var(--bg-card-hover, #f8fafc);
-        color: var(--text-secondary, #64748b);
-    }}
-    .agent-details summary::marker {{
-        color: var(--text-muted, #94a3b8);
-        font-size: 0.8em;
-    }}
-    .agent-detail-content {{
-        padding: 0.4rem 0.3rem 0.1rem;
-        font-size: 0.72rem;
-    }}
+    /* ── Expandable detail sections — now in native st.expander ── */
     .detail-section-title {{
         font-weight: 600;
         font-size: 0.72rem;
@@ -953,24 +1012,8 @@ def render_agent_cards(status_data: dict, *, show_recent: bool = True):
     body.dark-mode .tag.neutral {{ background: #334155; color: #cbd5e1; }}
     body.dark-mode .tag.bullish {{ background: #064e3b; color: #6ee7b7; }}
     body.dark-mode .tag.bearish {{ background: #7f1d1d; color: #fca5a5; }}
-    body.dark-mode .agent-details {{ border-top-color: #334155; }}
-    body.dark-mode .agent-details summary:hover {{
-        background: rgba(255,255,255,0.05);
-        color: #94a3b8;
-    }}
-    body.dark-mode .detail-section-title {{ color: #94a3b8; }}
-    body.dark-mode .detail-row .label {{ color: #94a3b8; }}
-    body.dark-mode .detail-row .value {{ color: #e2e8f0; }}
-    body.dark-mode .detail-sep {{ background: #334155; }}
     body.dark-mode .agent-footer {{ color: #64748b; border-top-color: #334155; }}
-    body.dark-mode .pipeline-step {{ background: rgba(255,255,255,0.05); }}
-    body.dark-mode .pipeline-step .step-label {{ color: #94a3b8; }}
-    body.dark-mode .pipeline-step .step-value {{ color: #e2e8f0; }}
-    body.dark-mode .tf-name {{ color: #e2e8f0; }}
-    body.dark-mode .tf-status {{ color: #94a3b8; }}
-    body.dark-mode .tf-bar-bg {{ background: #334155 !important; }}
     </style>
-
     <div class="agent-grid">
         <!-- ── Agent 1: 技术分析 ── -->
         <div class="agent-card{' running' if a1.get('running') else ''}">
@@ -990,12 +1033,6 @@ def render_agent_cards(status_data: dict, *, show_recent: bool = True):
                 <div class="metric-item"><span class="label">📐 K线</span><span class="value">{_fmt(a1.get('bars_completed'))}</span></div>
             </div>
             <div class="tag-row">{a1_tags}</div>
-            <details class="agent-details">
-                <summary>📋 查看技术分析详情</summary>
-                <div class="agent-detail-content">
-                    {_build_agent1_detail_html(a1)}
-                </div>
-            </details>
         </div>
         <!-- ── Agent 2: 信息收集 ── -->
         <div class="agent-card{' running' if a2.get('running') else ''}">
@@ -1016,12 +1053,6 @@ def render_agent_cards(status_data: dict, *, show_recent: bool = True):
                 <div class="metric-item"><span class="label">📖 已阅</span><span class="value">{_fmt(a2.get('news_seen'))}</span></div>
             </div>
             <div class="tag-row">{a2_onchain}</div>
-            <details class="agent-details">
-                <summary>📋 查看数据收集详情</summary>
-                <div class="agent-detail-content">
-                    {_build_agent2_detail_html(a2)}
-                </div>
-            </details>
         </div>
         <!-- ── Agent 3: 交易决策 ── -->
         <div class="agent-card{' running' if a3.get('running') else ''}">
@@ -1045,12 +1076,6 @@ def render_agent_cards(status_data: dict, *, show_recent: bool = True):
                 <div class="metric-item"><span class="label">🧠 DeepSeek</span><span class="value">{ds_calls}次{' / Ø ' + f'{ds_avg:.0f}ms' if ds_avg else ''}</span></div>
                 <div class="metric-item"><span class="label">📋 持仓</span><span class="value" style="font-size:0.72rem;">{pos_display}</span></div>
             </div>
-            <details class="agent-details">
-                <summary>📋 查看交易决策详情</summary>
-                <div class="agent-detail-content">
-                    {_build_agent3_detail_html(a3, agent3_decisions_html)}
-                </div>
-            </details>
         </div>
         <!-- ── Agent 4: 复盘改进 ── -->
         <div class="agent-card{' running' if a4_status.get('running') else ''}">
@@ -1074,15 +1099,27 @@ def render_agent_cards(status_data: dict, *, show_recent: bool = True):
                 <div class="metric-item"><span class="label">⚠️ 错误</span><span class="value">{_fmt(a4_status.get('total_adjustment_errors', 0))}</span></div>
                 <div class="metric-item"><span class="label">市场判断</span><span class="value" style="font-size:0.72rem;">{a4_status.get('last_review_market_regime', '—')[:12]}</span></div>
             </div>
-            <details class="agent-details">
-                <summary>📋 查看复盘详情</summary>
-                <div class="agent-detail-content">
-                    {_build_agent4_detail_html(a4_status)}
-                </div>
-            </details>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    <script>
+    try {{
+        var pb = window.parent.document.body;
+        if (pb.classList.contains('dark-mode')) document.body.classList.add('dark-mode');
+    }} catch(e) {{}}
+    </script>
+    """
+    import streamlit.components.v1 as _stc
+    _stc.html(_ag_html, height=480)
+
+    # ── Expandable detail sections (Streamlit native — maintains state across refreshes) ──
+    with st.expander("📋 Agent 1 — 技术分析详情"):
+        st.markdown(f"{_DETAIL_STYLE}{_build_agent1_detail_html(a1)}", unsafe_allow_html=True)
+    with st.expander("📋 Agent 2 — 信息收集详情"):
+        st.markdown(f"{_DETAIL_STYLE}{_build_agent2_detail_html(a2)}", unsafe_allow_html=True)
+    with st.expander("📋 Agent 3 — 交易决策详情"):
+        st.markdown(f"{_DETAIL_STYLE}{_build_agent3_detail_html(a3, agent3_decisions_html)}", unsafe_allow_html=True)
+    with st.expander("📋 Agent 4 — 复盘改进详情"):
+        st.markdown(f"{_DETAIL_STYLE}{_build_agent4_detail_html(a4_status)}", unsafe_allow_html=True)
 
     # ── Phase 4 metrics (compact row) ──
     p4_cols = st.columns(4)

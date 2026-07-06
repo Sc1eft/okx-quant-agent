@@ -145,23 +145,28 @@ class OKXClient:
 
     # ── 订单（阶段 10 启用） ──
 
-    def place_order(self, symbol: str, side: str, sz: str, ord_type: str = "market", px: str = "") -> dict:
+    def place_order(self, symbol: str, side: str, sz: str, ord_type: str = "market", px: str = "",
+                    td_mode: str = "cash", lever: str = "") -> dict:
         """
         下单（需要 Trade 权限）
         side: "buy" / "sell"
         ord_type: "market" / "limit"
         px: 限价单价格，市价单留空
+        td_mode: "cash"(现货) / "isolated"(逐仓) / "cross"(全仓)
+        lever: 杠杆倍数（非 cash 模式必填）
         """
         ts = self._timestamp()
         body = {
             "instId": symbol,
-            "tdMode": "cash",
+            "tdMode": td_mode,
             "side": side,
             "ordType": ord_type,
             "sz": sz,
         }
         if px:
             body["px"] = px
+        if lever:
+            body["lever"] = lever
         json_body = str(body).replace("'", '"')
         headers = self._sign("POST", "/api/v5/trade/order", json_body, ts)
         headers["Content-Type"] = "application/json"
