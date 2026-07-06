@@ -229,8 +229,18 @@ class RiskManager:
                     self._current_position_side = None
 
         pnl = trade_data.get("pnl", 0)
+        size = trade_data.get("size", 0)
+        _is_small_position = size < self.config.agent3_min_position_for_loss_tracking
+
         if pnl < 0:
-            self._record_loss(abs(pnl))
+            if _is_small_position:
+                logger.info(
+                    f"小仓亏损不计入风控: {size:.4f} ETH (阈值"
+                    f" {self.config.agent3_min_position_for_loss_tracking} ETH), "
+                    f"亏损 ${abs(pnl):.2f}"
+                )
+            else:
+                self._record_loss(abs(pnl))
         elif pnl > 0:
             self._consecutive_losses = 0  # 盈利后重置连亏
 

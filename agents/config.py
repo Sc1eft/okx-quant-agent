@@ -31,6 +31,7 @@ class AgentSystemConfig:
     agent3_max_daily_loss_usdt: float = 100.0
     agent3_max_consecutive_losses: int = 3
     agent3_max_position_eth: float = 0.5  # 单笔最大 0.5 ETH
+    agent3_min_position_for_loss_tracking: float = 0.1  # 低于此仓位的亏损不计入日亏损警戒（试探仓不触发风控）
     agent3_idle_decision_interval_seconds: int = 600  # 空闲定时决策：10分钟
 
     # ── 手续费率（OKX 标准费率）──
