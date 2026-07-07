@@ -138,6 +138,10 @@ class Agent4Reviewer:
             trade_record: SQLite trades 表的行字典
         """
         self._trade_count += 1
+
+        # Step 4: 每次交易后持久化计数（防止重启后丢失）
+        self._save_persistent_state()
+
         interval = self._config.agent4_review_interval_trades
         remaining = interval - (self._trade_count - self._last_review_count)
         self._current_activity = f"📊 交易 #{self._trade_count}，还需 {remaining} 笔触发复盘"
@@ -284,6 +288,7 @@ class Agent4Reviewer:
         """从 SQLite 恢复 trade_count / last_review_count"""
         try:
             conn = sqlite3.connect(self._db_path)
+            conn.row_factory = sqlite3.Row
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS agent4_state (
                     key TEXT PRIMARY KEY,

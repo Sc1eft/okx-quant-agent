@@ -351,6 +351,72 @@ class DeepSeekTrader:
             logger.error(f"DeepSeek review analysis failed: {e}")
             return {"summary": "Analysis failed", "param_adjustments": []}
 
+    def _repair_json(self, content: str) -> Optional[dict]:
+        """尝试修复被截断/不完整的 JSON
+
+        DeepSeek 可能返回未闭合的 JSON（截断），此方法尝试：
+        1. 关闭未闭合的字符串和花括号/方括号
+        2. 移除尾部的多余逗号
+        """
+        # 确保从 { 开始
+        start = content.find("{")
+        if start == -1:
+            return None
+        content = content[start:]
+
+        # 逐字符追踪嵌套状态
+        result = []
+        brace_depth = 0
+        bracket_depth = 0
+        in_string = False
+        escaped = False
+
+        for ch in content:
+            if escaped:
+                escaped = False
+                result.append(ch)
+                continue
+            if ch == '\\' and in_string:
+                escaped = True
+                result.append(ch)
+                continue
+            if ch == '"' and not escaped:
+                in_string = not in_string
+                result.append(ch)
+                continue
+            if in_string:
+                result.append(ch)
+                continue
+            if ch == '{':
+                brace_depth += 1
+                result.append(ch)
+            elif ch == '}':
+                brace_depth = max(0, brace_depth - 1)
+                result.append(ch)
+            elif ch == '[':
+                bracket_depth += 1
+                result.append(ch)
+            elif ch == ']':
+                bracket_depth = max(0, bracket_depth - 1)
+                result.append(ch)
+            else:
+                result.append(ch)
+
+        # 关闭未闭合的字符串
+        if in_string:
+            result.append('"')
+
+        output = ''.join(result)
+        # 移除闭合括号前的尾随逗号: {...,} → {...}
+        output = re.sub(r',\s*([}\]])', r'\1', output)
+        # 闭合未关闭的括号
+        output += '}' * brace_depth + ']' * bracket_depth
+
+        try:
+            return json.loads(output)
+        except json.JSONDecodeError:
+            return None
+
     def _parse_json_response(self, content: str) -> dict:
         """Extract JSON from DeepSeek response (general method)"""
         json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
@@ -358,14 +424,26 @@ class DeepSeekTrader:
             content = json_match.group(1)
         else:
             start = content.find("{")
-            end = content.rfind("}")
-            if start != -1 and end != -1:
-                content = content[start:end + 1]
+            if start != -1:
+                end = content.rfind("}")
+                if end != -1 and end > start:
+                    content = content[start:end + 1]
+                else:
+                    # 没有找到 } → 整个 { 之后的内容可能是被截断的 JSON
+                    content = content[start:]
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            logger.warning(f"DeepSeek JSON parse failed: {content[:200]}")
-            return {"summary": "JSON parse failed", "param_adjustments": []}
+            pass
+
+        # 尝试修复截断 JSON
+        repaired = self._repair_json(content)
+        if repaired is not None:
+            logger.info(f"DeepSeek JSON 修复成功: {str(repaired)[:100]}...")
+            return repaired
+
+        logger.warning(f"DeepSeek JSON parse failed (and repair failed): {content[:200]}")
+        return {"summary": "JSON parse failed", "param_adjustments": []}
 
     def _parse_response(self, content: str, current_price: float) -> dict:
         """Parse DeepSeek response JSON"""
