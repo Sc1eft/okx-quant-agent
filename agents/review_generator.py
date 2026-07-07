@@ -145,6 +145,37 @@ class ReviewGenerator:
         logger.info(f"每周复盘报告: 胜率 {stats['win_rate']:.1f}%, 盈亏 {stats['total_pnl']:+.2f} USDT")
         return report
 
+    def get_recent_trades_summary(self, n: int = 5) -> str:
+        """获取最近 N 笔已平仓交易的格式化摘要（供 DeepSeek 上下文注入）
+
+        Returns:
+            多行字符串，每行一笔交易
+        """
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE trade_type='close' ORDER BY id DESC LIMIT ?",
+                (n,),
+            ).fetchall()
+            if not rows:
+                return "暂无近期交易"
+            lines = []
+            for r in reversed(rows):  # 正序呈现（最早的在前）
+                pnl = r["pnl_close"] or r["pnl"] or 0
+                side = r["side"]
+                price = r["price"] or 0
+                ts = r["timestamp"][:16] if r["timestamp"] else ""
+                emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                lines.append(
+                    f"  {emoji} {ts} | {side} @ ${price:.2f} | PnL {pnl:+.2f} USDT"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug(f"获取近期交易摘要失败: {e}")
+            return "近期交易数据不可用"
+        finally:
+            conn.close()
+
     # ── 内部方法 ──
 
     def _get_conn(self) -> sqlite3.Connection:

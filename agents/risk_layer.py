@@ -19,6 +19,7 @@ Layer 3 — 交易后监控:
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import os
@@ -473,7 +474,7 @@ class RiskManager:
                     trade_data.get("pnl", 0),
                     trade_data.get("order_id", ""),
                     trade_data.get("symbol", ""),
-                    str(trade_data.get("decision", {})),
+                    json.dumps(trade_data.get("decision", {})),
                     trade_data.get("pnl_close", 0),
                     trade_data.get("trade_group_id", ""),
                     trade_data.get("trade_type", "open"),

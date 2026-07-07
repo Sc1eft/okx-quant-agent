@@ -59,6 +59,7 @@ class Agent3:
         root_config,
         position_monitor=None,  # Phase 2: 持仓监控器
         okx_client=None,       # Phase 2: OKX客户端（用于BTC/深度检查）
+        agent1=None,           # Agent 1 引用，用于读取多周期指标 + 市场状态
         review_generator=None,  # Phase 4: 复盘报告生成器
         agent4_reviewer=None,  # Agent 4 复盘改进（替代 param_adapter）
         notifier=None,        # 交易报告推送器（ServerChan）
@@ -80,6 +81,9 @@ class Agent3:
         self.agent4_reviewer = agent4_reviewer  # Agent 4（替代 param_adapter）
         self.notifier = notifier  # 交易报告推送器
 
+        # Agent 1 引用（用于读取多周期指标 + 市场状态，注入 DeepSeek）
+        self.agent1 = agent1
+
         # Phase 2: 注册平仓回调，使 Agent 3 的 _current_position 随平仓同步更新
         if self.position_monitor:
             self.position_monitor.close_callback = self._on_position_closed
@@ -89,6 +93,7 @@ class Agent3:
         self._last_decision_time: Optional[datetime] = None
         self._last_event_time: float = time.time()  # 上次收到事件的时间
         self._last_idle_decision_time: float = 0.0  # 上次强制空闲决策时间
+        self._last_idle_decision_price: float = 0.0  # 上次空闲决策时的价格（Step 7 价格门控）
         self._decision_lock = asyncio.Lock()  # re-entrancy guard
 
         # 最新价格缓存（跨 _build_context 调用持久化，防止事件缓冲区无价格时显示 $0）
@@ -256,8 +261,14 @@ class Agent3:
             # 如果缓冲区已有事件或有锁，让事件驱动流程处理
             if self._event_buffer or self._decision_lock.locked():
                 continue
+            # Step 7: 价格变化门控 — 价格变动不足 threshold % 时不触发
+            if self._last_idle_decision_price > 0 and self._current_price > 0:
+                pct_change = abs(self._current_price - self._last_idle_decision_price) / self._last_idle_decision_price * 100
+                if pct_change < self.config.agent3_idle_decision_price_change_pct:
+                    continue
             # 构造合成事件触发一次评估
             self._last_idle_decision_time = now
+            self._last_idle_decision_price = self._current_price
             logger.info(f"⏰ 空闲触发定期评估 ({idle_since:.0f}s 无事件)")
             self._current_activity = f"⏰ 空闲 {idle_since:.0f}s 触发定期评估"
             self._last_activity_time = now
@@ -282,6 +293,9 @@ class Agent3:
         if self._decision_lock.locked():
             self._current_activity = "⏳ 上次决策进行中，跳过"
             return
+        # Step 7: 记录当前价格（供空闲决策价格门控使用）
+        if self._current_price > 0:
+            self._last_idle_decision_price = self._current_price
         async with self._decision_lock:
             if not self._event_buffer:
                 return
@@ -335,6 +349,31 @@ class Agent3:
             size_eth = self._suggested_size(context, decision)
             self._current_activity = f"📐 决策: {decision['action']} {size_eth:.4f} ETH (信心 {decision['confidence']}%)"
             self._last_activity_time = time.time()
+
+            # ── 3a. 方向持久性检查：反转需要更高信心 ──
+            if self.position_monitor:
+                pm_status = self.position_monitor.get_status()
+                current_side = pm_status.get("position_side", "none")
+                if current_side != "none" and current_side != "none":
+                    # 当前持仓方向
+                    pos_is_long = current_side == "long"
+                    decision_is_long = trade_side == "buy"
+                    is_reversal = pos_is_long != decision_is_long
+                    if is_reversal:
+                        reversal_confidence = decision.get("confidence", 0)
+                        min_reversal_conf = 70  # 反转需要至少 70% 信心
+                        if reversal_confidence < min_reversal_conf:
+                            logger.info(
+                                f"方向持久性: 反转 {current_side}→{trade_side} 信心 {reversal_confidence}% "
+                                f"< {min_reversal_conf}%，跳过"
+                            )
+                            self._current_activity = (
+                                f"⏭ 反转信心不足: {current_side}→{trade_side} "
+                                f"({reversal_confidence}% < {min_reversal_conf}%)"
+                            )
+                            self._last_activity_time = time.time()
+                            self._stats["trades_skipped"] += 1
+                            return
 
             # ── 3b. 市场深度检查（Phase 2） ──
             prefer_limit = True
@@ -562,6 +601,26 @@ class Agent3:
             "composite_score": round(composite.get("composite_score", 0), 2) if composite else "—",
             "composite_confidence": round(composite.get("composite_confidence", 0), 2) if composite else "—",
             "signal_alignment": alignment.get("summary_line", "暂无对齐数据"),
+            # ── 多周期指标表格（Agent 1 数据） ──
+            "agent1_indicators_table": (
+                self.agent1.get_indicators_table()
+                if self.agent1 and hasattr(self.agent1, 'get_indicators_table')
+                else "Agent 1 指标数据未就绪"
+            ),
+            # ── 市场状态分类 ──
+            "market_state_summary": (
+                self.agent1.get_market_state().get("summary_line", "市场状态数据未就绪")
+                if self.agent1 and hasattr(self.agent1, 'get_market_state')
+                else "市场状态数据未就绪"
+            ),
+            # ── Step 3: Agent 4 交易建议 ──
+            "agent4_advisory": (
+                self.agent4_reviewer.get_advisory()
+                if self.agent4_reviewer and hasattr(self.agent4_reviewer, 'get_advisory')
+                else ""
+            ),
+            # ── Step 5: 近期交易历史（最近 5 笔已平仓） ──
+            "recent_trades_summary": self._load_recent_trades_summary(),
             "adjusted_max_trades": str(self.config.agent3_max_daily_trades),
             "adjusted_debounce": str(self.config.agent3_debounce_seconds),
             "adjusted_trade_interval": str(self.config.agent3_min_interval_between_trades),
@@ -584,6 +643,37 @@ class Agent3:
         if agent2_lines:
             return "（非技术触发）当前无技术面信号，以下为新闻/链上数据驱动的评估"
         return "暂无技术面信号"
+
+    def _load_recent_trades_summary(self, n: int = 5) -> str:
+        """Step 5: 加载最近 N 笔已平仓交易摘要（供 DeepSeek 上下文注入）"""
+        if self.review_gen and hasattr(self.review_gen, 'get_recent_trades_summary'):
+            try:
+                return self.review_gen.get_recent_trades_summary(n)
+            except Exception as e:
+                logger.debug(f"通过 review_gen 加载近期交易失败: {e}")
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.config.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE trade_type='close' ORDER BY id DESC LIMIT ?",
+                (n,),
+            ).fetchall()
+            conn.close()
+            if not rows:
+                return "暂无近期交易"
+            lines = []
+            for r in reversed(rows):
+                pnl = r["pnl_close"] or r["pnl"] or 0
+                side = r["side"]
+                price = r["price"] or 0
+                ts = r["timestamp"][:16] if r["timestamp"] else ""
+                emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                lines.append(f"  {emoji} {ts} | {side} @ ${price:.2f} | PnL {pnl:+.2f} USDT")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug(f"直接查 DB 加载近期交易失败: {e}")
+            return "近期交易数据不可用"
 
     def _calc_pnl_pct(self, current_price: float) -> str:
         """根据当前仓位计算浮盈/浮亏百分比（合约模式含杠杆放大）"""
@@ -610,7 +700,7 @@ class Agent3:
           - 中等 (30-70)  → 正常仓位
           - 低把握 (5-30)  → 小仓试水
 
-        最终再经风控连亏递减 × Agent 4 长期乘数调整。
+        最终经风控连亏递减 × Agent 4 乘数 × Step 6 胜率乘数调整。
         """
         max_pos = self.config.agent3_max_position_eth  # 默认 0.5 ETH
 
@@ -627,13 +717,25 @@ class Agent3:
         agent4_mult = self.config.agent3_position_size_multiplier
         risk_mult = self.risk.get_position_size_multiplier()
 
-        size = base * agent4_mult * risk_mult
+        # Step 6: 胜率驱动乘数（仅当交易量 ≥ 5 笔时生效）
+        win_rate = _safe_float(context.get("win_rate", 0))
+        total_trades = int(context.get("monthly_trades", 0))
+        if total_trades >= 5:
+            # 胜率 / 50 = 中性值，上限 1.5x，下限 0.3x
+            # 50% 胜率 → 1.0x, 75% → 1.5x, 30% → 0.6x
+            win_rate_mult = min(1.5, max(0.3, win_rate / 50))
+        else:
+            win_rate_mult = 1.0  # 数据不足，不加乘数
+            logger.debug(f"胜率乘数跳过: 交易量 {total_trades} < 5")
+
+        size = base * agent4_mult * risk_mult * win_rate_mult
         size = min(size, max_pos)
         size = max(size, 0.01)
 
         logger.debug(
             f"仓位计算: max={max_pos} base={base:.4f} "
             f"agent4=×{agent4_mult:.2f} risk=×{risk_mult:.2f} "
+            f"win_rate=×{win_rate_mult:.2f} ({win_rate:.1f}%) "
             f"→ {size:.4f} ETH"
         )
         return size

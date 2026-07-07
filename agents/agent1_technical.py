@@ -29,6 +29,7 @@ from agents.kline_builder import KlineBuilder
 from agents.change_detector import ChangeDetector
 from agents.event_bus import EventBus, AgentEvent, AgentEventType
 from agents.config import AgentSystemConfig
+from agents.market_state import format_indicators_table, classify_market
 
 # 复用前端已有的指标计算函数
 from frontend.utils.eth_ai_analysis import _calc_macd, _calc_kdj, _calc_boll
@@ -322,6 +323,22 @@ class Agent1:
         except Exception as e:
             logger.warning("预热失败（非致命，继续冷启动）: %s", e)
             self._current_activity = "❄️ 冷启动（预热失败）"
+
+    def get_indicators_table(self) -> str:
+        """返回多周期指标格式化表格（供 Agent 3 注入 DeepSeek prompt）
+
+        Returns:
+            多行 ASCII 表格字符串
+        """
+        return format_indicators_table(self._latest_indicators)
+
+    def get_market_state(self) -> dict:
+        """返回当前市场状态分类（供 Agent 3 注入 DeepSeek prompt）
+
+        Returns:
+            { trend, volatility, regime, has_squeeze, summary_line }
+        """
+        return classify_market(self._latest_indicators)
 
     def _indicator_summary(self, tf: str, macd: dict, kdj: dict, boll: dict) -> str:
         """生成一行指标摘要（供 current_activity 使用）"""

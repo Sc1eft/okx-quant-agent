@@ -25,14 +25,16 @@ class AgentSystemConfig:
 
     # ── Agent 3: Trader ──
     agent3_enabled: bool = True
-    agent3_debounce_seconds: float = 30.0  # 事件缓冲窗口
-    agent3_min_interval_between_trades: int = 300  # 最小交易间隔：5分钟
+    agent3_debounce_seconds: float = 60.0  # 事件缓冲窗口（原30s → 60s，减少决策频率）
+    agent3_min_interval_between_trades: int = 600  # 最小交易间隔：10分钟（原5min，减少信号翻转）
+    agent3_min_holding_time_seconds: int = 120  # 最小持仓时间：120秒内反转不记录平仓（防零持仓刷单）
     agent3_max_daily_trades: int = 20  # 每日最大交易次数（实盘建议 10-20）
     agent3_max_daily_loss_usdt: float = 100.0
     agent3_max_consecutive_losses: int = 3
     agent3_max_position_eth: float = 0.5  # 单笔最大 0.5 ETH
     agent3_min_position_for_loss_tracking: float = 0.1  # 低于此仓位的亏损不计入日亏损警戒（试探仓不触发风控）
-    agent3_idle_decision_interval_seconds: int = 600  # 空闲定时决策：10分钟
+    agent3_idle_decision_interval_seconds: int = 900  # 空闲定时决策：15分钟（原 600）
+    agent3_idle_decision_price_change_pct: float = 0.5  # 空闲决策触发所需的最小价格变化 %
 
     # ── 手续费率（OKX 标准费率）──
     # Spot: maker 0.08%, taker 0.10%（ETH-USDT Group 1）

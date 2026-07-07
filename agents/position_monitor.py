@@ -43,6 +43,7 @@ class PositionMonitor:
         self._position_side: str = "none"       # "long" / "short" / "none"
         self._position_size: float = 0.0        # ETH
         self._entry_price: float = 0.0
+        self._entry_time: Optional[datetime] = None  # 开仓时间（用于最小持仓时间保护）
 
         # 止盈止损（从外部传入）
         self._stop_loss: float = 0.0
@@ -84,12 +85,22 @@ class PositionMonitor:
         if self._has_position and self._position_size > 0:
             is_reversal = (size == 0) or (side != self._position_side)
             if is_reversal and entry_price > 0:
-                self._record_close_pnl(entry_price)
+                # 最小持仓时间保护：持仓不足 N 秒时跳过平仓记录（防零持仓反转刷单）
+                min_hold = getattr(self.config, 'agent3_min_holding_time_seconds', 120)
+                hold_secs = (datetime.now(timezone.utc) - self._entry_time).total_seconds() if self._entry_time else 999
+                if hold_secs < min_hold:
+                    logger.info(
+                        f"持仓仅 {hold_secs:.0f}s，低于最小持仓 {min_hold}s，跳过反转平仓记录。 "
+                        f"方向: {self._position_side} → {side}"
+                    )
+                else:
+                    self._record_close_pnl(entry_price)
 
         self._has_position = size > 0
         self._position_side = side if self._has_position else "none"
         self._position_size = size
         self._entry_price = entry_price
+        self._entry_time = datetime.now(timezone.utc) if self._has_position else None
         self._stop_loss = stop_loss
         self._take_profit = take_profit
         self._trade_group_id = trade_group_id
@@ -379,6 +390,7 @@ class PositionMonitor:
             "position_side": self._position_side,
             "position_size": self._position_size,
             "entry_price": self._entry_price,
+            "entry_time": self._entry_time.isoformat() if self._entry_time else "",
             "stop_loss": self._current_stop_loss,
             "take_profit": self._take_profit,
             "trailing_stop_active": self._trailing_stop_active,

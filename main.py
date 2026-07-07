@@ -229,6 +229,7 @@ async def main():
         root_config=root_config,
         position_monitor=position_monitor,
         okx_client=okx_rest,
+        agent1=agent1,  # 用于读取多周期指标 + 市场状态
         review_generator=review_gen,  # Phase 4
         agent4_reviewer=agent4_reviewer,  # Agent 4（替代 param_adapter）
         notifier=notifier,
