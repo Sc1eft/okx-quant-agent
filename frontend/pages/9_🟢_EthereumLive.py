@@ -8,6 +8,20 @@ Refactored: shared modules extracted to utils/ and components/.
 """
 
 from __future__ import annotations
+
+import sys
+import time as _time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import streamlit as st
+import pandas as pd
+
+# 项目路径必须在所有 frontend.* 模块导入前设置
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from frontend.components.layout import inject_mask_hider_js
 from frontend.components.metrics_display import render_metric_card
 from frontend.utils.data_provider import fetch_klines_with_agg, fetch_ticker
@@ -34,18 +48,6 @@ from frontend.components.eth_charts import (
     _friendly_tf,
     _fmt_uptime,
 )
-
-import sys
-import time as _time
-from datetime import datetime, timezone
-from pathlib import Path
-
-import streamlit as st
-import pandas as pd
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 # ── Page-specific constants ──
 DEFAULT_TF_LABEL = "15分钟"

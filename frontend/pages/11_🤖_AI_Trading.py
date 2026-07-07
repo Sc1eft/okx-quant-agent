@@ -26,6 +26,11 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+# 项目路径必须在所有 frontend.* 模块导入前设置（Streamlit Cloud 依赖此路径）
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from frontend.components.metrics_display import render_metric_card
 from frontend.components.charts import equity_curve_chart
 from frontend.utils.data_provider import fetch_klines_with_agg, fetch_ticker
@@ -41,16 +46,19 @@ from frontend.utils.eth_ai_analysis import (
     _ticker_summary,
     _summarize_klines,
 )
-from frontend.components.eth_charts import (
-    TIMEFRAMES,
-    TIMEFRAME_REFRESH_S,
-    TV_INTERVAL_MAP,
-    _build_tradingview_html,
-)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+# 单独包装 eth_charts 导入以暴露真实错误（Streamlit Cloud 默认隐藏）
+try:
+    from frontend.components.eth_charts import (
+        TIMEFRAMES,
+        TIMEFRAME_REFRESH_S,
+        TV_INTERVAL_MAP,
+        _build_tradingview_html,
+    )
+except Exception as _eth_charts_err:
+    st.error(f"❌ eth_charts 组件导入失败: {type(_eth_charts_err).__name__}: {_eth_charts_err}")
+    st.info("当前页面部分功能不可用。请截图错误信息并联系开发者。")
+    st.stop()
 
 # ════════════════════════════════════════════════════════════════
 # CONSTANTS
