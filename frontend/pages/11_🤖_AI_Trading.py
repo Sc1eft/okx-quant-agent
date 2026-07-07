@@ -1147,14 +1147,18 @@ else:
 if not _trades_df.empty and "pnl_close" in _trades_df.columns:
     # 从 SQLite 计算每日权益
     try:
-        hist = _trades_df[_trades_df["trade_type"] == "close"].copy()
-        if not hist.empty and hist["pnl_close"].notna().any():
-            hist["timestamp"] = pd.to_datetime(hist["timestamp"])
-            hist = hist.sort_values("timestamp")
-            cum_pnl = hist["pnl_close"].cumsum()
+        close_df = _trades_df[_trades_df["trade_type"] == "close"].copy()
+        if close_df.empty:
+            st.caption("📈 暂无已平仓交易，权益曲线待数据积累后显示")
+        elif not close_df["pnl_close"].notna().any():
+            st.caption("📈 平仓交易盈亏数据为空")
+        else:
+            close_df["timestamp"] = pd.to_datetime(close_df["timestamp"])
+            close_df = close_df.sort_values("timestamp")
+            cum_pnl = close_df["pnl_close"].cumsum()
             equity_points = []
-            init = st.session_state.ai_initial_balance
-            for i, (_, r) in enumerate(hist.iterrows()):
+            init = st.session_state.get("ai_initial_balance", 10000)
+            for i, (_, r) in enumerate(close_df.iterrows()):
                 equity_points.append({
                     "time": r["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
                     "equity": init + float(cum_pnl.iloc[i]),
@@ -1168,8 +1172,10 @@ if not _trades_df.empty and "pnl_close" in _trades_df.columns:
                     theme=st.session_state.get("theme_mode", "light"),
                 )
                 st.plotly_chart(fig_eq, use_container_width=True, config={"displayModeBar": False})
-    except Exception:
-        pass  # 权益曲线非必需，静默跳过
+            else:
+                st.caption("📈 权益曲线至少需要 2 笔平仓交易")
+    except Exception as e:
+        st.warning(f"权益曲线渲染异常: {e}")
 
 # ════════════════════════════════════════════════════════════════
 # FOOTER
