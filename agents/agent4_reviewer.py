@@ -325,6 +325,8 @@ class Agent4Reviewer:
             side = t.get("side", "?")
             pnl = t.get("pnl_close", t.get("pnl", 0))
             price = t.get("price", 0)
+            confidence = t.get("confidence", 0)
+            size_pct = t.get("position_size_pct", 0)
             decision_raw = t.get("decision", "{}")
             if isinstance(decision_raw, str):
                 try:
@@ -334,7 +336,8 @@ class Agent4Reviewer:
             reason = decision_raw.get("reason", "") if isinstance(decision_raw, dict) else ""
             ts = t.get("timestamp", "")[:19] if t.get("timestamp") else ""
             trade_lines.append(
-                f"{i} | {ts} | {side} | ${price} | {pnl:+.2f} USDT | {reason}"
+                f"{i} | {ts} | {side} | ${price} | {pnl:+.2f} USDT"
+                f" | 信心={confidence}% 仓位={size_pct}% | {reason}"
             )
 
         # 行情摘要

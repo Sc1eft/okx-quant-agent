@@ -441,6 +441,8 @@ class Agent3:
                         "pnl_close": 0.0,
                         "trade_group_id": trade_group_id,
                         "trade_type": "open",
+                        "confidence": decision.get("confidence", 0),
+                        "position_size_pct": _safe_float(decision.get("position_size_pct"), 0),
                     }
                     asyncio.create_task(self.agent4_reviewer.notify_trade(trade_record))
                 # 更新当前持仓（供前端和上下文使用）

@@ -139,7 +139,7 @@ class AgentSystemConfig:
 
     # ── Agent 3（新增，供 Agent 4 调整）──
     agent3_position_size_multiplier: float = 1.0
-    agent3_default_stop_loss_pct: float = 2.0
+    agent3_default_stop_loss_pct: float = 3.0
     agent3_default_take_profit_pct: float = 4.0
 
     # ── Agent 4 ──

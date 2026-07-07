@@ -1,0 +1,26 @@
+=== 当前仓位 ===
+  side: none
+  size: 0.0 ETH
+  entry: $0.0
+  pnl: $0.0 (0.0%)
+
+=== Agent 3 活动 ===
+  ⏳ 等待信号 | 缓冲 1 事件
+  trades_executed=0
+  deepseek_calls=18
+  last_activity_time=1783347980.2972364
+
+=== Agent 1 最新价格 ===
+  [3m]  $1753.59
+  [5m]  $1748.22
+  [15m]  $1747.81
+  [1h]  $1744.89
+
+=== Agent 1 信号 ===
+  📡 接收 Tick #19535 @ $1,756.14
+  ticks=19535  bars=27  signals=21
+
+=== Agent 4 状态 ===
+  trade_count=0
+  total_reviews=0
+  next_review_in=5

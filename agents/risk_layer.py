@@ -444,6 +444,8 @@ class RiskManager:
                 ("trade_group_id", "TEXT DEFAULT ''"),
                 ("trade_type", "TEXT DEFAULT 'open'"),
                 ("fee", "REAL DEFAULT 0.0"),
+                ("confidence", "INTEGER DEFAULT 0"),
+                ("position_size_pct", "REAL DEFAULT 0.0"),
             ]:
                 try:
                     self._db_conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_def}")
@@ -455,14 +457,14 @@ class RiskManager:
             self._db_conn = None
 
     def _log_trade_sync(self, trade_data: dict):
-        """同步写入交易到 SQLite（含 Phase 4 P&L 列 + 手续费）"""
+        """同步写入交易到 SQLite（含 Phase 4 P&L 列 + 手续费 + 信心度）"""
         if not self._db_conn:
             return
         try:
             self._db_conn.execute(
                 "INSERT INTO trades (timestamp, side, size, price, pnl, order_id, symbol, decision, "
-                "pnl_close, trade_group_id, trade_type, fee) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "pnl_close, trade_group_id, trade_type, fee, confidence, position_size_pct) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     trade_data.get("timestamp", ""),
                     trade_data.get("side", ""),
@@ -476,6 +478,8 @@ class RiskManager:
                     trade_data.get("trade_group_id", ""),
                     trade_data.get("trade_type", "open"),
                     trade_data.get("fee", 0.0),
+                    trade_data.get("confidence", 0),
+                    trade_data.get("position_size_pct", 0.0),
                 )
             )
             self._db_conn.commit()
