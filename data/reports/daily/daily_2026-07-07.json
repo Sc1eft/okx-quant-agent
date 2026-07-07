@@ -1,0 +1,114 @@
+{
+  "type": "daily",
+  "date": "2026-07-07",
+  "generated_at": "2026-07-07T16:41:23.754885+00:00",
+  "stats": {
+    "trades": 5,
+    "wins": 0,
+    "losses": 5,
+    "win_rate": 0.0,
+    "total_pnl": -12.2,
+    "total_fee": 0.55,
+    "avg_pnl": -2.44,
+    "best_trade": -0.18,
+    "worst_trade": -10.64,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 3,
+        "win_rate": 0.0,
+        "pnl": -1.38
+      },
+      "sell": {
+        "trades": 2,
+        "win_rate": 0.0,
+        "pnl": -10.82
+      }
+    }
+  },
+  "summary": "共 5 笔交易 | 胜率 0.0% (0胜/5负) | 总盈亏 -12.20 USDT | 手续费 0.55 USDT | 最大回撤 0.00% | 🟢 buy: 3笔 胜率0% 盈亏-1.4 | 🔴 sell: 2笔 胜率0% 盈亏-10.8",
+  "period": {
+    "start": "2026-07-07T00:00:00",
+    "end": "2026-07-07T23:59:59"
+  },
+  "trades": {
+    "wins": [],
+    "losses": [
+      {
+        "trade_id": 392,
+        "pnl": -10.64,
+        "side": "sell",
+        "entry_price": 1773.84,
+        "exit_price": 0,
+        "reason": "{'action': 'sell', 'reason': '多头止损'}",
+        "time": "2026-07-07T09:31:27.878860+00:00"
+      },
+      {
+        "trade_id": 396,
+        "pnl": -0.32,
+        "side": "buy",
+        "entry_price": 1774.64,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '平short反手'}",
+        "time": "2026-07-07T14:03:28.255931+00:00"
+      },
+      {
+        "trade_id": 398,
+        "pnl": -0.18,
+        "side": "sell",
+        "entry_price": 1770.91,
+        "exit_price": 0,
+        "reason": "{'action': 'sell', 'reason': '平long反手'}",
+        "time": "2026-07-07T14:09:28.099413+00:00"
+      },
+      {
+        "trade_id": 399,
+        "pnl": -0.8,
+        "side": "buy",
+        "entry_price": 1772.33,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '空头止损'}",
+        "time": "2026-07-07T14:09:29.677667+00:00"
+      },
+      {
+        "trade_id": 401,
+        "pnl": -0.26,
+        "side": "buy",
+        "entry_price": 1775.17,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '空头止损'}",
+        "time": "2026-07-07T14:46:16.513510+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 0,
+      "total_profit": 0.0,
+      "patterns": []
+    },
+    "losses": {
+      "count": 5,
+      "total_loss": 12.2,
+      "patterns": [
+        {
+          "pattern": "多头止损引发反手亏损：多头止损后立即反手做空，但市场未延续空头，导致进一步损失",
+          "loss_count": 2,
+          "avg_loss": -5.41,
+          "cause": "多头趋势结束后触发止损，策略立即反手做空，但价格未形成真正空头趋势，反手空单再次被止损",
+          "suggestion": "多头止损后可暂停交易或等待价格确认形成新趋势再入场，避免在转折点盲目反手"
+        },
+        {
+          "pattern": "空头止损及频繁反手：在震荡行情中空头止损并反手做多，但方向不明导致多次小亏损",
+          "loss_count": 3,
+          "avg_loss": -0.46,
+          "cause": "震荡市中空头止损触发，随后反手做多，但市场缺乏持续性方向，导致连续空头止损与平仓反手摩擦亏损",
+          "suggestion": "震荡市应降低交易频率，增加趋势确认过滤器，或放宽止损容忍度以减少假突破损耗"
+        }
+      ]
+    },
+    "summary": "当日5笔全败，主亏来自多头止损（-10.64），其余为震荡市反复反手止损，建议优化趋势判断并减少无方向时的频繁反手。"
+  },
+  "pushed": false,
+  "push_time": null
+}

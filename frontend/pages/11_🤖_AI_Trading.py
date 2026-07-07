@@ -1132,7 +1132,7 @@ if not _trades_df.empty:
 
     # 统计
     stats = _get_trade_stats()
-    if stats["total"]:
+    if stats.get("total"):
         total_fee = stats.get("total_fee", 0) or 0
         net_pnl = stats.get("net_pnl", stats["total_pnl"])
         gross_pnl = net_pnl + total_fee  # 还原毛盈亏
