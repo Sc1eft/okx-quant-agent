@@ -589,6 +589,8 @@ class Agent3:
                     "symbol": self.executor.symbol,
                     "decision": decision,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "confidence": decision.get("confidence", 0),
+                    "position_size_pct": decision.get("position_size_pct", 0),
                 }
                 if trade_side == "sell":
                     trade_record["short"] = True
