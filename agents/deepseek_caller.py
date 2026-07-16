@@ -1,23 +1,24 @@
 """
-DeepSeek trades鍐崇瓥璋冪敤鍣?
+DeepSeek 交易决策调用器
 
-灏?Agent 1 鐨勬妧鏈潰淇″彿 + Agent 2 鐨勬柊闂?鍩烘湰闈㈡暟鎹?
-娉ㄥ叆缁?DeepSeek V4 Pro锛岃幏鍙栦氦鏄撳喅绛栥€?
+将 Agent 1 的技术面信号 + Agent 2 的新闻/基本面数据
+注入给 DeepSeek V4 Pro，获取交易决策。
 
-澶嶇敤鏍?config.py 涓殑 AgentConfig锛坅pi_key, model, base_url, temperature锛夈€?
+复用根 config.py 中的 AgentConfig（api_key, model, base_url, temperature）。
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+import threading
 from typing import Optional
 
 from openai import OpenAI
 
 logger = logging.getLogger("deepseek_caller")
 
-# 鈹€鈹€ 绯荤粺鎻愮ず璇?鈹€鈹€
+# ── 系统提示词 ──
 
 _SYSTEM_PROMPT = """You are a senior ETH futures trader with 15 years of experience.
 Make trading decisions based on multi-dimensional data.
@@ -69,6 +70,7 @@ Reply in strict JSON format:
     "position_size_pct": "position size 0-100, 0=min 100=max, reflects conviction",
     "stop_loss": "stop loss price",
     "take_profit": "take profit price",
+    "add_to_position": "optional true/false. Only valid when same direction as current position. true=add to existing position, false=replace (close then reopen). Default: follow conviction-based heuristic",
     "reason": "decision reason in Chinese, 50 chars max"
 }}
 
@@ -77,6 +79,7 @@ Rules:
 - hold: set position_size_pct=0, stop_loss/take_profit can be 0
 - position_size_pct reflects conviction: high conviction 70-100, medium 30-70, low 5-30
 - stop_loss and take_profit should consider volatility, don't set too tight
+- When you already hold a position in the same direction as your new action, set add_to_position=true to average into the existing position. Set add_to_position=false to close and reopen.
 - If agent1_summary says "non-technical-trigger", focus on news sentiment and on-chain data
 - If agent1_summary says "periodic-check", only trade when conditions are clearly favorable
 - Use [Market State] regime guidance: trending → follow trend, ranging → mean-reversion, transition → reduce size
@@ -84,13 +87,14 @@ Rules:
 - Consider [Recent Trades] patterns: identify and avoid repeating recent mistakes
 - [Trading Advisory] provides expert-level trading guidance — treat it as recommended strategy
 """
-# (涓嶈娉ㄥ叆鐢ㄦ埛杈撳叆鍒?f-string 鈥?涓嬮潰鐢?.format() 瀹夊叏澶勭悊)
+
+# (不要注入用户输入到 f-string ── 下面用 .format() 安全处理)
 
 
 class DeepSeekTrader:
-    """DeepSeek trades鍐崇瓥鍣?
+    """DeepSeek 交易决策器
 
-    鐢ㄦ硶:
+    用法:
         trader = DeepSeekTrader(api_key, model, base_url)
         decision = trader.analyze(context_dict)
     """
@@ -117,28 +121,30 @@ class DeepSeekTrader:
             timeout=timeout,
         )
 
-        # 缁熻
+        # 统计（thread-safe，asyncio.to_thread 多线程访问）
+        self._lock = threading.Lock()
         self.total_calls = 0
         self.total_errors = 0
 
     def analyze(self, context: dict) -> dict:
-        """璋冪敤 DeepSeek 鍒嗘瀽锛岃繑鍥炰氦鏄撳喅绛?
+        """调用 DeepSeek 分析，返回交易决策
 
-        context 瀛楁:
+        context 字段:
             position_direction: "long" / "short" / "none"
             position_size: float
             entry_price: float / ""
             pnl_pct: float / ""
-            agent1_summary: str (鎶€鏈潰鎽樿)
-            agent2_summary: str (鏂伴椈/鍩烘湰闈㈡憳瑕?
+            agent1_summary: str (技术面摘要)
+            agent2_summary: str (新闻/基本面摘要)
             monthly_trades: int
             win_rate: float
             monthly_pnl: float
             current_price: float
         """
-        self.total_calls += 1
+        with self._lock:
+            self.total_calls += 1
 
-        # 瀹夊叏鏋勫缓 prompt锛堜笉浣跨敤 f-string锛岄槻姝㈡敞鍏ワ級
+        # 安全构建 prompt（不使用 f-string，防止注入）
         risk = context.get("risk_status", {})
         prompt_kwargs = {
             "position_direction": context.get("position_direction", "none"),
@@ -189,70 +195,71 @@ class DeepSeekTrader:
             return self._parse_response(content, context.get("current_price", 0))
 
         except Exception as e:
-            self.total_errors += 1
-            logger.error(f"DeepSeek API 璋冪敤澶辫触: {e}")
+            with self._lock:
+                self.total_errors += 1
+            logger.error(f"DeepSeek API 调用失败: {e}")
             return self._fallback_decision(context.get("current_price", 0))
 
-    # 鈹€鈹€ trades鎶ュ憡鍒嗘瀽 鈹€鈹€
+    # ── 交易报告分析 ──
 
-    _TRADE_REPORT_SYSTEM_PROMPT = """浣犳槸涓€涓噺鍖栦氦鏄撳垎鏋?AI銆傚垎鏋愪互涓嬩氦鏄撴暟鎹紝璇嗗埆鐩堝埄鍜屼簭鎹熺殑妯″紡銆?
+    _TRADE_REPORT_SYSTEM_PROMPT = """你是一个量化交易分析 AI。分析以下交易数据，识别盈利和亏损的模式。
 
-銆愬懆鏈熶俊鎭€?
-- 鍛ㄦ湡绫诲瀷: {period_type}
-- 鏃堕棿鑼冨洿: {period_start} ~ {period_end}
+【周期信息】
+- 周期类型: {period_type}
+- 时间范围: {period_start} ~ {period_end}
 
-銆愮粺璁℃瑙堛€?
-- 鎬讳氦鏄? {trades} trades
-- 鐩堝埄: {wins} trades
-- 浜忔崯: {losses} trades
-- 鑳滅巼: {win_rate}%
-- 鎬荤泩浜? {total_pnl} USDT
-- 鏈€澶у洖鎾? {max_drawdown}%
+【统计概览】
+- 总交易: {trades} trades
+- 盈利: {wins} trades
+- 亏损: {losses} trades
+- 胜率: {win_rate}%
+- 总盈亏: {total_pnl} USDT
+- 最大回撤: {max_drawdown}%
 
-銆愮泩鍒╀氦鏄撱€?
+【盈利交易】
 {win_details}
 
-銆愪簭鎹熶氦鏄撱€?
+【亏损交易】
 {loss_details}
 
-璇峰垎鏋愪互涓婃暟鎹紝杩斿洖涓ユ牸鐨?JSON 鏍煎紡锛堜笉瑕?markdown 鍥存爮锛夛細
+请分析以上数据，返回严格的 JSON 格式（不要 markdown 围栏）：
 {{
     "wins": {{
-        "count": 鏁存暟,
-        "total_profit": 娴偣鏁?
+        "count": 整数,
+        "total_profit": 浮点数,
         "patterns": [
             {{
-                "pattern": "鐩堝埄妯″紡鎻忚堪濡?MACD閲戝弶+KDJ瓒呭崠鍏辨尟鍋氬'",
-                "wins_count": 鏁存暟,
-                "avg_profit": 娴偣鏁?
-                "takeaway": "杩欎釜妯″紡鍊煎緱缁х画/鍔犲己/娉ㄦ剰浠€涔?
+                "pattern": "盈利模式描述如'MACD金叉+KDJ超卖共振做多'",
+                "wins_count": 整数,
+                "avg_profit": 浮点数,
+                "takeaway": "这个模式值得继续/加强/注意什么"
             }}
         ]
     }},
     "losses": {{
-        "count": 鏁存暟,
-        "total_loss": 娴偣鏁?
+        "count": 整数,
+        "total_loss": 浮点数,
         "patterns": [
             {{
-                "pattern": "浜忔崯妯″紡鎻忚堪濡?甯冩灄甯︿笂杞ㄧ獊鐮磋拷澶?",
-                "loss_count": 鏁存暟,
-                "avg_loss": 娴偣鏁?
-                "cause": "浜忔崯reason鍒嗘瀽",
-                "suggestion": "鍏蜂綋鐨勮皟鏁村缓璁?
+                "pattern": "亏损模式描述如'布林带上轨突破追多'",
+                "loss_count": 整数,
+                "avg_loss": 浮点数,
+                "cause": "亏损原因分析",
+                "suggestion": "具体的调整建议"
             }}
         ]
     }},
-    "summary": "涓€鍙ヨ瘽鎬荤粨锛堜腑鏂囷紝50瀛楀唴锛?
+    "summary": "一句话总结（中文，50字内）"
 }}
 
-娉ㄦ剰锛氬鏋滃叏閮ㄧ泩鍒╁垯 losses.patterns 涓虹┖鍒楄〃锛?
-濡傛灉鍏ㄩ儴浜忔崯鍒?wins.patterns 涓虹┖鍒楄〃銆?
+注意：如果全部盈利则 losses.patterns 为空列表，
+如果全部亏损则 wins.patterns 为空列表。
 """
 
     def analyze_trade_report(self, context: dict) -> dict:
-        """鍒嗘瀽涓€娈靛懆鏈熷唴鐨勪氦鏄撶泩浜忔ā寮忥紝璇嗗埆鐩堝埄瑙勫緥鍜屼簭鎹熷師鍥犮€?
+        """分析一段周期内的交易盈亏模式，识别盈利规律和亏损原因。
 
-        context 鍖呭惈:
+        context 包含:
             period_type: "daily" | "weekly" | "monthly"
             period_start: str (ISO datetime)
             period_end: str (ISO datetime)
@@ -265,15 +272,16 @@ class DeepSeekTrader:
               losses: { count, total_loss, patterns: [...] },
               summary: "..." }
         """
-        self.total_calls += 1
+        with self._lock:
+            self.total_calls += 1
         stats = context.get("stats", {})
 
-        # 鏍煎紡鍖栫泩鍒?浜忔崯trades璇︽儏
+        # 格式化盈利/亏损 trades 详情
         def _format_trades(trades, label):
             if not trades:
                 return f"no_{label}_trades"
             lines = []
-            for i, t in enumerate(trades[:10], 1):  # 鏈€澶氫紶 10 trades
+            for i, t in enumerate(trades[:10], 1):  # 最多传 10 trades
                 reason = t.get("reason", "")[:60]
                 lines.append(
                     f"  {i}. side:{t.get('side','')} pnl:{t.get('pnl',0):+.2f} "
@@ -294,8 +302,8 @@ class DeepSeekTrader:
             "win_rate": str(stats.get("win_rate", 0)),
             "total_pnl": str(stats.get("total_pnl", 0)),
             "max_drawdown": str(stats.get("max_drawdown_pct", 0)),
-            "win_details": _format_trades(context.get("win_trades", []), "鐩堝埄"),
-            "loss_details": _format_trades(context.get("loss_trades", []), "浜忔崯"),
+            "win_details": _format_trades(context.get("win_trades", []), "盈利"),
+            "loss_details": _format_trades(context.get("loss_trades", []), "亏损"),
         }
 
         system_prompt = self._TRADE_REPORT_SYSTEM_PROMPT.format(**prompt_kwargs)
@@ -313,27 +321,29 @@ class DeepSeekTrader:
             content = resp.choices[0].message.content or ""
             return self._parse_json_response(content)
         except Exception as e:
-            self.total_errors += 1
-            logger.error(f"DeepSeek trades鎶ュ憡鍒嗘瀽澶辫触: {e}")
+            with self._lock:
+                self.total_errors += 1
+            logger.error(f"DeepSeek 交易报告分析失败: {e}")
             return {
                 "wins": {"count": 0, "total_profit": 0, "patterns": []},
                 "losses": {"count": 0, "total_loss": 0, "patterns": []},
-                "summary": "AI 鍒嗘瀽鏆備笉鍙敤",
+                "summary": "AI 分析暂不可用",
             }
 
-    # 鈹€鈹€ Agent 4 澶嶇洏鍒嗘瀽 鈹€鈹€
+    # ── Agent 4 复盘分析 ──
 
     def analyze_review(self, prompt_text: str) -> dict:
-        """鐢?DeepSeek 鍒嗘瀽澶嶇洏鏁版嵁锛圓gent 4 涓撶敤锛?
+        """用 DeepSeek 分析复盘数据（Agent 4 专用）
 
         Args:
-            prompt_text: 瀹屾暣鐨勫鐩?Prompt锛堝凡鍚墍鏈変笂涓嬫枃锛?
+            prompt_text: 完整的复盘 Prompt（已含所有上下文）
 
         Returns:
-            瑙ｆ瀽鍚庣殑 JSON dict锛屽惈 review_id, summary, market_regime, param_adjustments
-            澶辫触鏃惰繑鍥?{"summary": "鍒嗘瀽澶辫触", "param_adjustments": []}
+            解析后的 JSON dict，含 review_id, summary, market_regime, param_adjustments
+            失败时返回 {"summary": "分析失败", "param_adjustments": []}
         """
-        self.total_calls += 1
+        with self._lock:
+            self.total_calls += 1
         try:
             resp = self._client.chat.completions.create(
                 model=self.model,
@@ -341,13 +351,14 @@ class DeepSeekTrader:
                     {"role": "system", "content": "You are a quantitative trading review AI. Analyze trade data and output JSON format parameter adjustment suggestions."},
                     {"role": "user", "content": prompt_text},
                 ],
-                temperature=0.4,  # 澶嶇洏鍒嗘瀽鐢ㄧ暐楂樻俯搴︿互鑾峰彇澶氭牱鎬ф礊瀵?
+                temperature=0.4,  # 复盘分析用略高温度以获取多样性洞察
                 max_tokens=3000,
             )
             content = resp.choices[0].message.content or ""
             return self._parse_json_response(content)
         except Exception as e:
-            self.total_errors += 1
+            with self._lock:
+                self.total_errors += 1
             logger.error(f"DeepSeek review analysis failed: {e}")
             return {"summary": "Analysis failed", "param_adjustments": []}
 
@@ -448,7 +459,7 @@ class DeepSeekTrader:
     def _parse_response(self, content: str, current_price: float) -> dict:
         """Parse DeepSeek response JSON"""
 
-        # 鎻愬彇 JSON锛堟敮鎸?```json 鍥存爮 鎴?瑁?JSON锛?
+        # 提取 JSON（支持 ```json 围栏 或 裸 JSON）
         json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
         if json_match:
             content = json_match.group(1)
@@ -461,13 +472,20 @@ class DeepSeekTrader:
         try:
             result = json.loads(content)
         except json.JSONDecodeError:
-            logger.warning(f"DeepSeek 鍝嶅簲 JSON 瑙ｆ瀽澶辫触: {content[:200]}")
+            logger.warning(f"DeepSeek 响应 JSON 解析失败: {content[:200]}")
             return self._fallback_decision(current_price)
 
         # Validate and fill defaults
         action = result.get("action", "hold")
         if action not in ("buy", "sell", "hold"):
             action = "hold"
+
+        add_to_position_raw = result.get("add_to_position")
+        add_to_position = None
+        if isinstance(add_to_position_raw, bool):
+            add_to_position = add_to_position_raw
+        elif isinstance(add_to_position_raw, str):
+            add_to_position = add_to_position_raw.lower() == "true"
 
         return {
             "action": action,
@@ -477,6 +495,7 @@ class DeepSeekTrader:
             "position_size_pct": result.get("position_size_pct", ""),
             "stop_loss": result.get("stop_loss", ""),
             "take_profit": result.get("take_profit", ""),
+            "add_to_position": add_to_position,
             "reason": result.get("reason", ""),
             "_raw": content[:500],
         }
@@ -492,14 +511,15 @@ class DeepSeekTrader:
             "position_size_pct": "",
             "stop_loss": "",
             "take_profit": "",
+            "add_to_position": None,
             "reason": "DeepSeek API unavailable, auto-skip",
             "_raw": "",
         }
 
     def get_stats(self) -> dict:
-        return {
-            "total_calls": self.total_calls,
-            "total_errors": self.total_errors,
-            "model": self.model,
-        }
-
+        with self._lock:
+            return {
+                "total_calls": self.total_calls,
+                "total_errors": self.total_errors,
+                "model": self.model,
+            }

@@ -55,6 +55,12 @@ class PositionMonitor:
         self._trailing_low: float = 0.0         # 空头：最低价
         self._current_stop_loss: float = 0.0    # 当前实际止损位
 
+        # 开仓是否用了限价单（maker 费率）
+        self._opened_with_limit: bool = False
+
+        # 累计已支付的开仓手续费（补仓场景）
+        self._total_open_fees: float = 0.0
+
         # 运行状态
         self._running: bool = False
         self._stats = {
@@ -75,12 +81,55 @@ class PositionMonitor:
         stop_loss: float = 0.0,
         take_profit: float = 0.0,
         trade_group_id: str = "",
+        opened_with_limit: bool = True,
+        accumulate: bool = False,
     ):
         """更新持仓信息（由 Agent 3 在新开仓后调用）
 
         如果当前有持仓且新方向不同（反转）或清仓，
         先自动记录平仓盈亏再更新。
+
+        Args:
+            accumulate: True=同方向补仓（累加 size，加权均价），
+                        False=覆盖新开仓（默认）
         """
+        # ── 补仓模式：同方向累加 ──
+        if accumulate and self._has_position and side == self._position_side and size > 0:
+            total_size = self._position_size + size
+            self._entry_price = (
+                self._position_size * self._entry_price + size * entry_price
+            ) / total_size
+            self._position_size = total_size
+
+            # 累计开仓手续费
+            fee_rate = self._maker_fee_rate if opened_with_limit else self._taker_fee_rate
+            self._total_open_fees += size * entry_price * fee_rate
+
+            # 用最新 SL/TP 覆盖（DeepSeek 看到的是全量上下文）
+            if stop_loss > 0:
+                self._stop_loss = stop_loss
+            if take_profit > 0:
+                self._take_profit = take_profit
+
+            # _opened_with_limit：如果这次用了 maker 且之前是 taker，升级
+            if opened_with_limit and not self._opened_with_limit:
+                self._opened_with_limit = True
+
+            # 重置移动止损状态（以当前累计持仓为准重新跟踪）
+            self._trailing_stop_active = False
+            self._trailing_high = entry_price if side == "long" else 0.0
+            self._trailing_low = entry_price if side == "short" else float("inf")
+
+            self._entry_time = datetime.now(timezone.utc)
+
+            logger.info(
+                f"补仓: +{size:.4f} ETH @ ${entry_price:.2f} → "
+                f"总持仓 {self._position_size:.4f} ETH, 均价 ${self._entry_price:.2f}, "
+                f"SL=${self._stop_loss:.2f} TP=${self._take_profit:.2f}"
+            )
+            return
+
+        # ── 覆盖 / 反转模式（已有逻辑） ──
         # 检测反转/平仓 → 先记 PnL
         if self._has_position and self._position_size > 0:
             is_reversal = (size == 0) or (side != self._position_side)
@@ -104,6 +153,10 @@ class PositionMonitor:
         self._stop_loss = stop_loss
         self._take_profit = take_profit
         self._trade_group_id = trade_group_id
+        self._opened_with_limit = opened_with_limit if self._has_position else False
+        self._total_open_fees = (
+            size * entry_price * (self._maker_fee_rate if opened_with_limit else self._taker_fee_rate)
+        ) if size > 0 else 0.0  # 覆盖模式下重置为本次单笔费用
 
         # 重置移动止损状态
         self._trailing_stop_active = False
@@ -128,9 +181,12 @@ class PositionMonitor:
         else:
             gross_pnl = (self._entry_price - close_price) * self._position_size
 
-        fee_rate = self._fee_rate
-        open_fee = self._position_size * self._entry_price * fee_rate
-        close_fee = self._position_size * close_price * fee_rate
+        # 开仓费用：补仓场景用累计值，单次开仓按实际费率
+        open_fee = self._total_open_fees if self._total_open_fees > 0 else (
+            self._position_size * self._entry_price *
+            (self._maker_fee_rate if self._opened_with_limit else self._taker_fee_rate)
+        )
+        close_fee = self._position_size * close_price * self._taker_fee_rate
         total_fee = open_fee + close_fee
         net_pnl = gross_pnl - total_fee
 
@@ -168,6 +224,7 @@ class PositionMonitor:
 
     def clear_position(self):
         """清空持仓（外部调用，如手动平仓后）"""
+        self._total_open_fees = 0.0
         self.update_position("none", 0, 0, 0, 0)
 
     async def run(self):
@@ -303,8 +360,16 @@ class PositionMonitor:
         return False
 
     @property
-    def _fee_rate(self) -> float:
-        """根据当前交易模式返回对应的 Taker 费率"""
+    def _maker_fee_rate(self) -> float:
+        """Maker 费率（限价单吃深度）"""
+        mode = getattr(self.executor, 'market_mode', 'spot')
+        if mode == "futures":
+            return self.config.futures_maker_fee_rate
+        return self.config.maker_fee_rate
+
+    @property
+    def _taker_fee_rate(self) -> float:
+        """Taker 费率（市价单立即成交）"""
         mode = getattr(self.executor, 'market_mode', 'spot')
         if mode == "futures":
             return self.config.futures_taker_fee_rate
@@ -347,10 +412,12 @@ class PositionMonitor:
         else:
             gross_pnl = (self._entry_price - fill_price) * self._position_size
 
-        # 按交易模式使用对应费率扣费
-        fee_rate = self._fee_rate
-        open_fee = self._position_size * self._entry_price * fee_rate
-        close_fee = self._position_size * fill_price * fee_rate
+        # 开仓费用：补仓场景用累计值，单次开仓按实际费率
+        open_fee = self._total_open_fees if self._total_open_fees > 0 else (
+            self._position_size * self._entry_price *
+            (self._maker_fee_rate if self._opened_with_limit else self._taker_fee_rate)
+        )
+        close_fee = self._position_size * fill_price * self._taker_fee_rate
         total_fee = open_fee + close_fee
         net_pnl = gross_pnl - total_fee
 
@@ -395,5 +462,6 @@ class PositionMonitor:
             "take_profit": self._take_profit,
             "trailing_stop_active": self._trailing_stop_active,
             "trailing_high": self._trailing_high,
+            "total_open_fees": round(self._total_open_fees, 4),
             **self._stats,
         }

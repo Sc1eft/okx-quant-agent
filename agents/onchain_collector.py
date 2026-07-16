@@ -182,8 +182,8 @@ class OnchainCollector:
         self._stats["gas_fetches"] += 1
         gas_data = None
 
-        # 尝试 Etherscan API
-        api_key = self.cfg.agent2_whale_alert_api_key  # 复用字段
+        # 尝试 Etherscan API（使用专用的 etherscan API key）
+        api_key = self.cfg.agent2_etherscan_api_key
         if api_key:
             try:
                 resp = await self._http.get(

@@ -1,0 +1,119 @@
+{
+  "type": "daily",
+  "date": "2026-07-10",
+  "generated_at": "2026-07-10T16:38:39.908209+00:00",
+  "stats": {
+    "trades": 7,
+    "wins": 1,
+    "losses": 6,
+    "win_rate": 14.3,
+    "total_pnl": -22.26,
+    "total_fee": 1.36,
+    "avg_pnl": -3.18,
+    "best_trade": 0.46,
+    "worst_trade": -15.05,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 4,
+        "win_rate": 0.0,
+        "pnl": -18.83
+      },
+      "sell": {
+        "trades": 3,
+        "win_rate": 33.3,
+        "pnl": -3.43
+      }
+    }
+  },
+  "summary": "共 7 笔交易 | 胜率 14.3% (1胜/6负) | 总盈亏 -22.26 USDT | 手续费 1.36 USDT | 最大回撤 0.00% | 🟢 buy: 4笔 胜率0% 盈亏-18.8 | 🔴 sell: 3笔 胜率33% 盈亏-3.4",
+  "period": {
+    "start": "2026-07-10T00:00:00",
+    "end": "2026-07-10T23:59:59"
+  },
+  "trades": {
+    "wins": [
+      {
+        "trade_id": 484,
+        "pnl": 0.46,
+        "side": "sell",
+        "entry_price": 1796.97,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-10T11:00:36.609571+00:00"
+      }
+    ],
+    "losses": [
+      {
+        "trade_id": 482,
+        "pnl": -0.56,
+        "side": "buy",
+        "entry_price": 1792.68,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-10T10:01:14.885886+00:00"
+      },
+      {
+        "trade_id": 486,
+        "pnl": -1.7,
+        "side": "buy",
+        "entry_price": 1799.87,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-10T11:15:17.750432+00:00"
+      },
+      {
+        "trade_id": 488,
+        "pnl": -2.31,
+        "side": "sell",
+        "entry_price": 1795.5,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-10T11:42:30.158636+00:00"
+      },
+      {
+        "trade_id": 489,
+        "pnl": -15.05,
+        "side": "buy",
+        "entry_price": 1806.07,
+        "exit_price": 0,
+        "reason": "空头止损",
+        "time": "2026-07-10T12:13:47.897293+00:00"
+      },
+      {
+        "trade_id": 491,
+        "pnl": -1.52,
+        "side": "buy",
+        "entry_price": 1804.74,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-10T12:16:28.010214+00:00"
+      },
+      {
+        "trade_id": 493,
+        "pnl": -1.58,
+        "side": "sell",
+        "entry_price": 1788.68,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-10T16:03:16.363505+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 1,
+      "total_profit": 0.46,
+      "patterns": [
+        {
+          "pattern": "平long反手做空，在1796.97卖出后价格下跌获利",
+          "wins_count": 1,
+          "avg_profit": 0.46,
+          "takeaway": "平多反手做空时机精准，可继续关注该信号"
+        }
+      ]
+    }
+  },
+  "pushed": false,
+  "push_time": null
+}

@@ -167,7 +167,7 @@ class OKXClient:
             body["px"] = px
         if lever:
             body["lever"] = lever
-        json_body = str(body).replace("'", '"')
+        json_body = json.dumps(body, ensure_ascii=False)
         headers = self._sign("POST", "/api/v5/trade/order", json_body, ts)
         headers["Content-Type"] = "application/json"
         resp = self._request("POST", "/api/v5/trade/order", headers=headers, content=json_body)
@@ -185,7 +185,7 @@ class OKXClient:
         """
         ts = self._timestamp()
         body = {"instId": symbol, "ordId": order_id}
-        json_body = str(body).replace("'", '"')
+        json_body = json.dumps(body, ensure_ascii=False)
         headers = self._sign("POST", "/api/v5/trade/cancel-order", json_body, ts)
         headers["Content-Type"] = "application/json"
         resp = self._request("POST", "/api/v5/trade/cancel-order", headers=headers, content=json_body)

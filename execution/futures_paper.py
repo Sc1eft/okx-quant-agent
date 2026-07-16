@@ -166,10 +166,12 @@ class FuturesPosition:
 class FuturesAccount:
     """合约账户 — 管理钱包余额、持仓、保证金"""
 
-    def __init__(self, wallet_balance: float = 10000.0, taker_fee_rate: float = 0.001):
+    def __init__(self, wallet_balance: float = 10000.0, taker_fee_rate: float = 0.001,
+                 maker_fee_rate: float = 0.0002):
         self.wallet_balance = wallet_balance
         self.initial_wallet = wallet_balance
         self.taker_fee_rate = taker_fee_rate
+        self.maker_fee_rate = maker_fee_rate
         self.trades: list[dict] = []
         self.equity_history: list[dict] = []
         self.last_price: float = 0.0
@@ -181,6 +183,10 @@ class FuturesAccount:
             f"equity={self.total_equity:.2f}, "
             f"position={'none' if not self.position else f'{self.position.direction} {self.position.size:.4f}×{self.position.leverage}'})"
         )
+
+    def _fee_rate(self, prefer_limit: bool = False) -> float:
+        """限价单挂单成交走 maker 费率，否则走 taker 费率"""
+        return self.maker_fee_rate if prefer_limit else self.taker_fee_rate
 
     # ── 计算属性 ──
 
@@ -227,13 +233,13 @@ class FuturesAccount:
 
     # ── 开仓 ──
 
-    def open_long(self, price: float, size: float, leverage: int) -> dict:
+    def open_long(self, price: float, size: float, leverage: int, prefer_limit: bool = False) -> dict:
         """开多 / 加多"""
         if self.position and self.position.direction == "short" and self.position.is_active:
             return {"note": "exist_opposite", "side": "open_long"}
 
         pos_value = price * size
-        fee = pos_value * self.taker_fee_rate
+        fee = pos_value * self._fee_rate(prefer_limit)
         margin = pos_value / leverage
 
         if self.wallet_balance < margin + fee:
@@ -281,13 +287,13 @@ class FuturesAccount:
         self.trades.append(trade)
         return trade
 
-    def open_short(self, price: float, size: float, leverage: int) -> dict:
+    def open_short(self, price: float, size: float, leverage: int, prefer_limit: bool = False) -> dict:
         """开空 / 加空"""
         if self.position and self.position.direction == "long" and self.position.is_active:
             return {"note": "exist_opposite", "side": "open_short"}
 
         pos_value = price * size
-        fee = pos_value * self.taker_fee_rate
+        fee = pos_value * self._fee_rate(prefer_limit)
         margin = pos_value / leverage
 
         if self.wallet_balance < margin + fee:
@@ -336,7 +342,7 @@ class FuturesAccount:
 
     # ── 平仓 ──
 
-    def close_position(self, price: float, size: float | None = None) -> dict:
+    def close_position(self, price: float, size: float | None = None, prefer_limit: bool = False) -> dict:
         """平仓 (多仓卖出 / 空仓买入)"""
         if not self.position or not self.position.is_active:
             return {"note": "no_position", "side": "close"}
@@ -348,7 +354,7 @@ class FuturesAccount:
             return {"note": "invalid_size", "side": "close"}
 
         pos = self.position
-        fee_rate = self.taker_fee_rate
+        fee_rate = self._fee_rate(prefer_limit)
 
         if pos.direction == "long":
             revenue = price * close_size
@@ -390,11 +396,11 @@ class FuturesAccount:
         self.trades.append(trade)
         return trade
 
-    def close_all(self, price: float) -> dict | None:
+    def close_all(self, price: float, prefer_limit: bool = False) -> dict | None:
         """全额平仓"""
         if not self.position or not self.position.is_active:
             return None
-        return self.close_position(price)
+        return self.close_position(price, prefer_limit=prefer_limit)
 
     # ── 爆仓 ──
 

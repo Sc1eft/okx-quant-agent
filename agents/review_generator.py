@@ -23,6 +23,7 @@ from typing import Any
 
 from agents.config import AgentSystemConfig
 from agents.deepseek_caller import DeepSeekTrader
+from data.db_manager import DatabaseManager
 
 logger = logging.getLogger("review_generator")
 
@@ -34,6 +35,7 @@ class ReviewGenerator:
                  deepseek: DeepSeekTrader | None = None):
         self.config = config
         self.db_path = db_path
+        self._db = DatabaseManager(db_path)
         self.deepseek = deepseek
 
     # ── 公共查询方法 ──
@@ -45,28 +47,19 @@ class ReviewGenerator:
             dict: trades, wins, losses, win_rate, total_pnl, max_drawdown_pct, avg_trade_pnl
         """
         conn = self._get_conn()
-        try:
-            return self._compute_range_stats(conn, days=30)
-        finally:
-            conn.close()
+        return self._compute_range_stats(conn, days=30)
 
     def compute_daily_stats(self, date_str: str | None = None) -> dict[str, Any]:
         """计算指定日期的统计"""
         conn = self._get_conn()
-        try:
-            target = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            return self._compute_range_stats(conn, since=f"{target}T00:00:00", until=f"{target}T23:59:59")
-        finally:
-            conn.close()
+        target = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return self._compute_range_stats(conn, since=f"{target}T00:00:00", until=f"{target}T23:59:59")
 
     def compute_weekly_stats(self) -> dict[str, Any]:
         """计算过去 7 天的统计"""
         conn = self._get_conn()
-        try:
-            since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            return self._compute_range_stats(conn, since=since)
-        finally:
-            conn.close()
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        return self._compute_range_stats(conn, since=since)
 
     # ── 报告生成 ──
 
@@ -82,13 +75,10 @@ class ReviewGenerator:
 
         # 获取该时间范围的交易行
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM trades WHERE trade_type='close' AND timestamp >= ? AND timestamp <= ?",
-                (f"{today}T00:00:00", f"{today}T23:59:59"),
-            ).fetchall()
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE trade_type='close' AND timestamp >= ? AND timestamp <= ?",
+            (f"{today}T00:00:00", f"{today}T23:59:59"),
+        ).fetchall()
 
         if rows:
             win_trades, loss_trades = self.extract_wins_and_losses(rows)
@@ -120,13 +110,10 @@ class ReviewGenerator:
 
         # 获取该时间范围的交易行
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM trades WHERE trade_type='close' AND timestamp >= ?",
-                (week_ago,),
-            ).fetchall()
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE trade_type='close' AND timestamp >= ?",
+            (week_ago,),
+        ).fetchall()
 
         if rows:
             win_trades, loss_trades = self.extract_wins_and_losses(rows)
@@ -174,14 +161,14 @@ class ReviewGenerator:
             logger.debug(f"获取近期交易摘要失败: {e}")
             return "近期交易数据不可用"
         finally:
-            conn.close()
+            pass  # 共享连接，不关闭
 
     # ── 内部方法 ──
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        # 确保 trades 表存在 (使用 RiskManager 相同的建表语句)
+        """返回共享连接（由 DatabaseManager 缓存，不要 close）"""
+        conn = self._db.conn
+        # 确保 trades 表存在（幂等，仅首次创建）
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -384,7 +371,7 @@ class ReviewGenerator:
                 (month_start.isoformat(), next_month.isoformat()),
             ).fetchall()
         finally:
-            conn.close()
+            pass  # 共享连接，不关闭
 
         stats = self.compute_monthly_stats()
         date_str = now.strftime("%Y-%m")

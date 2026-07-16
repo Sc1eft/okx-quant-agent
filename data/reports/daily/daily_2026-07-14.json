@@ -1,0 +1,65 @@
+{
+  "type": "daily",
+  "date": "2026-07-14",
+  "generated_at": "2026-07-14T16:29:19.656122+00:00",
+  "stats": {
+    "trades": 1,
+    "wins": 1,
+    "losses": 0,
+    "win_rate": 100.0,
+    "total_pnl": 27.78,
+    "total_fee": 0.24,
+    "avg_pnl": 27.78,
+    "best_trade": 27.78,
+    "worst_trade": 27.78,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "sell": {
+        "trades": 1,
+        "win_rate": 100.0,
+        "pnl": 27.78
+      }
+    }
+  },
+  "summary": "交易次数不足 (1 < 5), 暂不生成总结",
+  "period": {
+    "start": "2026-07-14T00:00:00",
+    "end": "2026-07-14T23:59:59"
+  },
+  "trades": {
+    "wins": [
+      {
+        "trade_id": 567,
+        "pnl": 27.78,
+        "side": "sell",
+        "entry_price": 1874.58,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-14T16:04:30.892192+00:00"
+      }
+    ],
+    "losses": []
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 1,
+      "total_profit": 27.78,
+      "patterns": [
+        {
+          "pattern": "平多反手做空，抓住下跌波段盈利",
+          "wins_count": 1,
+          "avg_profit": 27.78,
+          "takeaway": "果断反手的交易纪律值得保持，可结合更大周期趋势确认以提高稳定性"
+        }
+      ]
+    },
+    "losses": {
+      "count": 0,
+      "total_loss": 0,
+      "patterns": []
+    },
+    "summary": "当日仅一笔平多反手做空，盈利27.78 USDT，胜率100%，策略执行果断有效。"
+  },
+  "pushed": false,
+  "push_time": null
+}

@@ -27,6 +27,7 @@ from datetime import datetime, timezone, timedelta, date
 from typing import Optional, Tuple
 
 from agents.config import AgentSystemConfig
+from data.db_manager import DatabaseManager
 
 logger = logging.getLogger("risk_layer")
 
@@ -41,6 +42,7 @@ class RiskManager:
         self._last_trade_time: Optional[datetime] = None
         self._daily_trade_count: int = 0
         self._daily_loss_usdt: float = 0.0
+        self._daily_realized_pnl: float = 0.0  # 今日净盈亏（正=盈利, 负=亏损）
         self._consecutive_losses: int = 0
         self._current_date: date = datetime.now(timezone.utc).date()
         self._current_cst_date: date = self._utc_to_cst_date(datetime.now(timezone.utc))
@@ -52,7 +54,7 @@ class RiskManager:
         self._api_breaker_until: Optional[datetime] = None
 
         # ── Phase 2 状态 ──
-        self._btc_delay_until: Optional[datetime] = None
+        self._volatility_delay_until: Optional[datetime] = None
 
         # ── Layer 3 状态 ──
         self._daily_trades: list[dict] = []
@@ -62,81 +64,11 @@ class RiskManager:
 
     # ── Layer 1: 交易前检查 ──
 
-    def check_layer1(
+    def _check_common_pre(
         self,
-        side: str,  # "buy" / "sell"
-        size_eth: float,
-        price: float,
-        now: Optional[datetime] = None,
+        now: datetime,
     ) -> Tuple[bool, str]:
-        """交易前全项检查，返回 (通过?, 原因)"""
-        now = now or datetime.now(timezone.utc)
-        self._check_date_reset(now)
-
-        # 1. 最小交易间隔
-        if self._last_trade_time:
-            elapsed = (now - self._last_trade_time).total_seconds()
-            if elapsed < self.config.agent3_min_interval_between_trades:
-                remaining = self.config.agent3_min_interval_between_trades - int(elapsed)
-                return False, f"交易间隔未到，还需 {remaining}s"
-
-        # 2. 单笔上限
-        if size_eth > self.config.agent3_max_position_eth:
-            return False, f"单笔 {size_eth:.4f} ETH 超过上限 {self.config.agent3_max_position_eth} ETH"
-
-        # 3. 每日交易次数
-        if self._daily_trade_count >= self.config.agent3_max_daily_trades:
-            return False, f"今日交易已达上限 ({self._daily_trade_count} 次)"
-
-        # 4. 每日亏损上限
-        if self._daily_loss_usdt >= self.config.agent3_max_daily_loss_usdt:
-            return False, f"今日亏损已达上限 ({self._daily_loss_usdt:.2f} USDT)"
-
-        # 5. 连续亏损
-        if self._consecutive_losses >= self.config.agent3_max_consecutive_losses:
-            return False, f"连续亏损 {self._consecutive_losses} 次，交易暂停"
-
-        # 6. 方向冲突（同方向累加检查）
-        direction = "long" if side == "buy" else "short"
-        if self._current_position_side == direction:
-            new_total = self._current_position_eth + size_eth
-            if new_total > self.config.agent3_max_position_eth:
-                return False, f"同方向累加 {new_total:.4f} ETH 超过上限"
-
-        # 7. API 熔断检查
-        if self._api_breaker_until and now < self._api_breaker_until:
-            remaining = (self._api_breaker_until - now).total_seconds()
-            return False, f"API 熔断中，剩余 {remaining:.0f}s"
-
-        # 8. HFT 防护：每小时交易频率上限
-        if not self._check_hft(now):
-            return False, f"交易频率过高（每小时上限 {self.config.max_trades_per_hour} 笔）"
-
-        return True, ""
-
-    def _check_hft(self, now: datetime) -> bool:
-        """检查过去一小时内交易是否超过上限"""
-        if not self._db_conn:
-            return True  # 无数据库时不拦截
-        try:
-            hour_ago = (now - timedelta(hours=1)).isoformat()
-            cur = self._db_conn.execute(
-                "SELECT COUNT(*) FROM trades WHERE timestamp >= ? AND trade_type = 'open'",
-                (hour_ago,)
-            )
-            count = cur.fetchone()[0] or 0
-            return count < self.config.max_trades_per_hour
-        except Exception as e:
-            logger.warning(f"HFT 检查异常，保守拦截: {e}")
-            return False  # DB 异常时保守拦截，不放行
-
-    # ── Layer 2: 交易中保护 ──
-
-    def check_layer1_pre(
-        self,
-        now: Optional[datetime] = None,
-    ) -> Tuple[bool, str]:
-        """交易前快速预检（方向无关项，在 DeepSeek API 调用前执行）
+        """通用前置检查（方向无关项），供 check_layer1_pre / check_layer1 共用
 
         检查项:
           1. API 熔断
@@ -148,9 +80,6 @@ class RiskManager:
 
         返回 (通过?, 原因)
         """
-        now = now or datetime.now(timezone.utc)
-        self._check_date_reset(now)
-
         # 1. API 熔断
         if self._api_breaker_until and now < self._api_breaker_until:
             remaining = (self._api_breaker_until - now).total_seconds()
@@ -180,6 +109,66 @@ class RiskManager:
             return False, f"交易频率过高（每小时上限 {self.config.max_trades_per_hour} 笔）"
 
         return True, ""
+
+    def check_layer1(
+        self,
+        side: str,  # "buy" / "sell"
+        size_eth: float,
+        price: float,
+        now: Optional[datetime] = None,
+    ) -> Tuple[bool, str]:
+        """交易前全项检查，返回 (通过?, 原因)"""
+        now = now or datetime.now(timezone.utc)
+        self._check_date_reset(now)
+
+        # 1-6. 通用前置检查
+        ok, reason = self._check_common_pre(now)
+        if not ok:
+            return False, reason
+
+        # 7. 单笔上限
+        if size_eth > self.config.agent3_max_position_eth:
+            return False, f"单笔 {size_eth:.4f} ETH 超过上限 {self.config.agent3_max_position_eth} ETH"
+
+        # 8. 方向冲突（同方向累加检查）
+        direction = "long" if side == "buy" else "short"
+        if self._current_position_side == direction:
+            new_total = self._current_position_eth + size_eth
+            if new_total > self.config.agent3_max_position_eth:
+                return False, f"同方向累加 {new_total:.4f} ETH 超过上限"
+
+        return True, ""
+
+    def _check_hft(self, now: datetime) -> bool:
+        """检查过去一小时内交易是否超过上限"""
+        if not self._db_conn:
+            return True  # 无数据库时不拦截
+        try:
+            hour_ago = (now - timedelta(hours=1)).isoformat()
+            cur = self._db_conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE timestamp >= ? AND trade_type = 'open'",
+                (hour_ago,)
+            )
+            count = cur.fetchone()[0] or 0
+            return count < self.config.max_trades_per_hour
+        except Exception as e:
+            logger.warning(f"HFT 检查异常，保守拦截: {e}")
+            return False  # DB 异常时保守拦截，不放行
+
+    # ── Layer 2: 交易中保护 ──
+
+    def check_layer1_pre(
+        self,
+        now: Optional[datetime] = None,
+    ) -> Tuple[bool, str]:
+        """交易前快速预检（方向无关项，在 DeepSeek API 调用前执行）
+
+        内部委托给 _check_common_pre，避免与 check_layer1 代码重复。
+        返回 (通过?, 原因)
+        """
+        now = now or datetime.now(timezone.utc)
+        self._check_date_reset(now)
+        return self._check_common_pre(now)
 
     def report_api_error(self):
         """报告 API 错误（用于熔断）"""
@@ -245,6 +234,10 @@ class RiskManager:
         elif pnl > 0:
             self._consecutive_losses = 0  # 盈利后重置连亏
 
+        # 追踪今日净盈亏（不论开/平仓，有 pnl 都计入）
+        if pnl != 0:
+            self._daily_realized_pnl = round(self._daily_realized_pnl + pnl, 2)
+
     def _update_pnl_close(self, trade_data: dict):
         """平仓时更新对应开仓记录的 pnl_close"""
         if not self._db_conn:
@@ -287,6 +280,7 @@ class RiskManager:
             logger.info(f"每日风控重置 (CST): {self._current_cst_date} → {cst_today}")
             self._daily_trade_count = 0
             self._daily_loss_usdt = 0.0
+            self._daily_realized_pnl = 0.0
             self._consecutive_losses = 0
             self._current_cst_date = cst_today
             self._current_date = now.date()
@@ -294,12 +288,18 @@ class RiskManager:
             self._consecutive_api_errors = 0
             self._api_breaker_until = None
 
+    def is_daily_limit_reached(self) -> bool:
+        """已达每日交易上限？（含跨日自动重置）"""
+        self._check_date_reset(datetime.now(timezone.utc))
+        return self._daily_trade_count >= self.config.agent3_max_daily_trades
+
     def get_status(self) -> dict:
         """返回风控状态摘要"""
         return {
             "daily_trade_count": self._daily_trade_count,
             "max_daily_trades": self.config.agent3_max_daily_trades,
             "daily_loss_usdt": round(self._daily_loss_usdt, 2),
+            "daily_realized_pnl": round(self._daily_realized_pnl, 2),
             "max_daily_loss_usdt": self.config.agent3_max_daily_loss_usdt,
             "consecutive_losses": self._consecutive_losses,
             "max_consecutive_losses": self.config.agent3_max_consecutive_losses,
@@ -309,31 +309,32 @@ class RiskManager:
             "max_trades_per_hour": self.config.max_trades_per_hour,
         }
 
-    # ── Phase 2: BTC 波动检查 ──
+    # ── Phase 2: 波动检查 ──
 
-    async def check_btc_volatility_async(self, okx_client) -> tuple[bool, str]:
-        """检查 BTC 15m 波动率，超阈值则拒绝交易
+    async def check_volatility_async(self, okx_client, symbol: str = "ETH-USDT") -> tuple[bool, str]:
+        """检查交易品种 15m 波动率，超阈值则拒绝交易
 
         Args:
-            okx_client: OKXClient 实例（用于获取 BTC K线）
+            okx_client: OKXClient 实例（用于获取 K线）
+            symbol: 交易品种，默认 ETH-USDT
 
         Returns:
             (通过?, 原因)
         """
         # 先检查是否在延迟期内
         now = datetime.now(timezone.utc)
-        if hasattr(self, '_btc_delay_until') and self._btc_delay_until and now < self._btc_delay_until:
-            remaining = (self._btc_delay_until - now).total_seconds()
-            return False, f"BTC 波动延迟中，剩余 {remaining:.0f}s"
+        if hasattr(self, '_volatility_delay_until') and self._volatility_delay_until and now < self._volatility_delay_until:
+            remaining = (self._volatility_delay_until - now).total_seconds()
+            return False, f"波动延迟中，剩余 {remaining:.0f}s"
 
-        # 获取最后两根 BTC 15m K线
+        # 获取最后两根 15m K线
         try:
             import asyncio
             klines = await asyncio.to_thread(
-                okx_client.get_klines, "BTC-USDT", "15m", 2
+                okx_client.get_klines, symbol, "15m", 2
             )
         except Exception as e:
-            logger.warning(f"BTC 波动检查失败（API 异常）: {e}")
+            logger.warning(f"波动检查失败（API 异常）: {e}")
             return True, ""  # API 异常不阻塞交易
 
         if len(klines) < 2:
@@ -346,16 +347,16 @@ class RiskManager:
             return True, ""
 
         change_pct = abs(curr_close - prev_close) / prev_close * 100
-        if change_pct > self.config.btc_volatility_threshold_pct:
-            self._btc_delay_until = now + timedelta(seconds=self.config.btc_volatility_delay_seconds)
+        if change_pct > self.config.volatility_threshold_pct:
+            self._volatility_delay_until = now + timedelta(seconds=self.config.volatility_delay_seconds)
             logger.warning(
-                f"BTC 15m 波动 {change_pct:.1f}% > {self.config.btc_volatility_threshold_pct}%"
-                f"，延迟 {self.config.btc_volatility_delay_seconds}s"
+                f"{symbol} 15m 波动 {change_pct:.1f}% > {self.config.volatility_threshold_pct}%"
+                f"，延迟 {self.config.volatility_delay_seconds}s"
             )
-            return False, f"BTC 15m 波动 {change_pct:.1f}%，超过阈值 {self.config.btc_volatility_threshold_pct}%"
+            return False, f"{symbol} 15m 波动 {change_pct:.1f}%，超过阈值 {self.config.volatility_threshold_pct}%"
 
         # 波动恢复正常 → 清除延迟
-        self._btc_delay_until = None
+        self._volatility_delay_until = None
         return True, ""
 
     # ── Phase 2: 市场深度检查 ──
@@ -421,11 +422,12 @@ class RiskManager:
     # ── SQLite 持久化 ──
 
     def _init_db(self):
-        """初始化 SQLite 数据库和表（含 Phase 4 迁移）"""
+        """初始化 SQLite 数据库和表（使用 DatabaseManager 共享连接）"""
         db_path = self.config.db_path
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         try:
-            self._db_conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._db = DatabaseManager(db_path)
+            self._db_conn = self._db.conn
             self._db_conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -455,6 +457,7 @@ class RiskManager:
             self._db_conn.commit()
         except Exception as e:
             logger.error(f"SQLite 初始化失败: {e}")
+            self._db = None
             self._db_conn = None
 
     def _log_trade_sync(self, trade_data: dict):

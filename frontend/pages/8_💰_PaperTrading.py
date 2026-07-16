@@ -282,11 +282,11 @@ with st.expander("⚙ 策略参数", expanded=False):
     default_params = dict(strategy_info["params"])
     # Merge in common risk params that all strategies share
     if "stop_loss_pct" not in default_params:
-        default_params["stop_loss_pct"] = 2.0
-        default_params["take_profit_pct"] = 6.0
-        default_params["trailing_stop_activation"] = 3.0
-        default_params["trailing_stop_distance"] = 1.5
-        default_params["position_timeout_bars"] = 48
+        default_params["stop_loss_pct"] = 5.0
+        default_params["take_profit_pct"] = 10.0
+        default_params["trailing_stop_activation"] = 6.0
+        default_params["trailing_stop_distance"] = 3.0
+        default_params["position_timeout_bars"] = 72
 
     modified_params = _render_strategy_params(selected_strategy, default_params)
     st.session_state.paper_strategy_params = modified_params

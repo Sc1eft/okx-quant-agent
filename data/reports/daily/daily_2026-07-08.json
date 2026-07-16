@@ -1,0 +1,92 @@
+{
+  "type": "daily",
+  "date": "2026-07-08",
+  "generated_at": "2026-07-08T16:45:45.261079+00:00",
+  "stats": {
+    "trades": 3,
+    "wins": 1,
+    "losses": 2,
+    "win_rate": 33.3,
+    "total_pnl": 2.54,
+    "total_fee": 0.19,
+    "avg_pnl": 0.85,
+    "best_trade": 4.12,
+    "worst_trade": -0.98,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 3,
+        "win_rate": 33.3,
+        "pnl": 2.54
+      }
+    }
+  },
+  "summary": "交易次数不足 (3 < 5), 暂不生成总结",
+  "period": {
+    "start": "2026-07-08T00:00:00",
+    "end": "2026-07-08T23:59:59"
+  },
+  "trades": {
+    "wins": [
+      {
+        "trade_id": 422,
+        "pnl": 4.12,
+        "side": "buy",
+        "entry_price": 1738.98,
+        "exit_price": 0,
+        "reason": "空头止盈",
+        "time": "2026-07-08T08:18:11.882821+00:00"
+      }
+    ],
+    "losses": [
+      {
+        "trade_id": 424,
+        "pnl": -0.98,
+        "side": "buy",
+        "entry_price": 1750.14,
+        "exit_price": 0,
+        "reason": "空头止损",
+        "time": "2026-07-08T11:47:46.697221+00:00"
+      },
+      {
+        "trade_id": 427,
+        "pnl": -0.6,
+        "side": "buy",
+        "entry_price": 1730.66,
+        "exit_price": 0,
+        "reason": "空头止损",
+        "time": "2026-07-08T16:22:06.878811+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 1,
+      "total_profit": 4.12,
+      "patterns": [
+        {
+          "pattern": "空头止盈：在entry=1738.98附近平仓空头，单笔盈利4.12点，属于按计划止盈离场",
+          "wins_count": 1,
+          "avg_profit": 4.12,
+          "takeaway": "该模式有效，止盈空间充足，可继续沿用当前止盈规则"
+        }
+      ]
+    },
+    "losses": {
+      "count": 2,
+      "total_loss": 1.58,
+      "patterns": [
+        {
+          "pattern": "空头止损：入场后价格反向，触发止损平仓，两次亏损幅度相近（-0.98，-0.60）",
+          "loss_count": 2,
+          "avg_loss": 0.79,
+          "cause": "空头入场点判断偏差或止损设置过紧，导致连续被止损，未等到行情反转",
+          "suggestion": "检查入场信号，可结合更高时间周期过滤，或适当放宽止损幅度，避免反复扫损"
+        }
+      ]
+    },
+    "summary": "策略整体微盈，但胜率仅33%，胜负比约5.2:1；需重点优化空头止损频率，保持止盈优势。"
+  },
+  "pushed": false,
+  "push_time": null
+}

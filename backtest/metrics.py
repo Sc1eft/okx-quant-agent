@@ -33,10 +33,13 @@ def compute_metrics(
     max_drawdown = float(abs(drawdown.min()))
 
     # Sharpe 比率（假设年化无风险利率 2%）
-    daily_returns = equity_curve.pct_change().dropna()
-    if len(daily_returns) > 1:
-        excess_returns = daily_returns - 0.02 / 365
-        sharpe = float(np.sqrt(365) * excess_returns.mean() / excess_returns.std()) if excess_returns.std() > 0 else 0
+    period_returns = equity_curve.pct_change().dropna()
+    if len(period_returns) > 1:
+        spacing_seconds = equity_curve.index.to_series().diff().dropna().dt.total_seconds().median()
+        periods_per_year = 365.25 * 86400 / spacing_seconds if spacing_seconds and spacing_seconds > 0 else 365.25
+        risk_free_per_period = (1.02 ** (1 / periods_per_year)) - 1
+        excess_returns = period_returns - risk_free_per_period
+        sharpe = float(np.sqrt(periods_per_year) * excess_returns.mean() / excess_returns.std()) if excess_returns.std() > 0 else 0
     else:
         sharpe = 0.0
 

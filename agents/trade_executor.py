@@ -253,8 +253,10 @@ class TradeExecutor:
                 state = order_status.get("state", "")
                 acc_fill_sz = float(order_status.get("accFillSz", "0"))
                 fill_px_str = order_status.get("fillPx", "") or order_status.get("avgPx", "")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"限价单状态查询失败: {e}")
+                state = ""
+                acc_fill_sz = 0.0
 
             # 如果仍未完全成交，撤销剩余
             if state != "filled":
@@ -309,8 +311,8 @@ class TradeExecutor:
                     "fill_price": fill_price, "filled_size": acc_fill_sz,
                     "error": "", "note": "撤单前订单已成交",
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"撤单后市价补单失败: {e}")
 
         logger.info("限价单未成交，撤销后转市价单")
         result = await self.execute_market(side, size)
@@ -346,10 +348,12 @@ class TradeExecutor:
             if side == "buy":
                 trade = self.futures_account.open_long(
                     price=signal_price, size=size_eth, leverage=self.leverage,
+                    prefer_limit=prefer_limit,
                 )
             elif side == "sell":
                 trade = self.futures_account.open_short(
                     price=signal_price, size=size_eth, leverage=self.leverage,
+                    prefer_limit=prefer_limit,
                 )
             else:
                 return {"success": False, "error": f"未知方向: {side}"}

@@ -57,13 +57,28 @@ class KlineBuilder:
         # 上一周期的时间戳边界（用于判断是否翻转）
         self._last_boundary: dict[str, int] = {}
 
-    def add_tick(self, price: float, timestamp_s: int):
+        # 24h 滚动成交量跟踪（从 ticker vol24h 字段差量推算实时成交量）
+        self._last_vol24h: float = 0.0
+        self._vol24h_initialized: bool = False
+
+    def add_tick(self, price: float, timestamp_s: int, vol24h: Optional[float] = None):
         """添加一个 tick 数据（每秒最多一个）
 
         Args:
             price: 最新价格
             timestamp_s: Unix 秒级时间戳
+            vol24h: OKX ticker 的 vol24h（24h 滚动成交量），用于推算实时成交量
         """
+        # ── 从 vol24h 差量推算实时成交量 ──
+        tick_volume = 0.0
+        if vol24h is not None and vol24h >= 0:
+            if self._vol24h_initialized:
+                delta = vol24h - self._last_vol24h
+                # 防回滚（新 K 线开盘时 vol24h 可能重置）
+                tick_volume = max(0.0, delta)
+            self._vol24h_initialized = True
+            self._last_vol24h = vol24h
+
         # ── 1秒 K 线 ──
         if self._sec_candle is None:
             self._sec_candle = {
@@ -72,7 +87,7 @@ class KlineBuilder:
                 "high": price,
                 "low": price,
                 "close": price,
-                "volume": 0.0,
+                "volume": tick_volume,
             }
         elif self._sec_candle["timestamp"] < timestamp_s:
             # 完成上一根 1s K 线 → 聚合到各周期
@@ -84,7 +99,7 @@ class KlineBuilder:
                 "high": price,
                 "low": price,
                 "close": price,
-                "volume": 0.0,
+                "volume": tick_volume,
             }
             # 检查新秒级 K 线是否跨越了标准周期边界
             # 使用 self._last_boundary 避免与 _aggregate_sec_candle 重复触发

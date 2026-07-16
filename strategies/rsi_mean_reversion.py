@@ -38,11 +38,11 @@ class RSIMeanReversionStrategy(BaseStrategy):
             self.params["rsi_period"],
             self.params["oversold"],
             self.params["overbought"],
-            self.params.get("stop_loss_pct", 2.0) / 100,
-            self.params.get("take_profit_pct", 5.0) / 100,
-            self.params.get("trailing_stop_activation", 2.5) / 100,
-            self.params.get("trailing_stop_distance", 1.2) / 100,
-            self.params.get("position_timeout_bars", 36),
+            self.params.get("stop_loss_pct", 5.0) / 100,
+            self.params.get("take_profit_pct", 10.0) / 100,
+            self.params.get("trailing_stop_activation", 6.0) / 100,
+            self.params.get("trailing_stop_distance", 3.0) / 100,
+            self.params.get("position_timeout_bars", 72),
         )
 
     @staticmethod

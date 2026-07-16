@@ -1,0 +1,116 @@
+{
+  "type": "daily",
+  "date": "2026-07-11",
+  "generated_at": "2026-07-11T16:13:51.402869+00:00",
+  "stats": {
+    "trades": 6,
+    "wins": 0,
+    "losses": 6,
+    "win_rate": 0.0,
+    "total_pnl": -3.84,
+    "total_fee": 1.11,
+    "avg_pnl": -0.64,
+    "best_trade": -0.07,
+    "worst_trade": -1.7,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 4,
+        "win_rate": 0.0,
+        "pnl": -2.88
+      },
+      "sell": {
+        "trades": 2,
+        "win_rate": 0.0,
+        "pnl": -0.96
+      }
+    }
+  },
+  "summary": "共 6 笔交易 | 胜率 0.0% (0胜/6负) | 总盈亏 -3.84 USDT | 手续费 1.11 USDT | 最大回撤 0.00% | 🟢 buy: 4笔 胜率0% 盈亏-2.9 | 🔴 sell: 2笔 胜率0% 盈亏-1.0",
+  "period": {
+    "start": "2026-07-11T00:00:00",
+    "end": "2026-07-11T23:59:59"
+  },
+  "trades": {
+    "wins": [],
+    "losses": [
+      {
+        "trade_id": 502,
+        "pnl": -0.44,
+        "side": "buy",
+        "entry_price": 1801.26,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T07:29:20.413617+00:00"
+      },
+      {
+        "trade_id": 505,
+        "pnl": -0.23,
+        "side": "sell",
+        "entry_price": 1800.83,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-11T07:40:16.213807+00:00"
+      },
+      {
+        "trade_id": 507,
+        "pnl": -0.67,
+        "side": "buy",
+        "entry_price": 1801.58,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T08:15:17.628954+00:00"
+      },
+      {
+        "trade_id": 509,
+        "pnl": -0.07,
+        "side": "buy",
+        "entry_price": 1799.48,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T09:17:58.206887+00:00"
+      },
+      {
+        "trade_id": 511,
+        "pnl": -0.73,
+        "side": "sell",
+        "entry_price": 1799.12,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-11T11:15:17.315652+00:00"
+      },
+      {
+        "trade_id": 513,
+        "pnl": -1.7,
+        "side": "buy",
+        "entry_price": 1802.41,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T16:03:26.240655+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 0,
+      "total_profit": 0.0,
+      "patterns": []
+    },
+    "losses": {
+      "count": 6,
+      "total_loss": -3.84,
+      "patterns": [
+        {
+          "pattern": "平仓反手策略在震荡行情中频繁触发，每次反手后价格反向波动导致连续微亏",
+          "loss_count": 6,
+          "avg_loss": 0.64,
+          "cause": "所有亏损交易均为反手操作（平short/平long反手），入场后未出现有利移动即反向，显示信号在窄幅盘整中过度敏感，缺乏趋势过滤",
+          "suggestion": "增加波动率或趋势过滤器（如ADX、布林带宽度），避免在低波动区间频繁反手；设置最小盈利目标或固定止损，避免成本侵蚀"
+        }
+      ]
+    },
+    "summary": "今日6笔交易全为反手操作导致亏损，建议在窄幅震荡中减少交易频率并引入趋势确认，防止信号反复。"
+  },
+  "pushed": false,
+  "push_time": null
+}

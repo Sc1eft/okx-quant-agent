@@ -23,10 +23,10 @@ def compute_stop_levels(
     current_price: float,
     highest_price: float,
     # 参数
-    stop_loss_pct: float = 0.02,
-    take_profit_pct: float = 0.06,
-    trailing_activation_pct: float = 0.03,
-    trailing_distance_pct: float = 0.015,
+    stop_loss_pct: float = 0.05,
+    take_profit_pct: float = 0.10,
+    trailing_activation_pct: float = 0.06,
+    trailing_distance_pct: float = 0.03,
     atr_value: Optional[float] = None,
     atr_multiplier: float = 2.0,
 ) -> StopLossLevels:

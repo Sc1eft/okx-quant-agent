@@ -1,0 +1,88 @@
+{
+  "type": "daily",
+  "date": "2026-07-12",
+  "generated_at": "2026-07-12T16:14:03.787438+00:00",
+  "stats": {
+    "trades": 2,
+    "wins": 1,
+    "losses": 1,
+    "win_rate": 50.0,
+    "total_pnl": -0.72,
+    "total_fee": 0.24,
+    "avg_pnl": -0.36,
+    "best_trade": 0.01,
+    "worst_trade": -0.73,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 1,
+        "win_rate": 100.0,
+        "pnl": 0.01
+      },
+      "sell": {
+        "trades": 1,
+        "win_rate": 0.0,
+        "pnl": -0.73
+      }
+    }
+  },
+  "summary": "交易次数不足 (2 < 5), 暂不生成总结",
+  "period": {
+    "start": "2026-07-12T00:00:00",
+    "end": "2026-07-12T23:59:59"
+  },
+  "trades": {
+    "wins": [
+      {
+        "trade_id": 539,
+        "pnl": 0.01,
+        "side": "buy",
+        "entry_price": 1820.76,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-12T16:00:28.492386+00:00"
+      }
+    ],
+    "losses": [
+      {
+        "trade_id": 541,
+        "pnl": -0.73,
+        "side": "sell",
+        "entry_price": 1820.89,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-12T16:02:19.946583+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 1,
+      "total_profit": 0.01,
+      "patterns": [
+        {
+          "pattern": "平空反手做多（buy）微利了结",
+          "wins_count": 1,
+          "avg_profit": 0.01,
+          "takeaway": "平仓空头后立即反手做多，捕捉到微小反弹，但盈利空间有限，可关注但不宜重仓追进"
+        }
+      ]
+    },
+    "losses": {
+      "count": 1,
+      "total_loss": 0.73,
+      "patterns": [
+        {
+          "pattern": "平多反手做空（sell）导致亏损",
+          "loss_count": 1,
+          "avg_loss": 0.73,
+          "cause": "平仓多头后直接反手做空，可能市场仍处于多头趋势或未形成有效反转，导致空单被套亏损",
+          "suggestion": "反手做空前增加顶部确认信号（如背离、K线形态），或设置限价单突破后再追，避免过早逆势"
+        }
+      ]
+    },
+    "summary": "今日两次反手交易盈亏分化，平空做多微利，平多做空亏损，反手策略需等待更明确的多空转换信号，不宜机械执行。"
+  },
+  "pushed": false,
+  "push_time": null
+}

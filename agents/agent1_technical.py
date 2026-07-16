@@ -63,7 +63,10 @@ class Agent1:
 
         # 回调绑定
         self.kline_builder.on_completed_bar = self._on_bar
-        self.ws_client.set_callbacks(on_message=self._on_tick)
+        self.ws_client.set_callbacks(
+            on_message=self._on_tick,
+            on_reconnect=self._on_reconnect,
+        )
 
         # 运行状态
         self._running = False
@@ -100,6 +103,17 @@ class Agent1:
             await asyncio.gather(*self._pending_tasks, return_exceptions=True)
         logger.info("Agent 1 已停止")
 
+    async def _on_reconnect(self):
+        """WebSocket 重连后触发：回填缺失 K 线数据
+
+        重连期间可能丢失 ticks，导致 KlineBuilder 内部时间窗口不完整。
+        通过 REST API 拉取历史 K 线进行回填，确保指标计算不中断。
+        """
+        reconnect_time = datetime.now(timezone.utc)
+        logger.info(f"WebSocket 重连，开始数据回填 @ {reconnect_time.isoformat()}")
+        if self.okx_client:
+            await self._warmup()
+
     def _on_tick(self, msg: dict):
         """处理 WebSocket ticker 消息"""
         try:
@@ -108,7 +122,9 @@ class Agent1:
                 ts_str = data.get("ts", "0")
                 ts_s = int(ts_str) // 1000  # ms → s
                 price = float(data.get("last", "0"))
-                self.kline_builder.add_tick(price, ts_s)
+                vol24h_str = data.get("vol24h", "")
+                vol24h = float(vol24h_str) if vol24h_str else None
+                self.kline_builder.add_tick(price, ts_s, vol24h=vol24h)
                 self._stats["ticks_received"] += 1
                 self._current_activity = f"📡 接收 Tick #{self._stats['ticks_received']} @ ${price:,.2f}"
                 self._last_activity_time = time.time()
@@ -127,9 +143,8 @@ class Agent1:
         history = self.kline_builder.get_history(timeframe)
         history.append(bar)  # 把刚完成的这根也算进去
 
-        # 各周期所需最小 K 线数（自适应：短周期快出信号，长周期多积累）
-        _MIN_BARS = {"3m": 5, "5m": 5, "15m": 8, "1h": 10, "1d": 20}
-        min_bars = _MIN_BARS.get(timeframe, 15)
+        # 各周期所需最小 K 线数（从配置读取，支持动态调整）
+        min_bars = self.config.agent1_min_bars.get(timeframe, 15)
         if len(history) < min_bars:
             logger.debug(f"{timeframe} 数据不足 ({len(history)}/{min_bars}), 跳过指标计算")
             return
@@ -195,6 +210,7 @@ class Agent1:
             self._current_activity = f"📊 推送 {timeframe} {sig['description']} (⚡{urgency})"
             self._last_activity_time = time.time()
             logger.info(f"📊 Agent 1 push: {sig['description']} (urgency={urgency})")
+
 
     async def _warmup(self):
         """启动预热：本地 SQLite 缓存优先 → OKX REST API 保底 → 持久化

@@ -246,3 +246,154 @@ class TestPositionMonitor:
         assert status["stop_loss"] == 3400.0
         assert status["take_profit"] == 3600.0
         assert "stop_loss_triggered" in status
+
+    @pytest.mark.asyncio
+    async def test_accumulate_position(self, config, mock_risk_manager, mock_executor, mock_okx_client):
+        """同方向补仓：累加 size + 加权均价"""
+        monitor = PositionMonitor(
+            config=config,
+            risk_manager=mock_risk_manager,
+            executor=mock_executor,
+            okx_client=mock_okx_client,
+        )
+        monitor._running = True
+
+        # 买 0.01 @ 3500
+        monitor.update_position(side="long", size=0.01, entry_price=3500.0,
+                                stop_loss=3400.0, take_profit=3700.0)
+        assert monitor._position_size == 0.01
+        assert monitor._entry_price == 3500.0
+
+        # 再次买 0.02 @ 3600（补仓）
+        monitor.update_position(side="long", size=0.02, entry_price=3600.0,
+                                stop_loss=3450.0, take_profit=3800.0, accumulate=True)
+
+        # 总 size = 0.01 + 0.02 = 0.03
+        # 均价 = (0.01*3500 + 0.02*3600) / 0.03 = (35 + 72) / 0.03 = 3566.67
+        assert monitor._position_size == 0.03
+        assert round(monitor._entry_price, 2) == 3566.67
+        assert monitor._has_position is True
+        assert monitor._position_side == "long"
+
+        # SL/TP 应该被最新值覆盖
+        assert monitor._stop_loss == 3450.0
+        assert monitor._take_profit == 3800.0
+
+    @pytest.mark.asyncio
+    async def test_accumulate_reverse_direction(self, config, mock_risk_manager, mock_executor, mock_okx_client):
+        """补仓时反方向不应累加，应触发反转"""
+        monitor = PositionMonitor(
+            config=config,
+            risk_manager=mock_risk_manager,
+            executor=mock_executor,
+            okx_client=mock_okx_client,
+        )
+        monitor._running = True
+
+        # 先开多 0.01 @ 3500
+        monitor.update_position(side="long", size=0.01, entry_price=3500.0,
+                                stop_loss=3400.0, take_profit=3700.0)
+
+        # 反方向开空，即使 accumulate=True 也不应累加
+        mock_okx_client.get_ticker.return_value = {"last": 3600.0}
+        # 应该触发反转 PnL 记录 + 覆盖为新方向
+        monitor.update_position(side="short", size=0.02, entry_price=3600.0,
+                                stop_loss=3700.0, take_profit=3400.0, accumulate=True)
+
+        # 应该被覆盖为 short（不是累加成 0.03）
+        assert monitor._position_size == 0.02
+        assert monitor._position_side == "short"
+
+    @pytest.mark.asyncio
+    async def test_accumulate_then_close_pnl(self, config, mock_risk_manager, mock_executor, mock_okx_client):
+        """补仓后平仓：PnL 计算中累计开仓费用正确"""
+        config.maker_fee_rate = 0.001
+        config.taker_fee_rate = 0.001
+
+        monitor = PositionMonitor(
+            config=config,
+            risk_manager=mock_risk_manager,
+            executor=mock_executor,
+            okx_client=mock_okx_client,
+        )
+        monitor._running = True
+
+        # 开 0.01 @ 3500 (taker)
+        monitor.update_position(side="long", size=0.01, entry_price=3500.0,
+                                stop_loss=3400.0, take_profit=3700.0,
+                                opened_with_limit=False)
+
+        # 补 0.02 @ 3600 (maker)
+        monitor.update_position(side="long", size=0.02, entry_price=3600.0,
+                                stop_loss=3450.0, take_profit=3800.0,
+                                opened_with_limit=True, accumulate=True)
+
+        # 累计费用 = 0.01*3500*0.001 + 0.02*3600*0.001 = 0.035 + 0.072 = 0.107
+        assert round(monitor._total_open_fees, 4) == 0.107
+
+        # 平仓 @ 3700 (taker)
+        # 平仓费 = 0.03 * 3700 * 0.001 = 0.111
+        # 总费 = 0.107 + 0.111 = 0.218
+        # 毛利 = (3700-3566.67) * 0.03 = 4.0
+        # 净利 = 4.0 - 0.218 = 3.78
+        mock_okx_client.get_ticker.return_value = {"last": 3700.0}
+        await monitor._close_position("止盈", 3700.0)
+
+        # 验证 PnL 记录到了风控
+        last_trade = mock_risk_manager.record_trade.call_args[0][0]
+        assert last_trade["trade_type"] == "close"
+        assert last_trade["pnl"] > 0  # 毛利 $4 > 总费 $0.218，应盈利
+
+    @pytest.mark.asyncio
+    async def test_accumulate_maker_taker_fees(self, config, mock_risk_manager, mock_executor, mock_okx_client):
+        """混合 maker/taker 费率累计正确"""
+        config.maker_fee_rate = 0.0002
+        config.taker_fee_rate = 0.0005
+
+        monitor = PositionMonitor(
+            config=config,
+            risk_manager=mock_risk_manager,
+            executor=mock_executor,
+            okx_client=mock_okx_client,
+        )
+        monitor._running = True
+
+        # 开 0.01 @ 3500 (taker) → 费用 = 0.01*3500*0.0005 = 0.0175
+        monitor.update_position(side="long", size=0.01, entry_price=3500.0,
+                                stop_loss=3400.0, take_profit=3700.0,
+                                opened_with_limit=False)
+
+        # 补 0.02 @ 3600 (maker) → 费用 = 0.02*3600*0.0002 = 0.0144
+        monitor.update_position(side="long", size=0.02, entry_price=3600.0,
+                                stop_loss=3450.0, take_profit=3800.0,
+                                opened_with_limit=True, accumulate=True)
+
+        # 总费用 = 0.0175 + 0.0144 = 0.0319
+        assert round(monitor._total_open_fees, 4) == 0.0319
+
+        # _opened_with_limit 应保持 True（maker 覆盖了 taker）
+        assert monitor._opened_with_limit is True
+
+        # get_status 应包含 total_open_fees
+        status = monitor.get_status()
+        assert "total_open_fees" in status
+
+    @pytest.mark.asyncio
+    async def test_accumulate_non_existent_position_falls_back(self, config, mock_risk_manager, mock_executor, mock_okx_client):
+        """无持仓时 accumulate=True 应退化为新开仓行为"""
+        monitor = PositionMonitor(
+            config=config,
+            risk_manager=mock_risk_manager,
+            executor=mock_executor,
+            okx_client=mock_okx_client,
+        )
+        monitor._running = True
+
+        # 无持仓时 accumulate=True 应该表现如正常开仓
+        monitor.update_position(side="long", size=0.01, entry_price=3500.0,
+                                stop_loss=3400.0, take_profit=3700.0,
+                                accumulate=True)
+
+        assert monitor._position_size == 0.01
+        assert monitor._entry_price == 3500.0
+        assert monitor._has_position is True

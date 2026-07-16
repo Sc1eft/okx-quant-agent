@@ -5,17 +5,28 @@ Agent 系统配置 — 三 Agent 的独立参数
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from config import Config
 
 
 @dataclass
 class AgentSystemConfig:
-    """三 Agent 系统配置（与根 config.py 互补）"""
+    """三 Agent 系统配置（与根 config.py 互补）
+
+    共享字段（与 root Config 重叠）统一通过 from_root_config() 填充，
+    不要手动同步，避免遗漏。
+    """
 
     # ── Agent 1: Technical Analyst ──
     agent1_enabled: bool = True
     agent1_timeframes: list[str] = field(default_factory=lambda: ["15m", "1h", "1d"])
     agent1_change_cooldown_seconds: float = 60.0  # 同一信号的最小推送间隔
+    # 各周期触发指标计算所需最小 K 线数（数据不足时不计算，避免无效信号）
+    agent1_min_bars: dict[str, int] = field(
+        default_factory=lambda: {"3m": 5, "5m": 5, "15m": 8, "1h": 10, "1d": 20}
+    )
 
     # ── Agent 2: News Collector ──
     agent2_enabled: bool = True
@@ -48,15 +59,16 @@ class AgentSystemConfig:
     agent2_onchain_enabled: bool = True
     agent2_onchain_interval_seconds: int = 300  # 链上数据抓取间隔（5分钟）
 
-    # Gas 费
+    # Gas 费（Etherscan API，需 ETHERSCAN_API_KEY 环境变量）
     agent2_gas_enabled: bool = True
     agent2_gas_high_threshold_gwei: float = 100.0  # >100 Gwei = 高
     agent2_gas_extreme_threshold_gwei: float = 200.0  # >200 Gwei = 极高
+    agent2_etherscan_api_key: str = ""  # 从 ETHERSCAN_API_KEY 环境变量读取
 
-    # Whale Alert
+    # Whale Alert（需 WHALE_ALERT_API_KEY 环境变量）
     agent2_whale_enabled: bool = True
     agent2_whale_min_value_usdt: float = 1_000_000.0  # $1M 以上视为巨鲸
-    agent2_whale_alert_api_key: str = ""  # whale-alert.io API key（可选）
+    agent2_whale_alert_api_key: str = ""  # 从 WHALE_ALERT_API_KEY 环境变量读取
 
     # 吃单比
     agent2_taker_volume_enabled: bool = True
@@ -76,9 +88,9 @@ class AgentSystemConfig:
     db_path: str = "data/agent_trades.db"
 
     # ── Phase 2: Risk Hardening ──
-    # BTC 波动检查
-    btc_volatility_threshold_pct: float = 3.0
-    btc_volatility_delay_seconds: int = 300
+    # 波动检查（交易品种 15m K 线）
+    volatility_threshold_pct: float = 3.0
+    volatility_delay_seconds: int = 300
 
     # 市场深度
     market_depth_spread_bps: float = 10.0       # 买卖价差阈值（基点）
@@ -91,8 +103,8 @@ class AgentSystemConfig:
 
     # 持仓监控
     position_monitor_interval: float = 5.0       # 持仓检查间隔（秒）
-    trailing_stop_activation_pct: float = 3.0    # 浮盈激活移动止损
-    trailing_stop_distance_pct: float = 1.5      # 移动止损距离
+    trailing_stop_activation_pct: float = 6.0    # 浮盈激活移动止损
+    trailing_stop_distance_pct: float = 3.0      # 移动止损距离
 
     # ── Phase 4: 自学习 + 信号对齐 ──
 
@@ -141,8 +153,8 @@ class AgentSystemConfig:
 
     # ── Agent 3（新增，供 Agent 4 调整）──
     agent3_position_size_multiplier: float = 1.0
-    agent3_default_stop_loss_pct: float = 3.0
-    agent3_default_take_profit_pct: float = 4.0
+    agent3_default_stop_loss_pct: float = 5.0
+    agent3_default_take_profit_pct: float = 10.0
 
     # ── Agent 4 ──
     agent4_enabled: bool = True
@@ -177,3 +189,34 @@ class AgentSystemConfig:
     # ── Logging ──
     log_level: str = "INFO"
     log_file: str = "logs/agent_system.log"
+
+    # ── 从根配置初始化共享字段 ──
+
+    @classmethod
+    def from_root_config(cls, root: "Config") -> "AgentSystemConfig":
+        """从根 Config 创建 AgentSystemConfig，自动填充共享字段。
+
+        使用方式:
+            agent_config = AgentSystemConfig.from_root_config(root_config)
+            agent_config.agent2_etherscan_api_key = os.getenv("ETHERSCAN_API_KEY", "")
+
+        共享字段（与 root Config 重叠，自动同步）：
+        - market_mode      ← root.trading.market
+        - futures_leverage  ← root.futures.leverage
+        - exchange_permissions ← root.exchange.permissions
+        - taker_fee_rate    ← root.trading.taker_fee
+        - maker_fee_rate    ← root.trading.maker_fee
+        """
+        cfg = cls()
+        cfg.market_mode = root.trading.market
+        cfg.futures_leverage = root.futures.leverage
+        cfg.exchange_permissions = root.exchange.permissions
+        # 费率：注意根 Config 用的是 taker_fee / maker_fee 命名
+        cfg.taker_fee_rate = root.trading.taker_fee
+        cfg.maker_fee_rate = root.trading.maker_fee
+        # 止盈止损也跟随策略配置
+        cfg.agent3_default_stop_loss_pct = root.strategy.stop_loss_pct
+        cfg.agent3_default_take_profit_pct = root.strategy.take_profit_pct
+        cfg.trailing_stop_activation_pct = root.strategy.trailing_stop_activation
+        cfg.trailing_stop_distance_pct = root.strategy.trailing_stop_distance
+        return cfg

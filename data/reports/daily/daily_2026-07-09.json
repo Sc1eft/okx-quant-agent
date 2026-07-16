@@ -1,0 +1,109 @@
+{
+  "type": "daily",
+  "date": "2026-07-09",
+  "generated_at": "2026-07-09T16:38:40.094092+00:00",
+  "stats": {
+    "trades": 6,
+    "wins": 1,
+    "losses": 5,
+    "win_rate": 16.7,
+    "total_pnl": -3.48,
+    "total_fee": 0.96,
+    "avg_pnl": -0.58,
+    "best_trade": 0.01,
+    "worst_trade": -1.27,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 4,
+        "win_rate": 25.0,
+        "pnl": -2.36
+      },
+      "sell": {
+        "trades": 2,
+        "win_rate": 0.0,
+        "pnl": -1.12
+      }
+    }
+  },
+  "summary": "共 6 笔交易 | 胜率 16.7% (1胜/5负) | 总盈亏 -3.48 USDT | 手续费 0.96 USDT | 最大回撤 0.00% | 🟢 buy: 4笔 胜率25% 盈亏-2.4 | 🔴 sell: 2笔 胜率0% 盈亏-1.1",
+  "period": {
+    "start": "2026-07-09T00:00:00",
+    "end": "2026-07-09T23:59:59"
+  },
+  "trades": {
+    "wins": [
+      {
+        "trade_id": 453,
+        "pnl": 0.01,
+        "side": "buy",
+        "entry_price": 1755.42,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T08:50:23.513246+00:00"
+      }
+    ],
+    "losses": [
+      {
+        "trade_id": 455,
+        "pnl": -0.48,
+        "side": "sell",
+        "entry_price": 1754.59,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-09T09:04:08.456628+00:00"
+      },
+      {
+        "trade_id": 457,
+        "pnl": -1.0,
+        "side": "buy",
+        "entry_price": 1755.37,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T10:14:16.410248+00:00"
+      },
+      {
+        "trade_id": 459,
+        "pnl": -0.64,
+        "side": "sell",
+        "entry_price": 1752.68,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-09T10:32:35.063374+00:00"
+      },
+      {
+        "trade_id": 460,
+        "pnl": -0.1,
+        "side": "buy",
+        "entry_price": 1752.0,
+        "exit_price": 0,
+        "reason": "空头止盈",
+        "time": "2026-07-09T10:42:52.019158+00:00"
+      },
+      {
+        "trade_id": 462,
+        "pnl": -1.27,
+        "side": "buy",
+        "entry_price": 1742.95,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T16:06:43.632085+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 0,
+      "total_profit": 0,
+      "patterns": []
+    },
+    "losses": {
+      "count": 0,
+      "total_loss": 0,
+      "patterns": []
+    },
+    "summary": "AI 鍒嗘瀽鏆備笉鍙敤"
+  },
+  "pushed": false,
+  "push_time": null
+}

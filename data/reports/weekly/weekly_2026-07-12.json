@@ -1,0 +1,721 @@
+{
+  "type": "weekly",
+  "date": "2026-07-12",
+  "generated_at": "2026-07-12T16:14:24.157887+00:00",
+  "stats": {
+    "trades": 76,
+    "wins": 27,
+    "losses": 47,
+    "win_rate": 35.5,
+    "total_pnl": -35.26,
+    "total_fee": 12.45,
+    "avg_pnl": -0.46,
+    "best_trade": 7.32,
+    "worst_trade": -15.05,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 44,
+        "win_rate": 25.0,
+        "pnl": -31.88
+      },
+      "sell": {
+        "trades": 32,
+        "win_rate": 50.0,
+        "pnl": -3.38
+      }
+    }
+  },
+  "summary": "共 76 笔交易 | 胜率 35.5% (27胜/47负) | 总盈亏 -35.26 USDT | 手续费 12.45 USDT | 最大回撤 0.00% | 🟢 buy: 44笔 胜率25% 盈亏-31.9 | 🔴 sell: 32笔 胜率50% 盈亏-3.4",
+  "period": {
+    "start": "2026-07-05T16:14:24.157137+00:00",
+    "end": "2026-07-12T16:14:24.157887+00:00"
+  },
+  "trades": {
+    "wins": [
+      {
+        "trade_id": 382,
+        "pnl": 0.5,
+        "side": "buy",
+        "entry_price": 1788.4,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '平short反手'}",
+        "time": "2026-07-06T20:15:22.301191+00:00"
+      },
+      {
+        "trade_id": 384,
+        "pnl": 1.34,
+        "side": "sell",
+        "entry_price": 1795.54,
+        "exit_price": 0,
+        "reason": "{'action': 'sell', 'reason': '平long反手'}",
+        "time": "2026-07-06T20:36:19.444179+00:00"
+      },
+      {
+        "trade_id": 405,
+        "pnl": 0.88,
+        "side": "sell",
+        "entry_price": 1805.71,
+        "exit_price": 0,
+        "reason": "多头止盈",
+        "time": "2026-07-07T16:44:19.402835+00:00"
+      },
+      {
+        "trade_id": 408,
+        "pnl": 0.08,
+        "side": "sell",
+        "entry_price": 1806.29,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-07T17:30:27.602735+00:00"
+      },
+      {
+        "trade_id": 415,
+        "pnl": 1.32,
+        "side": "buy",
+        "entry_price": 1786.69,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-07T19:04:27.911819+00:00"
+      },
+      {
+        "trade_id": 422,
+        "pnl": 4.12,
+        "side": "buy",
+        "entry_price": 1738.98,
+        "exit_price": 0,
+        "reason": "空头止盈",
+        "time": "2026-07-08T08:18:11.882821+00:00"
+      },
+      {
+        "trade_id": 433,
+        "pnl": 0.86,
+        "side": "sell",
+        "entry_price": 1740.74,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-08T17:26:50.175392+00:00"
+      },
+      {
+        "trade_id": 435,
+        "pnl": 0.46,
+        "side": "sell",
+        "entry_price": 1743.25,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-08T17:32:31.523439+00:00"
+      },
+      {
+        "trade_id": 436,
+        "pnl": 0.51,
+        "side": "buy",
+        "entry_price": 1739.75,
+        "exit_price": 0,
+        "reason": "空头止盈",
+        "time": "2026-07-08T17:45:23.198777+00:00"
+      },
+      {
+        "trade_id": 438,
+        "pnl": 0.62,
+        "side": "buy",
+        "entry_price": 1735.81,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-08T18:03:45.815065+00:00"
+      },
+      {
+        "trade_id": 442,
+        "pnl": 0.12,
+        "side": "sell",
+        "entry_price": 1737.5,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-08T19:26:43.459044+00:00"
+      },
+      {
+        "trade_id": 444,
+        "pnl": 0.12,
+        "side": "sell",
+        "entry_price": 1738.22,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-08T19:31:55.034917+00:00"
+      },
+      {
+        "trade_id": 453,
+        "pnl": 0.01,
+        "side": "buy",
+        "entry_price": 1755.42,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T08:50:23.513246+00:00"
+      },
+      {
+        "trade_id": 467,
+        "pnl": 0.39,
+        "side": "sell",
+        "entry_price": 1742.7,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-09T17:24:25.840846+00:00"
+      },
+      {
+        "trade_id": 469,
+        "pnl": 1.46,
+        "side": "sell",
+        "entry_price": 1748.85,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-09T17:49:35.416557+00:00"
+      },
+      {
+        "trade_id": 475,
+        "pnl": 0.43,
+        "side": "sell",
+        "entry_price": 1752.62,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-09T18:33:17.885190+00:00"
+      },
+      {
+        "trade_id": 479,
+        "pnl": 0.06,
+        "side": "buy",
+        "entry_price": 1750.17,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T19:15:33.699985+00:00"
+      },
+      {
+        "trade_id": 484,
+        "pnl": 0.46,
+        "side": "sell",
+        "entry_price": 1796.97,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-10T11:00:36.609571+00:00"
+      },
+      {
+        "trade_id": 497,
+        "pnl": 0.83,
+        "side": "sell",
+        "entry_price": 1793.61,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-10T17:30:22.624086+00:00"
+      },
+      {
+        "trade_id": 499,
+        "pnl": 0.42,
+        "side": "buy",
+        "entry_price": 1789.32,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-10T18:15:24.978239+00:00"
+      },
+      {
+        "trade_id": 515,
+        "pnl": 2.69,
+        "side": "sell",
+        "entry_price": 1818.99,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-11T16:25:58.894587+00:00"
+      },
+      {
+        "trade_id": 517,
+        "pnl": 0.17,
+        "side": "buy",
+        "entry_price": 1816.64,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T16:49:32.339395+00:00"
+      },
+      {
+        "trade_id": 519,
+        "pnl": 0.52,
+        "side": "sell",
+        "entry_price": 1820.85,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-11T17:04:27.803519+00:00"
+      },
+      {
+        "trade_id": 523,
+        "pnl": 1.96,
+        "side": "sell",
+        "entry_price": 1826.75,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-11T17:35:30.652533+00:00"
+      },
+      {
+        "trade_id": 529,
+        "pnl": 7.32,
+        "side": "sell",
+        "entry_price": 1826.55,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-11T18:35:25.410996+00:00"
+      },
+      {
+        "trade_id": 537,
+        "pnl": 0.36,
+        "side": "buy",
+        "entry_price": 1823.36,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T19:52:24.957042+00:00"
+      },
+      {
+        "trade_id": 539,
+        "pnl": 0.01,
+        "side": "buy",
+        "entry_price": 1820.76,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-12T16:00:28.492386+00:00"
+      }
+    ],
+    "losses": [
+      {
+        "trade_id": 371,
+        "pnl": -3.15,
+        "side": "buy",
+        "entry_price": 1795.42,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '空头止损'}",
+        "time": "2026-07-06T17:18:16.790287+00:00"
+      },
+      {
+        "trade_id": 385,
+        "pnl": -0.14,
+        "side": "buy",
+        "entry_price": 1794.87,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '空头止损'}",
+        "time": "2026-07-06T20:36:22.165200+00:00"
+      },
+      {
+        "trade_id": 388,
+        "pnl": -2.15,
+        "side": "buy",
+        "entry_price": 1805.62,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '空头止损'}",
+        "time": "2026-07-06T21:09:06.520701+00:00"
+      },
+      {
+        "trade_id": 391,
+        "pnl": -0.19,
+        "side": "buy",
+        "entry_price": 1814.59,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '平short反手'}",
+        "time": "2026-07-06T21:40:52.537533+00:00"
+      },
+      {
+        "trade_id": 392,
+        "pnl": -10.64,
+        "side": "sell",
+        "entry_price": 1773.84,
+        "exit_price": 0,
+        "reason": "{'action': 'sell', 'reason': '多头止损'}",
+        "time": "2026-07-07T09:31:27.878860+00:00"
+      },
+      {
+        "trade_id": 396,
+        "pnl": -0.32,
+        "side": "buy",
+        "entry_price": 1774.64,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '平short反手'}",
+        "time": "2026-07-07T14:03:28.255931+00:00"
+      },
+      {
+        "trade_id": 398,
+        "pnl": -0.18,
+        "side": "sell",
+        "entry_price": 1770.91,
+        "exit_price": 0,
+        "reason": "{'action': 'sell', 'reason': '平long反手'}",
+        "time": "2026-07-07T14:09:28.099413+00:00"
+      },
+      {
+        "trade_id": 399,
+        "pnl": -0.8,
+        "side": "buy",
+        "entry_price": 1772.33,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '空头止损'}",
+        "time": "2026-07-07T14:09:29.677667+00:00"
+      },
+      {
+        "trade_id": 401,
+        "pnl": -0.26,
+        "side": "buy",
+        "entry_price": 1775.17,
+        "exit_price": 0,
+        "reason": "{'action': 'buy', 'reason': '空头止损'}",
+        "time": "2026-07-07T14:46:16.513510+00:00"
+      },
+      {
+        "trade_id": 411,
+        "pnl": -0.22,
+        "side": "buy",
+        "entry_price": 1805.36,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-07T18:06:20.332479+00:00"
+      },
+      {
+        "trade_id": 413,
+        "pnl": -1.93,
+        "side": "sell",
+        "entry_price": 1794.63,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-07T18:52:08.861515+00:00"
+      },
+      {
+        "trade_id": 417,
+        "pnl": -0.4,
+        "side": "sell",
+        "entry_price": 1782.52,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-07T20:50:21.067104+00:00"
+      },
+      {
+        "trade_id": 419,
+        "pnl": -1.09,
+        "side": "buy",
+        "entry_price": 1787.73,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-07T21:06:31.354157+00:00"
+      },
+      {
+        "trade_id": 420,
+        "pnl": -0.99,
+        "side": "sell",
+        "entry_price": 1778.68,
+        "exit_price": 0,
+        "reason": "多头止损",
+        "time": "2026-07-07T21:17:12.462195+00:00"
+      },
+      {
+        "trade_id": 424,
+        "pnl": -0.98,
+        "side": "buy",
+        "entry_price": 1750.14,
+        "exit_price": 0,
+        "reason": "空头止损",
+        "time": "2026-07-08T11:47:46.697221+00:00"
+      },
+      {
+        "trade_id": 427,
+        "pnl": -0.6,
+        "side": "buy",
+        "entry_price": 1730.66,
+        "exit_price": 0,
+        "reason": "空头止损",
+        "time": "2026-07-08T16:22:06.878811+00:00"
+      },
+      {
+        "trade_id": 430,
+        "pnl": -0.68,
+        "side": "buy",
+        "entry_price": 1735.84,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-08T17:02:17.812610+00:00"
+      },
+      {
+        "trade_id": 446,
+        "pnl": -0.76,
+        "side": "buy",
+        "entry_price": 1737.82,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-08T19:57:58.392705+00:00"
+      },
+      {
+        "trade_id": 448,
+        "pnl": -0.78,
+        "side": "sell",
+        "entry_price": 1737.0,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-08T20:12:22.837099+00:00"
+      },
+      {
+        "trade_id": 450,
+        "pnl": -0.68,
+        "side": "buy",
+        "entry_price": 1737.54,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-08T20:36:22.637711+00:00"
+      },
+      {
+        "trade_id": 455,
+        "pnl": -0.48,
+        "side": "sell",
+        "entry_price": 1754.59,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-09T09:04:08.456628+00:00"
+      },
+      {
+        "trade_id": 457,
+        "pnl": -1.0,
+        "side": "buy",
+        "entry_price": 1755.37,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T10:14:16.410248+00:00"
+      },
+      {
+        "trade_id": 459,
+        "pnl": -0.64,
+        "side": "sell",
+        "entry_price": 1752.68,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-09T10:32:35.063374+00:00"
+      },
+      {
+        "trade_id": 460,
+        "pnl": -0.1,
+        "side": "buy",
+        "entry_price": 1752.0,
+        "exit_price": 0,
+        "reason": "空头止盈",
+        "time": "2026-07-09T10:42:52.019158+00:00"
+      },
+      {
+        "trade_id": 462,
+        "pnl": -1.27,
+        "side": "buy",
+        "entry_price": 1742.95,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T16:06:43.632085+00:00"
+      },
+      {
+        "trade_id": 465,
+        "pnl": -0.08,
+        "side": "buy",
+        "entry_price": 1738.68,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T16:45:15.533734+00:00"
+      },
+      {
+        "trade_id": 471,
+        "pnl": -0.63,
+        "side": "buy",
+        "entry_price": 1748.53,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T18:00:49.088397+00:00"
+      },
+      {
+        "trade_id": 473,
+        "pnl": -2.45,
+        "side": "buy",
+        "entry_price": 1756.44,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-09T18:19:41.341731+00:00"
+      },
+      {
+        "trade_id": 477,
+        "pnl": -0.98,
+        "side": "sell",
+        "entry_price": 1752.71,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-09T18:54:08.440229+00:00"
+      },
+      {
+        "trade_id": 482,
+        "pnl": -0.56,
+        "side": "buy",
+        "entry_price": 1792.68,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-10T10:01:14.885886+00:00"
+      },
+      {
+        "trade_id": 486,
+        "pnl": -1.7,
+        "side": "buy",
+        "entry_price": 1799.87,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-10T11:15:17.750432+00:00"
+      },
+      {
+        "trade_id": 488,
+        "pnl": -2.31,
+        "side": "sell",
+        "entry_price": 1795.5,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-10T11:42:30.158636+00:00"
+      },
+      {
+        "trade_id": 489,
+        "pnl": -15.05,
+        "side": "buy",
+        "entry_price": 1806.07,
+        "exit_price": 0,
+        "reason": "空头止损",
+        "time": "2026-07-10T12:13:47.897293+00:00"
+      },
+      {
+        "trade_id": 491,
+        "pnl": -1.52,
+        "side": "buy",
+        "entry_price": 1804.74,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-10T12:16:28.010214+00:00"
+      },
+      {
+        "trade_id": 493,
+        "pnl": -1.58,
+        "side": "sell",
+        "entry_price": 1788.68,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-10T16:03:16.363505+00:00"
+      },
+      {
+        "trade_id": 502,
+        "pnl": -0.44,
+        "side": "buy",
+        "entry_price": 1801.26,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T07:29:20.413617+00:00"
+      },
+      {
+        "trade_id": 505,
+        "pnl": -0.23,
+        "side": "sell",
+        "entry_price": 1800.83,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-11T07:40:16.213807+00:00"
+      },
+      {
+        "trade_id": 507,
+        "pnl": -0.67,
+        "side": "buy",
+        "entry_price": 1801.58,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T08:15:17.628954+00:00"
+      },
+      {
+        "trade_id": 509,
+        "pnl": -0.07,
+        "side": "buy",
+        "entry_price": 1799.48,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T09:17:58.206887+00:00"
+      },
+      {
+        "trade_id": 511,
+        "pnl": -0.73,
+        "side": "sell",
+        "entry_price": 1799.12,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-11T11:15:17.315652+00:00"
+      },
+      {
+        "trade_id": 513,
+        "pnl": -1.7,
+        "side": "buy",
+        "entry_price": 1802.41,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T16:03:26.240655+00:00"
+      },
+      {
+        "trade_id": 521,
+        "pnl": -0.13,
+        "side": "buy",
+        "entry_price": 1819.4,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T17:24:27.212417+00:00"
+      },
+      {
+        "trade_id": 524,
+        "pnl": -0.15,
+        "side": "buy",
+        "entry_price": 1826.78,
+        "exit_price": 0,
+        "reason": "空头止损",
+        "time": "2026-07-11T17:35:34.225061+00:00"
+      },
+      {
+        "trade_id": 527,
+        "pnl": -0.23,
+        "side": "buy",
+        "entry_price": 1825.4,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T18:06:58.316649+00:00"
+      },
+      {
+        "trade_id": 533,
+        "pnl": -0.21,
+        "side": "buy",
+        "entry_price": 1826.18,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-11T18:57:45.110709+00:00"
+      },
+      {
+        "trade_id": 535,
+        "pnl": -0.7,
+        "side": "sell",
+        "entry_price": 1822.7,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-11T19:48:49.809290+00:00"
+      },
+      {
+        "trade_id": 541,
+        "pnl": -0.73,
+        "side": "sell",
+        "entry_price": 1820.89,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-12T16:02:19.946583+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 0,
+      "total_profit": 0,
+      "patterns": []
+    },
+    "losses": {
+      "count": 0,
+      "total_loss": 0,
+      "patterns": []
+    },
+    "summary": "AI 鍒嗘瀽鏆備笉鍙敤"
+  },
+  "pushed": false,
+  "push_time": null
+}

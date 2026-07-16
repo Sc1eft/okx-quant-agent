@@ -18,17 +18,19 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TypedDict
 
 from agents.event_bus import EventBus, AgentEvent, AgentEventType
 from agents.deepseek_caller import DeepSeekTrader
 from agents.risk_layer import RiskManager
 from agents.trade_executor import TradeExecutor
 from agents.config import AgentSystemConfig
+from agents.rule_engine.base import Ctx
 # Phase 4
 from agents.confidence_scorer import ConfidenceScorer
 from agents.signal_aligner import SignalAligner
@@ -46,6 +48,48 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+# ── DeepSeek 上下文 TypedDict（_build_context 返回结构） ──
+
+class TradingContext(TypedDict):
+    """Agent 3 构建的 DeepSeek 交易决策上下文
+
+    包含持仓信息、技术面摘要、新闻/链上数据、风控状态、
+    多周期指标表格、历史交易记录等字段。注入 DeepSeek prompt。
+    """
+    symbol: str
+    position_direction: str
+    position_size: float
+    entry_price: float
+    pnl_pct: str
+    market_mode: str
+    leverage: int
+    liquidation_price: float
+    margin_rate: float
+    agent1_summary: str
+    agent2_summary: str
+    gas_gwei: float
+    taker_buy_ratio: str
+    funding_rate_pct: float
+    whale_alert: str
+    monthly_trades: int
+    win_rate: float
+    monthly_pnl: float
+    max_drawdown: float
+    current_price: float
+    risk_status: dict
+    composite_score: str | float
+    composite_confidence: str | float
+    signal_alignment: str
+    agent1_indicators_table: str
+    market_state_summary: str
+    agent4_advisory: str
+    recent_trades_summary: str
+    adjusted_max_trades: str
+    adjusted_debounce: str
+    adjusted_trade_interval: str
+    max_position_eth: float
+
+
 class Agent3:
     """Agent 3 — 交易决策与执行"""
 
@@ -59,6 +103,7 @@ class Agent3:
         root_config,
         position_monitor=None,  # Phase 2: 持仓监控器
         okx_client=None,       # Phase 2: OKX客户端（用于BTC/深度检查）
+        rule_engine=None,      # Phase 2: 可插拔规则引擎（替代 RiskManager 硬编码检查）
         agent1=None,           # Agent 1 引用，用于读取多周期指标 + 市场状态
         review_generator=None,  # Phase 4: 复盘报告生成器
         agent4_reviewer=None,  # Agent 4 复盘改进（替代 param_adapter）
@@ -72,6 +117,7 @@ class Agent3:
         self.root_config = root_config
         self.position_monitor = position_monitor
         self.okx_client = okx_client
+        self.rule_engine = rule_engine
         self._btc_checked = False
 
         # Phase 4
@@ -95,6 +141,9 @@ class Agent3:
         self._last_idle_decision_time: float = 0.0  # 上次强制空闲决策时间
         self._last_idle_decision_price: float = 0.0  # 上次空闲决策时的价格（Step 7 价格门控）
         self._decision_lock = asyncio.Lock()  # re-entrancy guard
+
+        # 每日交易上限暂停标记
+        self._paused_for_daily_limit: bool = False
 
         # 最新价格缓存（跨 _build_context 调用持久化，防止事件缓冲区无价格时显示 $0）
         self._current_price: float = 0.0
@@ -290,12 +339,32 @@ class Agent3:
 
     async def _make_decision(self):
         """执行一次完整的交易决策周期"""
-        if self._decision_lock.locked():
-            self._current_activity = "⏳ 上次决策进行中，跳过"
-            return
         # Step 7: 记录当前价格（供空闲决策价格门控使用）
         if self._current_price > 0:
             self._last_idle_decision_price = self._current_price
+
+        # ── 每日交易上限暂停（睡到北京时间午夜，风控自动重置） ──
+        if self.risk.is_daily_limit_reached():
+            if not self._paused_for_daily_limit:
+                self._paused_for_daily_limit = True
+                self._event_buffer.clear()
+                now_utc = datetime.now(timezone.utc)
+                cst_now = now_utc + timedelta(hours=8)
+                next_midnight = cst_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                sleep_sec = (next_midnight - cst_now).total_seconds()
+                logger.warning(
+                    f"🌙 今日交易已达上限 ({self.risk._daily_trade_count}/{self.config.agent3_max_daily_trades})，"
+                    f"暂停至 CST 午夜 ({sleep_sec:.0f}s)"
+                )
+                self._current_activity = f"🌙 交易达上限，暂停 {sleep_sec:.0f}s 至午夜"
+                self._last_activity_time = time.time()
+                await asyncio.sleep(sleep_sec)
+                self._paused_for_daily_limit = False
+                self._current_activity = "🌅 新日重置，恢复交易"
+                self._last_activity_time = time.time()
+                logger.info("🌅 每日上限暂停结束，恢复交易")
+            return
+
         async with self._decision_lock:
             if not self._event_buffer:
                 return
@@ -304,26 +373,49 @@ class Agent3:
             events = list(self._event_buffer)
             self._event_buffer.clear()
 
-            # ── 0. BTC 波动检查（Phase 2） ──
-            if self.okx_client and hasattr(self.risk, 'check_btc_volatility_async'):
-                self._current_activity = "🔍 检查 BTC 波动…"
-                self._last_activity_time = time.time()
-                ok, reason = await self.risk.check_btc_volatility_async(self.okx_client)
-                if not ok:
-                    self._current_activity = f"⏭ BTC 波动检查跳过: {reason[:40]}"
+            # ── 0. Pre-trade 风控检查（RuleEngine 统一调度） ──
+            if self.rule_engine:
+                rule_context = self._build_rule_engine_context()
+                pre_results = await self.rule_engine.check_pre_trade(rule_context)
+
+                # 波动检查状态同步回 RiskManager（无论规则是否阻断都需更新）
+                vol_result = next(
+                    (r for r in pre_results if r.rule_name == "volatility_check"), None
+                )
+                if vol_result and not vol_result.passed:
+                    delay = vol_result.data.get("delay_seconds", 300)
+                    self.risk._volatility_delay_until = datetime.now(timezone.utc) + timedelta(seconds=delay)
+                elif vol_result and vol_result.passed:
+                    self.risk._volatility_delay_until = None
+
+                if not self.rule_engine.all_pass(pre_results):
+                    blocker = self.rule_engine.blocked_by(pre_results) or "unknown"
+                    reason = next((r.reason for r in pre_results if not r.passed), "风控拒绝")
+                    self._current_activity = f"⏭ 风控拒绝 ({blocker}): {reason[:40]}"
                     self._last_activity_time = time.time()
-                    logger.info(f"BTC 波动检查拒绝: {reason}")
+                    logger.info(f"Pre-trade 规则拒绝: [{blocker}] {reason}")
                     self._stats["trades_skipped"] += 1
                     return
+            else:
+                # ── 旧版回退（RuleEngine 未配置时） ──
+                if self.okx_client and hasattr(self.risk, 'check_volatility_async'):
+                    self._current_activity = "🔍 检查波动…"
+                    self._last_activity_time = time.time()
+                    ok, reason = await self.risk.check_volatility_async(self.okx_client, symbol=self.executor.symbol)
+                    if not ok:
+                        self._current_activity = f"⏭ 波动检查跳过: {reason[:40]}"
+                        self._last_activity_time = time.time()
+                        logger.info(f"波动检查拒绝: {reason}")
+                        self._stats["trades_skipped"] += 1
+                        return
 
-            # ── 0b. 快速风控预检（方向无关，在 DeepSeek 前拦截，节省 API 费用） ──
-            ok, reason = self.risk.check_layer1_pre()
-            if not ok:
-                self._current_activity = f"⏭ 风控预检跳过: {reason[:40]}"
-                self._last_activity_time = time.time()
-                logger.info(f"风控预检拒绝: {reason}")
-                self._stats["trades_skipped"] += 1
-                return
+                ok, reason = self.risk.check_layer1_pre()
+                if not ok:
+                    self._current_activity = f"⏭ 风控预检跳过: {reason[:40]}"
+                    self._last_activity_time = time.time()
+                    logger.info(f"风控预检拒绝: {reason}")
+                    self._stats["trades_skipped"] += 1
+                    return
 
             # ── 1. 构建上下文摘要（不含方向） ──
             self._current_activity = "🧠 构建 DeepSeek 上下文 ({len(events)} 事件)"
@@ -350,18 +442,21 @@ class Agent3:
             self._current_activity = f"📐 决策: {decision['action']} {size_eth:.4f} ETH (信心 {decision['confidence']}%)"
             self._last_activity_time = time.time()
 
-            # ── 3a. 方向持久性检查：反转需要更高信心 ──
+            # ── 3a. 方向持久性检查：反转/同方向加仓 ──
+            is_add = False
             if self.position_monitor:
                 pm_status = self.position_monitor.get_status()
                 current_side = pm_status.get("position_side", "none")
+                current_size = pm_status.get("position_size", 0.0)
                 if current_side != "none" and current_side != "none":
-                    # 当前持仓方向
                     pos_is_long = current_side == "long"
                     decision_is_long = trade_side == "buy"
                     is_reversal = pos_is_long != decision_is_long
+
                     if is_reversal:
+                        # ── 反转：需要更高信心 ──
                         reversal_confidence = decision.get("confidence", 0)
-                        min_reversal_conf = 70  # 反转需要至少 70% 信心
+                        min_reversal_conf = 70
                         if reversal_confidence < min_reversal_conf:
                             logger.info(
                                 f"方向持久性: 反转 {current_side}→{trade_side} 信心 {reversal_confidence}% "
@@ -374,34 +469,94 @@ class Agent3:
                             self._last_activity_time = time.time()
                             self._stats["trades_skipped"] += 1
                             return
+                    else:
+                        # ── 同方向：主动补仓 ──
+                        if not self._should_add_to_position(decision, current_size):
+                            logger.info(
+                                f"补仓被跳过: {current_side} + {trade_side} "
+                                f"(confidence={decision.get('confidence', 0)}%, "
+                                f"当前持仓={current_size:.4f} ETH)"
+                            )
+                            self._current_activity = (
+                                f"⏭ 补仓跳过: 信心/仓位条件不满足"
+                            )
+                            self._last_activity_time = time.time()
+                            self._stats["trades_skipped"] += 1
+                            return
 
-            # ── 3b. 市场深度检查（Phase 2） ──
-            prefer_limit = True
-            if self.okx_client and hasattr(self.risk, 'check_market_depth_async'):
-                self._current_activity = "🔍 检查市场深度…"
+                        add_size = self._suggested_add_size(current_size, context, decision)
+                        if add_size < 0.01:
+                            logger.info(
+                                f"补仓量 {add_size:.4f} < 0.01，跳过"
+                            )
+                            self._current_activity = f"⏭ 补仓量过小 ({add_size:.4f})"
+                            self._last_activity_time = time.time()
+                            self._stats["trades_skipped"] += 1
+                            return
+
+                        size_eth = add_size  # 使用追加量，不是全量
+                        is_add = True
+                        self._current_activity = (
+                            f"📐 补仓: {decision['action']} +{add_size:.4f} ETH "
+                            f"(信心 {decision['confidence']}%)"
+                        )
+                        self._last_activity_time = time.time()
+
+            # ── 3b. Execution 风控检查（RuleEngine 统一调度，含深度/滑点/方向冲突） ──
+            if self.rule_engine:
+                exec_context = self._build_rule_engine_context({
+                    Ctx.SIDE: trade_side,
+                    Ctx.SIZE: size_eth,
+                    Ctx.PRICE: context.get("current_price", 0),
+                    "signal_price": context.get("current_price", 0),
+                    "entry_price_min": 0,
+                    "entry_price_max": 0,
+                })
+                self._current_activity = "🛡️ 执行风控检查…"
                 self._last_activity_time = time.time()
-                ok, reason, prefer_limit = await self.risk.check_market_depth_async(
-                    self.okx_client, trade_side, size_eth
+                exec_results = await self.rule_engine.check_execution(exec_context)
+
+                # 提取 market_depth 结果的 prefer_limit 设置
+                depth_result = next(
+                    (r for r in exec_results if r.rule_name == "market_depth"), None
                 )
-                if not ok:
-                    self._current_activity = f"⏭ 深度检查跳过: {reason[:40]}"
+                prefer_limit = depth_result.data.get("prefer_limit", True) if depth_result else True
+
+                if not self.rule_engine.all_pass(exec_results):
+                    blocker = self.rule_engine.blocked_by(exec_results) or "unknown"
+                    reason = next((r.reason for r in exec_results if not r.passed), "执行检查拒绝")
+                    self._current_activity = f"⏭ 执行拒绝 ({blocker}): {reason[:40]}"
                     self._last_activity_time = time.time()
-                    logger.info(f"市场深度拒绝: {reason}")
+                    logger.info(f"Execution 规则拒绝: [{blocker}] {reason}")
                     self._stats["trades_skipped"] += 1
                     return
-                if prefer_limit:
-                    logger.info(f"市场深度检查: {reason}")
+            else:
+                # ── 旧版回退（RuleEngine 未配置时） ──
+                prefer_limit = True
+                if self.okx_client and hasattr(self.risk, 'check_market_depth_async'):
+                    self._current_activity = "🔍 检查市场深度…"
+                    self._last_activity_time = time.time()
+                    ok, reason, prefer_limit = await self.risk.check_market_depth_async(
+                        self.okx_client, trade_side, size_eth
+                    )
+                    if not ok:
+                        self._current_activity = f"⏭ 深度检查跳过: {reason[:40]}"
+                        self._last_activity_time = time.time()
+                        logger.info(f"市场深度拒绝: {reason}")
+                        self._stats["trades_skipped"] += 1
+                        return
+                    if prefer_limit:
+                        logger.info(f"市场深度检查: {reason}")
 
-            # ── 4. Layer 1 风控检查（使用真实交易方向） ──
-            self._current_activity = "🛡️ 风控检查中…"
-            self._last_activity_time = time.time()
-            ok, reason = self.risk.check_layer1(trade_side, size_eth, context.get("current_price", 0))
-            if not ok:
-                self._current_activity = f"⏭ 风控拒绝: {reason[:40]}"
+                self._current_activity = "🛡️ 风控检查中…"
                 self._last_activity_time = time.time()
-                logger.info(f"Layer 1 拒绝: {reason}")
-                self._stats["trades_skipped"] += 1
-                return
+                ok, reason = self.risk.check_layer1(trade_side, size_eth, context.get("current_price", 0))
+                if not ok:
+                    self._current_activity = f"⏭ 风控拒绝: {reason[:40]}"
+                    self._last_activity_time = time.time()
+                    logger.info(f"Layer 1 拒绝: {reason}")
+                    self._stats["trades_skipped"] += 1
+                    return
 
             # ── 5. 执行交易 ──
             self._current_activity = f"💱 执行 {trade_side} {size_eth:.4f} ETH…"
@@ -425,7 +580,9 @@ class Agent3:
                     "price": trade_result["fill_price"],
                     "pnl": 0,
                     "pnl_close": 0,
-                    "fee": round(size_eth * trade_result["fill_price"] * self.config.taker_fee_rate, 2),
+                    "fee": round(size_eth * trade_result["fill_price"] * (
+                        self.config.maker_fee_rate if prefer_limit else self.config.taker_fee_rate
+                    ), 2),
                     "trade_group_id": trade_group_id,
                     "trade_type": "open",
                     "order_id": trade_result["order_id"],
@@ -464,6 +621,8 @@ class Agent3:
                         stop_loss=stop_loss,
                         take_profit=take_profit,
                         trade_group_id=trade_group_id,
+                        opened_with_limit=prefer_limit,
+                        accumulate=is_add,
                     )
                 # 通知 Agent 4 复盘（如果配置了）
                 if self.agent4_reviewer:
@@ -485,18 +644,36 @@ class Agent3:
                     }
                     asyncio.create_task(self.agent4_reviewer.notify_trade(trade_record))
                 # 更新当前持仓（供前端和上下文使用）
-                self._current_position["side"] = "long" if trade_side == "buy" else "short"
-                self._current_position["size"] = size_eth
-                self._current_position["entry_price"] = trade_result["fill_price"]
-                self._current_position["current_price"] = context.get("current_price", trade_result["fill_price"])
-                # 合约模式：额外记录保证金/强平价等
-                if trade_result.get("market_mode") == "futures":
-                    self._current_position["market_mode"] = "futures"
-                    self._current_position["leverage"] = trade_result.get("leverage", 0)
-                    self._current_position["margin"] = trade_result.get("margin", 0)
-                    self._current_position["liquidation_price"] = trade_result.get("liquidation_price", 0)
-                    self._current_position["position_value"] = trade_result.get("position_value", 0)
-                    self._current_position["margin_rate"] = trade_result.get("margin_rate", 0)
+                if is_add:
+                    old_size = self._current_position["size"]
+                    old_entry = self._current_position["entry_price"]
+                    new_size = old_size + size_eth
+                    new_entry = (old_size * old_entry + size_eth * trade_result["fill_price"]) / new_size if new_size > 0 else trade_result["fill_price"]
+                    self._current_position["size"] = new_size
+                    self._current_position["entry_price"] = new_entry
+                    self._current_position["current_price"] = context.get("current_price", trade_result["fill_price"])
+                    # 合约字段累加
+                    if trade_result.get("market_mode") == "futures":
+                        self._current_position["market_mode"] = "futures"
+                        self._current_position["leverage"] = trade_result.get("leverage", self._current_position.get("leverage", 0))
+                        self._current_position["margin"] = self._current_position.get("margin", 0) + trade_result.get("margin", 0)
+                        self._current_position["position_value"] = self._current_position.get("position_value", 0) + trade_result.get("position_value", 0)
+                        if trade_result.get("liquidation_price"):
+                            self._current_position["liquidation_price"] = trade_result["liquidation_price"]
+                        self._current_position["margin_rate"] = trade_result.get("margin_rate", self._current_position.get("margin_rate", 0))
+                else:
+                    self._current_position["side"] = "long" if trade_side == "buy" else "short"
+                    self._current_position["size"] = size_eth
+                    self._current_position["entry_price"] = trade_result["fill_price"]
+                    self._current_position["current_price"] = context.get("current_price", trade_result["fill_price"])
+                    # 合约模式：额外记录保证金/强平价等
+                    if trade_result.get("market_mode") == "futures":
+                        self._current_position["market_mode"] = "futures"
+                        self._current_position["leverage"] = trade_result.get("leverage", 0)
+                        self._current_position["margin"] = trade_result.get("margin", 0)
+                        self._current_position["liquidation_price"] = trade_result.get("liquidation_price", 0)
+                        self._current_position["position_value"] = trade_result.get("position_value", 0)
+                        self._current_position["margin_rate"] = trade_result.get("margin_rate", 0)
                 self._current_activity = f"✅ {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}"
                 self._last_activity_time = time.time()
             else:
@@ -505,8 +682,8 @@ class Agent3:
                 self._last_activity_time = time.time()
                 logger.error(f"交易失败: {trade_result['error']}")
 
-    def _build_context(self, events: list[AgentEvent]) -> dict:
-        """从事件列表构建 DeepSeek 上下文"""
+    def _build_context(self, events: list[AgentEvent]) -> TradingContext:
+        """从事件列表构建 DeepSeek 上下文（返回类型为 TradingContext TypedDict）"""
         agent1_lines = []
         agent2_lines = []
         # 从缓存开始（如果没有事件提供价格，沿用上次已知价格）
@@ -601,18 +778,10 @@ class Agent3:
             "composite_score": round(composite.get("composite_score", 0), 2) if composite else "—",
             "composite_confidence": round(composite.get("composite_confidence", 0), 2) if composite else "—",
             "signal_alignment": alignment.get("summary_line", "暂无对齐数据"),
-            # ── 多周期指标表格（Agent 1 数据） ──
-            "agent1_indicators_table": (
-                self.agent1.get_indicators_table()
-                if self.agent1 and hasattr(self.agent1, 'get_indicators_table')
-                else "Agent 1 指标数据未就绪"
-            ),
+            # ── 多周期指标表格（直接引用 Agent 1） ──
+            "agent1_indicators_table": self.agent1.get_indicators_table() if self.agent1 else "Agent 1 未启用",
             # ── 市场状态分类 ──
-            "market_state_summary": (
-                self.agent1.get_market_state().get("summary_line", "市场状态数据未就绪")
-                if self.agent1 and hasattr(self.agent1, 'get_market_state')
-                else "市场状态数据未就绪"
-            ),
+            "market_state_summary": self.agent1.get_market_state().get("summary_line", "数据未就绪") if self.agent1 else "市场状态数据未就绪",
             # ── Step 3: Agent 4 交易建议 ──
             "agent4_advisory": (
                 self.agent4_reviewer.get_advisory()
@@ -626,6 +795,52 @@ class Agent3:
             "adjusted_trade_interval": str(self.config.agent3_min_interval_between_trades),
             "max_position_eth": self.config.agent3_max_position_eth,
         }
+
+    def _build_rule_engine_context(self, extra: dict = None) -> dict:
+        """从 RiskManager 状态构建 RuleEngine 上下文 dict
+
+        将 RiskManager 的内部状态映射到 Ctx 常量键名，
+        使 RuleEngine 的规则可以独立访问所有风控数据。
+
+        Args:
+            extra: 附加键值对（如 SIDE, SIZE, PRICE），在执行阶段传入
+
+        Returns:
+            RuleEngine context dict
+        """
+        now = datetime.now(timezone.utc)
+        ctx = {
+            Ctx.TIME: now,
+            Ctx.SYMBOL: self.executor.symbol,
+            Ctx.DAILY_TRADE_COUNT: self.risk._daily_trade_count,
+            Ctx.DAILY_LOSS_USDT: self.risk._daily_loss_usdt,
+            Ctx.MAX_DAILY_LOSS_USDT: self.config.agent3_max_daily_loss_usdt,
+            Ctx.CONSECUTIVE_LOSSES: self.risk._consecutive_losses,
+            Ctx.LAST_TRADE_TIME: self.risk._last_trade_time,
+            Ctx.API_BREAKER_UNTIL: self.risk._api_breaker_until,
+            Ctx.POSITION_SIDE: self.risk._current_position_side,
+            Ctx.POSITION_SIZE: self.risk._current_position_eth,
+            Ctx.MAX_POSITION_ETH: self.config.agent3_max_position_eth,
+            Ctx.MAX_DAILY_TRADES: self.config.agent3_max_daily_trades,
+            Ctx.MAX_CONSECUTIVE_LOSSES: self.config.agent3_max_consecutive_losses,
+            Ctx.MIN_TRADE_INTERVAL: self.config.agent3_min_interval_between_trades,
+            Ctx.MAX_TRADES_PER_HOUR: self.config.max_trades_per_hour,
+            # OKX 客户端（波动检查、市场深度规则需要）
+            "okx_client": self.okx_client,
+            # SQLite 连接（HFT 防护规则需要）
+            "db_conn": getattr(self.risk, '_db_conn', None),
+            # 波动延迟状态
+            "volatility_delay_until": getattr(self.risk, '_volatility_delay_until', None),
+            "volatility_threshold_pct": self.config.volatility_threshold_pct,
+            "volatility_delay_seconds": self.config.volatility_delay_seconds,
+            # 市场深度配置
+            "market_depth_spread_bps": self.config.market_depth_spread_bps,
+            # 滑点保护配置
+            "max_slippage_pct": self.config.max_slippage_pct,
+        }
+        if extra:
+            ctx.update(extra)
+        return ctx
 
     def _summarize_agent1(self, agent1_lines: list, agent2_lines: list, events: list) -> str:
         """智能构建技术面摘要 — 区分空闲触发、新闻驱动等场景"""
@@ -652,14 +867,12 @@ class Agent3:
             except Exception as e:
                 logger.debug(f"通过 review_gen 加载近期交易失败: {e}")
         try:
-            import sqlite3
-            conn = sqlite3.connect(self.config.db_path)
+            conn = self.risk._db.conn
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM trades WHERE trade_type='close' ORDER BY id DESC LIMIT ?",
                 (n,),
             ).fetchall()
-            conn.close()
             if not rows:
                 return "暂无近期交易"
             lines = []
@@ -739,6 +952,67 @@ class Agent3:
             f"→ {size:.4f} ETH"
         )
         return size
+
+    def _suggested_add_size(self, current_size: float, context: dict, decision: dict = None) -> float:
+        """计算补仓追加量（基于剩余仓位空间）
+
+        与 _suggested_size 不同：追加量只用到 max_pos 的剩余空间，
+        而不是从 0 开始算全量。
+        """
+        max_pos = self.config.agent3_max_position_eth
+        remaining = max_pos - current_size
+        if remaining <= 0.01:
+            return 0.0  # 仓位已满，不加
+
+        deepseek_pct = _safe_float(decision.get("position_size_pct", 50), 50) if decision else 50
+        deepseek_pct = max(5, min(100, deepseek_pct))
+
+        base = remaining * (deepseek_pct / 100)
+        agent4_mult = self.config.agent3_position_size_multiplier
+        risk_mult = self.risk.get_position_size_multiplier()
+
+        win_rate = _safe_float(context.get("win_rate", 0))
+        total_trades = int(context.get("monthly_trades", 0))
+        win_rate_mult = min(1.5, max(0.3, win_rate / 50)) if total_trades >= 5 else 1.0
+
+        add_size = base * agent4_mult * risk_mult * win_rate_mult
+        add_size = min(add_size, remaining)  # 不超剩余空间
+        add_size = max(add_size, 0.01)       # 最小单位
+
+        logger.debug(
+            f"补仓计算: max={max_pos}当前={current_size:.4f}剩余={remaining:.4f} "
+            f"deepseek_pct={deepseek_pct} base={base:.4f} "
+            f"agent4=×{agent4_mult:.2f} risk=×{risk_mult:.2f} "
+            f"win_rate=×{win_rate_mult:.2f} → +{add_size:.4f} ETH"
+        )
+        return add_size
+
+    def _should_add_to_position(self, decision: dict, current_size: float) -> bool:
+        """判断是否应该补仓
+
+        优先级：
+        1. DeepSeek 显式指定 add_to_position
+        2. 信心足够高（≥65）且仓位未满
+        3. 仓位很小（<30% max）且信心 ≥50
+        """
+        # 1. DeepSeek 显式指定
+        add_flag = decision.get("add_to_position")
+        if add_flag is True:
+            return True
+        if add_flag is False:
+            return False
+
+        # 2. 默认 heuristic
+        confidence = decision.get("confidence", 0)
+        max_pos = self.config.agent3_max_position_eth
+
+        if confidence >= 65:
+            return True
+
+        if current_size < max_pos * 0.3 and confidence >= 50:
+            return True
+
+        return False
 
     # ── 价格刷新（后台协程，确保 _current_price 始终有值） ──
 
@@ -895,12 +1169,40 @@ class Agent3:
         # ── 实时计算浮动盈亏写入 _current_position ──
         self._update_position_pnl()
 
+        # ── 今日数据：从 _daily_trades 计算 ──
+        daily_trades = getattr(self.risk, '_daily_trades', [])
+        daily_wins = sum(1 for t in daily_trades if t.get("pnl", 0) > 0)
+        daily_losses = sum(1 for t in daily_trades if t.get("pnl", 0) < 0)
+        daily_win_rate = round(daily_wins / max(daily_wins + daily_losses, 1) * 100, 1) if (daily_wins + daily_losses) > 0 else 0.0
+
+        # ── 月度数据（review_gen 缓存，避免每 5s 查 DB）──
+        monthly_stats = getattr(self, '_cached_monthly_stats', None)
+        if not monthly_stats or not hasattr(self, '_monthly_cache_time'):
+            # 首次获取，用 review_gen 或 stats 缓存
+            if self.review_gen and hasattr(self.review_gen, 'compute_monthly_stats'):
+                try:
+                    monthly_stats = self.review_gen.compute_monthly_stats()
+                except Exception:
+                    monthly_stats = None
+            self._cached_monthly_stats = monthly_stats
+            self._monthly_cache_time = time.time()
+        else:
+            # 每分钟刷新一次
+            now = time.time()
+            if now - getattr(self, '_monthly_cache_time', 0) > 60 and self.review_gen:
+                try:
+                    monthly_stats = self.review_gen.compute_monthly_stats()
+                    self._cached_monthly_stats = monthly_stats
+                except Exception:
+                    monthly_stats = self._cached_monthly_stats
+
         return {
             "running": self._running,
             "current_activity": self._current_activity,
             "last_activity_time": self._last_activity_time,
             "position": self._current_position,
             "event_buffer_size": len(self._event_buffer),
+            "paused_for_daily_limit": self._paused_for_daily_limit,
             "adjusted_max_trades": self.config.agent3_max_daily_trades,
             "adjusted_debounce": self.config.agent3_debounce_seconds,
             "adjusted_trade_interval": self.config.agent3_min_interval_between_trades,
@@ -914,4 +1216,22 @@ class Agent3:
                 "agent4_reviewer": self.agent4_reviewer is not None,
             },
             **self._stats,
+            # ── 新增汇总板块 ──
+            "daily_stats": {
+                "trades": self.risk._daily_trade_count,
+                "max_trades": self.config.agent3_max_daily_trades,
+                "wins": daily_wins,
+                "losses": daily_losses,
+                "win_rate": daily_win_rate,
+                "realized_pnl": round(self.risk._daily_realized_pnl, 2),
+                "loss_usdt": round(self.risk._daily_loss_usdt, 2),
+            },
+            "monthly_stats": monthly_stats or {
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0.0,
+                "total_pnl": 0.0,
+                "max_drawdown_pct": 0.0,
+            },
         }

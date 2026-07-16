@@ -10,6 +10,8 @@ import numpy as np
 
 from config import Config
 from backtest.engine import BacktestEngine, Trade
+from backtest.metrics import compute_metrics
+from strategies.base import Signal, StrategyResult
 
 
 @pytest.fixture
@@ -128,3 +130,123 @@ def test_backtest_reproducible(test_config, price_data):
     r2 = engine.run(price_data, strategy_name="ma_cross")
     assert r1.metrics["total_return_pct"] == r2.metrics["total_return_pct"]
     assert r1.metrics["total_trades"] == r2.metrics["total_trades"]
+
+
+class ScriptedStrategy:
+    def __init__(self, name, signals):
+        self.name = name
+        self._signals = signals
+
+    def generate_signals(self, df):
+        result = df.copy()
+        result["signal"] = self._signals
+        result["reason"] = "scripted"
+        return StrategyResult(signals=result)
+
+
+def _scripted_engine(monkeypatch, cfg, signals_by_name):
+    def factory(name, params=None):
+        return ScriptedStrategy(name, signals_by_name[name])
+
+    monkeypatch.setattr("backtest.engine.create_strategy", factory)
+    cfg.risk.max_single_order_pct = 1.0
+    cfg.trading.taker_fee = 0.0
+    cfg.trading.maker_fee = 0.0
+    cfg.trading.slippage_pct = 0.0
+    cfg.strategy.stop_loss_pct = 50.0
+    cfg.strategy.take_profit_pct = 500.0
+    cfg.strategy.trailing_stop_activation = 0.0
+    return BacktestEngine(cfg)
+
+
+def _ohlc_frame(rows):
+    index = pd.date_range("2025-01-01", periods=len(rows), freq="h", tz="utc")
+    return pd.DataFrame(rows, index=index)
+
+
+def test_signal_executes_at_next_bar_open(monkeypatch, test_config):
+    df = _ohlc_frame([
+        {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 1},
+        {"open": 110, "high": 111, "low": 109, "close": 110, "volume": 1},
+        {"open": 120, "high": 121, "low": 119, "close": 120, "volume": 1},
+        {"open": 130, "high": 131, "low": 129, "close": 130, "volume": 1},
+    ])
+    engine = _scripted_engine(monkeypatch, test_config, {"scripted": [Signal.BUY, Signal.HOLD, Signal.SELL, Signal.HOLD]})
+
+    result = engine.run(df, strategy_name="scripted")
+
+    assert result.trades[0].entry_price == 110
+    assert result.trades[0].exit_price == 130
+    assert result.trades[0].entry_time == df.index[1]
+    assert result.trades[0].exit_time == df.index[3]
+
+
+def test_open_position_is_liquidated_at_end_of_data(monkeypatch, test_config):
+    df = _ohlc_frame([
+        {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 1},
+        {"open": 110, "high": 111, "low": 109, "close": 110, "volume": 1},
+        {"open": 120, "high": 121, "low": 119, "close": 120, "volume": 1},
+    ])
+    engine = _scripted_engine(monkeypatch, test_config, {"scripted": [Signal.BUY, Signal.HOLD, Signal.HOLD]})
+
+    result = engine.run(df, strategy_name="scripted")
+
+    assert len(result.trades) == 1
+    assert result.trades[0].reason == "end_of_data"
+    assert result.trades[0].exit_price == 120
+
+
+def test_intrabar_stop_loss_uses_kline_low(monkeypatch, test_config):
+    df = _ohlc_frame([
+        {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 1},
+        {"open": 100, "high": 110, "low": 94, "close": 108, "volume": 1},
+        {"open": 108, "high": 109, "low": 107, "close": 108, "volume": 1},
+    ])
+    engine = _scripted_engine(monkeypatch, test_config, {"scripted": [Signal.BUY, Signal.HOLD, Signal.HOLD]})
+    engine.cfg.strategy.stop_loss_pct = 5.0
+
+    result = engine.run(df, strategy_name="scripted")
+
+    assert result.trades[0].reason == "stop_loss"
+    assert result.trades[0].exit_price == 95
+
+
+def test_unfilled_limit_order_does_not_become_market_order(monkeypatch, test_config):
+    df = _ohlc_frame([
+        {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 1},
+        {"open": 101, "high": 102, "low": 100, "close": 101, "volume": 1},
+    ])
+    engine = _scripted_engine(monkeypatch, test_config, {"scripted": [Signal.BUY, Signal.HOLD]})
+
+    result = engine.run(df, strategy_name="scripted", order_type="limit")
+
+    assert result.trades == []
+
+
+def test_multiple_strategies_use_weighted_signal_votes(monkeypatch, test_config):
+    df = _ohlc_frame([
+        {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 1},
+        {"open": 101, "high": 102, "low": 100, "close": 101, "volume": 1},
+    ])
+    test_config.strategy.enabled_strategies = ["first", "second"]
+    test_config.strategy.strategy_weights = {"first": 0.7, "second": 0.3}
+    engine = _scripted_engine(monkeypatch, test_config, {
+        "first": [Signal.BUY, Signal.HOLD],
+        "second": [Signal.SELL, Signal.HOLD],
+    })
+
+    result = engine.run(df)
+
+    assert result.signals_df.iloc[0]["signal"] == Signal.BUY
+
+
+def test_sharpe_uses_equity_curve_frequency():
+    values = [100.0, 101.0, 100.0, 103.0]
+    hourly_index = pd.date_range("2025-01-01", periods=4, freq="h", tz="utc")
+    daily_index = pd.date_range("2025-01-01", periods=4, freq="D", tz="utc")
+    prices = pd.DataFrame({"close": values}, index=hourly_index)
+
+    hourly = compute_metrics(pd.Series(values, index=hourly_index), [], 100.0, prices)
+    daily = compute_metrics(pd.Series(values, index=daily_index), [], 100.0, prices)
+
+    assert hourly["sharpe"] > daily["sharpe"]

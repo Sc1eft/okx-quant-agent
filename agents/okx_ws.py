@@ -46,15 +46,21 @@ class OKXWebSocketClient:
         self._subscribed_channels: list[dict] = []
         self._on_message: Optional[Callable] = None
         self._on_error: Optional[Callable] = None
+        self._on_reconnect: Optional[Callable] = None
 
     def set_callbacks(
         self,
         on_message: Optional[Callable[[dict], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
+        on_reconnect: Optional[Callable] = None,
     ):
-        """设置消息和错误回调"""
+        """设置消息和错误回调
+
+        on_reconnect: WebSocket 重连后调用（用于数据回填等恢复逻辑）
+        """
         self._on_message = on_message
         self._on_error = on_error
+        self._on_reconnect = on_reconnect
 
     async def connect(self):
         """建立 WebSocket 连接（自动重连循环）"""
@@ -71,6 +77,13 @@ class OKXWebSocketClient:
 
                     # 订阅频道
                     await self._subscribe_all()
+
+                    # 重连回调（用于数据回填等恢复逻辑）
+                    if self._on_reconnect:
+                        try:
+                            await self._on_reconnect()
+                        except Exception as e:
+                            logger.error(f"重连回调异常: {e}")
 
                     # 消息循环
                     async for raw in ws:

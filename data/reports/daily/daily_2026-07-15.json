@@ -1,0 +1,119 @@
+{
+  "type": "daily",
+  "date": "2026-07-15",
+  "generated_at": "2026-07-15T16:54:23.365422+00:00",
+  "stats": {
+    "trades": 4,
+    "wins": 2,
+    "losses": 2,
+    "win_rate": 50.0,
+    "total_pnl": 1.69,
+    "total_fee": 1.36,
+    "avg_pnl": 0.42,
+    "best_trade": 4.04,
+    "worst_trade": -1.94,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 1,
+        "win_rate": 0.0,
+        "pnl": -0.7
+      },
+      "sell": {
+        "trades": 3,
+        "win_rate": 66.7,
+        "pnl": 2.39
+      }
+    }
+  },
+  "summary": "交易次数不足 (4 < 5), 暂不生成总结",
+  "period": {
+    "start": "2026-07-15T00:00:00",
+    "end": "2026-07-15T23:59:59"
+  },
+  "trades": {
+    "wins": [
+      {
+        "trade_id": 587,
+        "pnl": 0.29,
+        "side": "sell",
+        "entry_price": 1884.97,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-15T06:04:51.598809+00:00"
+      },
+      {
+        "trade_id": 593,
+        "pnl": 4.04,
+        "side": "sell",
+        "entry_price": 1902.33,
+        "exit_price": 0,
+        "reason": "多头止盈",
+        "time": "2026-07-15T12:49:05.071605+00:00"
+      }
+    ],
+    "losses": [
+      {
+        "trade_id": 589,
+        "pnl": -0.7,
+        "side": "buy",
+        "entry_price": 1883.16,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-15T06:24:57.914146+00:00"
+      },
+      {
+        "trade_id": 596,
+        "pnl": -1.94,
+        "side": "sell",
+        "entry_price": 1907.17,
+        "exit_price": 0,
+        "reason": "多头止损",
+        "time": "2026-07-15T16:36:40.264756+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 2,
+      "total_profit": 4.33,
+      "patterns": [
+        {
+          "pattern": "平long反手做空",
+          "wins_count": 1,
+          "avg_profit": 0.29,
+          "takeaway": "反手时机基本正确但利润微薄，需加强趋势判断以提高盈利空间"
+        },
+        {
+          "pattern": "多头止盈卖出",
+          "wins_count": 1,
+          "avg_profit": 4.04,
+          "takeaway": "顺势止盈策略有效，可继续沿用并关注利润保护机制"
+        }
+      ]
+    },
+    "losses": {
+      "count": 2,
+      "total_loss": 2.64,
+      "patterns": [
+        {
+          "pattern": "平short反手做多",
+          "loss_count": 1,
+          "avg_loss": 0.7,
+          "cause": "空单平仓并反手做多时，可能追高或趋势未完全反转",
+          "suggestion": "等待明确多头信号再反手，或减少反手仓位以控制风险"
+        },
+        {
+          "pattern": "多头止损卖出",
+          "loss_count": 1,
+          "avg_loss": 1.94,
+          "cause": "多头持仓遭遇反向波动触发止损，止损设置可能过窄或行情突变",
+          "suggestion": "优化止损位，结合ATR动态调整或采用移动止损，避免被过早震出"
+        }
+      ]
+    },
+    "summary": "多头止盈贡献主要利润，但止损和反手失误拖累收益，需精益信号与风控。"
+  },
+  "pushed": false,
+  "push_time": null
+}

@@ -21,6 +21,7 @@ import sys
 import os
 import atexit
 import subprocess
+import time
 from pathlib import Path
 from argparse import ArgumentParser
 from datetime import datetime, timezone
@@ -33,21 +34,42 @@ _BASE_DIR = Path(__file__).parent.resolve()
 _PID_FILE = _BASE_DIR / "data" / "agent.pid"
 
 def _acquire_pid_lock():
-    """杀旧进程 + 写入当前 PID，保证全局唯一实例。"""
+    """用原子性文件创建 (O_EXCL) 实现 PID 锁，消除 TOCTOU 竞争条件。
+
+    O_CREAT | O_EXCL 保证文件创建是原子操作：
+    - 成功 → 获得锁，写入 PID
+    - 失败 → 另一实例持有锁，读其 PID 杀掉后重试
+    """
     _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    if _PID_FILE.exists():
+    while True:
         try:
-            old_pid = int(_PID_FILE.read_text().strip())
-            if old_pid > 0 and old_pid != os.getpid():
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", str(old_pid)],
-                    capture_output=True, timeout=10,
-                )
-        except (ValueError, OSError, subprocess.TimeoutExpired):
-            pass
+            fd = os.open(
+                str(_PID_FILE),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+            with os.fdopen(fd, "w") as f:
+                f.write(str(os.getpid()))
+            break  # 成功获取锁
+        except FileExistsError:
+            # 原子创建失败 → 另一实例占用
+            try:
+                old_pid = int(_PID_FILE.read_text().strip())
+                if old_pid > 0 and old_pid != os.getpid():
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", str(old_pid)],
+                        capture_output=True, timeout=10,
+                    )
+            except (ValueError, OSError, subprocess.TimeoutExpired):
+                pass
+            # 清理旧锁后重试
+            try:
+                _PID_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+            time.sleep(0.2)
 
-    _PID_FILE.write_text(str(os.getpid()))
     atexit.register(_release_pid_lock)
 
 def _release_pid_lock():
@@ -132,8 +154,15 @@ async def main():
         print(f"[WARN] 配置文件 {args.config} 不存在，使用默认配置。")
         print(f"[WARN] 通过环境变量 OKX_API_KEY / DEEPSEEK_API_KEY 设置密钥。")
     root_config.mode = args.mode
-    agent_config = AgentSystemConfig()
-    agent_config.exchange_permissions = root_config.exchange.permissions
+    agent_config = AgentSystemConfig.from_root_config(root_config)
+
+    # ── 从环境变量加载链上数据 API Key ──
+    etherscan_key = os.getenv("ETHERSCAN_API_KEY", "")
+    whale_alert_key = os.getenv("WHALE_ALERT_API_KEY", "")
+    if etherscan_key:
+        agent_config.agent2_etherscan_api_key = etherscan_key
+    if whale_alert_key:
+        agent_config.agent2_whale_alert_api_key = whale_alert_key
 
     setup_logging(args.log_level, agent_config.log_file)
     logger = logging.getLogger("main")
@@ -150,6 +179,11 @@ async def main():
     # 风控
     risk_manager = RiskManager(agent_config)
 
+    # RuleEngine — 可插拔规则引擎（替代 RiskManager 硬编码检查）
+    from agents.rule_engine import RuleEngine
+    rule_engine = RuleEngine()
+    rule_engine.load_defaults(agent_config)
+
     # 合约账户（合约模拟模式使用）
     futures_account = None
     if agent_config.market_mode == "futures":
@@ -157,6 +191,7 @@ async def main():
         futures_account = FuturesAccount(
             wallet_balance=10000.0,
             taker_fee_rate=agent_config.futures_taker_fee_rate,
+            maker_fee_rate=agent_config.futures_maker_fee_rate,
         )
 
     # 交易执行器
@@ -229,6 +264,7 @@ async def main():
         root_config=root_config,
         position_monitor=position_monitor,
         okx_client=okx_rest,
+        rule_engine=rule_engine,  # 可插拔规则引擎
         agent1=agent1,  # 用于读取多周期指标 + 市场状态
         review_generator=review_gen,  # Phase 4
         agent4_reviewer=agent4_reviewer,  # Agent 4（替代 param_adapter）
@@ -342,8 +378,6 @@ async def _status_reporter(agent1, agent2, agent3, agent4_reviewer=None, positio
         risk = s3.get("risk_status", {})
         pnl = pos.get("pnl", 0)
         pnl_pct = pos.get("pnl_pct", 0)
-        monthly_pnl = s3.get("last_monthly_pnl", 0)
-
         if has_pos:
             side = pos.get("side", "")
             size = pos.get("size", 0)
@@ -364,7 +398,7 @@ async def _status_reporter(agent1, agent2, agent3, agent4_reviewer=None, positio
                 lines.append(f"      🛑 止损 ${sl:.2f}  {'⚠️ 触发!' if pm.get('stop_loss_triggered') else ''}  |  🎯 止盈 ${tp:.2f}  {'💰 触发!' if pm.get('take_profit_triggered') else ''}")
             lines.append(f"      今日交易: {daily_trades} 笔")
         else:
-            lines.append(f"  ⚪ 无持仓  |  今日交易: {risk.get('daily_trade_count', 0)} 笔  |  💰 月累计 ${monthly_pnl:+.2f}" if monthly_pnl else f"  ⚪ 无持仓  |  今日交易: {risk.get('daily_trade_count', 0)} 笔")
+            lines.append(f"  ⚪ 无持仓  |  今日交易: {risk.get('daily_trade_count', 0)} 笔")
         lines.append("-" * 60)
 
         # ── Agent 最近活动 ──
@@ -373,16 +407,36 @@ async def _status_reporter(agent1, agent2, agent3, agent4_reviewer=None, positio
             return a[1:].strip()[:55] if a and len(a) > 1 and ord(a[0]) > 8000 else (a or "")[:55]
         if s1.get("running"): lines.append(f"  📡 {_show(s1.get('current_activity', ''))}")
         if s2.get("running"): lines.append(f"  📰 {_show(s2.get('current_activity', ''))}")
-        if s3.get("running"): lines.append(f"  🤖 {_show(s3.get('current_activity', ''))}")
+        if s3.get("running"): lines.append(f"  🤖 {_show(s3.get('current_activity', ''))}{' 🌙' if s3.get('paused_for_daily_limit') else ''}")
         if s4.get("running"): lines.append(f"  📋 {_show(s4.get('current_activity', ''))}")
 
-        # 底部：风控 + 累计盈亏
-        loss_usdt = risk.get("daily_loss_usdt", 0)
-        consec = risk.get("consecutive_losses", 0)
-        monthly_pnl = s3.get("last_monthly_pnl", 0)
-        m_pnl_icon = "💰" if monthly_pnl > 0 else "📉" if monthly_pnl < 0 else ""
-        lines.append(f"  🛡 日亏损 ${loss_usdt:.2f}{'⚠️' if loss_usdt > 0 else ''}  |  连亏 {consec} 次{'⚠️' if consec > 0 else ''}" +
-                     f"  |  📊 月累计 {m_pnl_icon} ${monthly_pnl:+.2f}")
+        # 每日交易上限暂停提示
+        if s3.get("paused_for_daily_limit"):
+            count = risk.get("daily_trade_count", 0)
+            limit = risk.get("max_daily_trades", 20)
+            lines.append(f"  🌙 交易达上限 {count}/{limit} — 暂停至北京时间午夜自动恢复")
+
+        # ── 汇总面板：今日数据 + 月度历史 ──
+        ds = s3.get("daily_stats", {})
+        ms = s3.get("monthly_stats", {})
+
+        # 今日数据
+        daily_trades_count = ds.get("trades", 0)
+        daily_max = ds.get("max_trades", 20)
+        daily_pnl = ds.get("realized_pnl", 0)
+        daily_wins = ds.get("wins", 0)
+        daily_losses = ds.get("losses", 0)
+        daily_wr = ds.get("win_rate", 0)
+        pnl_icon = "💰" if daily_pnl > 0 else "📉" if daily_pnl < 0 else "⚪"
+        lines.append(f"  📊 今日数据  |  交易 {daily_trades_count}/{daily_max}  |  盈亏 {pnl_icon} ${daily_pnl:+.2f}  |  {daily_wins}胜/{daily_losses}负 ({daily_wr}%)")
+
+        # 月度历史
+        mt = ms.get("trades", 0)
+        m_pnl = ms.get("total_pnl", 0)
+        m_wr = ms.get("win_rate", 0)
+        m_dd = ms.get("max_drawdown_pct", 0)
+        m_pnl_icon = "💰" if m_pnl > 0 else "📉" if m_pnl < 0 else ""
+        lines.append(f"  📈 月度历史  |  交易 {mt} 笔  |  累计 {m_pnl_icon} ${m_pnl:+.2f}  |  胜率 {m_wr}%  |  最大回撤 {m_dd:.2f}%")
 
         lines.append("=" * 60)
         logging.getLogger("main").info("\n".join(lines))

@@ -199,17 +199,16 @@ class Agent2:
 
     def get_status(self) -> dict:
         onchain_status = {}
-        onchain_events = 0
         if self._onchain:
             onchain_status = self._onchain.get_status()
-            onchain_events = onchain_status.get("events_pushed", 0)
+            # 同步链上事件计数，确保 stats 和 onchain 子字段一致
+            self._stats["onchain_events_pushed"] = onchain_status.get("events_pushed", 0)
 
         return {
             "running": self._running,
             "current_activity": self._current_activity,
             "last_activity_time": self._last_activity_time,
             "onchain": onchain_status,
-            "onchain_events_pushed": onchain_events,
             **self._stats,
         }
 

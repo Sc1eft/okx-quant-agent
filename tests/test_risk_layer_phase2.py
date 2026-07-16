@@ -18,8 +18,8 @@ from agents.config import AgentSystemConfig
 @pytest.fixture
 def config():
     return AgentSystemConfig(
-        btc_volatility_threshold_pct=3.0,
-        btc_volatility_delay_seconds=300,
+        volatility_threshold_pct=3.0,
+        volatility_delay_seconds=300,
         market_depth_spread_bps=10.0,
         market_depth_min_liquidity_eth=1.0,
     )
@@ -32,6 +32,7 @@ def manager(config):
 
 def make_mock_client(btc_klines=None, order_book=None):
     """构造模拟 OKXClient"""
+
     client = MagicMock()
 
     if btc_klines is None:
@@ -50,48 +51,47 @@ def make_mock_client(btc_klines=None, order_book=None):
     return client
 
 
-class TestBtcVolatility:
+class TestVolatility:
     @pytest.mark.asyncio
-    async def test_btc_normal_volatility(self, manager):
-        """BTC 正常波动 → 通过"""
+    async def test_normal_volatility(self, manager):
+        """正常波动 → 通过"""
         client = make_mock_client()  # ~1.65% change
-        ok, reason = await manager.check_btc_volatility_async(client)
+        ok, reason = await manager.check_volatility_async(client)
         assert ok is True
         assert reason == ""
 
     @pytest.mark.asyncio
-    async def test_btc_high_volatility(self, manager):
-        """BTC 高波动 → 拒绝"""
+    async def test_high_volatility(self, manager):
+        """高波动 → 拒绝"""
         klines = [
             {"timestamp": 1000, "open": 60000, "high": 61000, "low": 59000, "close": 60000},
             {"timestamp": 2000, "open": 60000, "high": 64000, "low": 59500, "close": 63000},
         ]
         client = make_mock_client(btc_klines=klines)
-        ok, reason = await manager.check_btc_volatility_async(client)
+        ok, reason = await manager.check_volatility_async(client, symbol="ETH-USDT")
         assert ok is False
-        assert "BTC" in reason
         assert "波动" in reason
 
     @pytest.mark.asyncio
-    async def test_btc_insufficient_data(self, manager):
-        """BTC 数据不足 → 通过（不阻塞交易）"""
+    async def test_insufficient_data(self, manager):
+        """数据不足 → 通过（不阻塞交易）"""
         client = make_mock_client(btc_klines=[{"timestamp": 1000, "close": 60000}])
-        ok, reason = await manager.check_btc_volatility_async(client)
+        ok, reason = await manager.check_volatility_async(client)
         assert ok is True
 
     @pytest.mark.asyncio
-    async def test_btc_delay_cooldown(self, manager):
-        """BTC 波动延迟期内再次检查 → 仍拒绝"""
+    async def test_volatility_delay_cooldown(self, manager):
+        """波动延迟期内再次检查 → 仍拒绝"""
         client = make_mock_client(btc_klines=[
             {"timestamp": 1000, "close": 60000},
             {"timestamp": 2000, "close": 63000},
         ])
         # 第一次检查 → 拒绝，设置延迟
-        ok, _ = await manager.check_btc_volatility_async(client)
+        ok, _ = await manager.check_volatility_async(client)
         assert ok is False
 
         # 第二次检查（还在延迟期）→ 拒绝，但不重复查询
-        ok, reason = await manager.check_btc_volatility_async(client)
+        ok, reason = await manager.check_volatility_async(client)
         assert ok is False
         assert "延迟" in reason
 

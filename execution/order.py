@@ -10,8 +10,9 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+import random
+
 import pandas as pd
-import numpy as np
 
 from strategies.base import Signal
 
@@ -93,9 +94,9 @@ def simulate_limit_order(
                       price * (1 + price_improvement_bps / 10000)
 
     # 随机成交
-    if np.random.random() < fill_probability:
+    if random.random() < fill_probability:
         # 吃单 vs 挂单（限价单可能变成市价单）
-        if np.random.random() < 0.3:  # 30% 变成吃单
+        if random.random() < 0.3:  # 30% 变成吃单
             return OrderSimulation(
                 order_type="limit_filled_taker",
                 executed=True,
@@ -151,9 +152,16 @@ def simulate_limit_orders(
             result.loc[idx, "limit_price"] = sim.exec_price
 
             if not sim.executed:
-                # 未成交：尝试下一个 K 线以市价补
-                result.loc[idx, "limit_filled"] = True
-                result.loc[idx, "limit_price"] = price * 1.001
+                # 限价单未成交 → 以市价单兜底（方向感知滑点）
+                # buy: 买入价更高（正滑点），sell: 卖出价更低（负滑点）
+                market_fix = 1 + (slippage_bps / 10000)
+                if side == "buy":
+                    market_price = price * market_fix
+                else:
+                    market_price = price / market_fix  # 卖出的成交价更低
+                result.loc[idx, "limit_filled"] = True  # 市价单最终成交
+                result.loc[idx, "limit_price"] = market_price
+                result.loc[idx, "limit_note"] = "限价未成交→市价兜底"
 
     return result
 

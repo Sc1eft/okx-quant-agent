@@ -1,0 +1,88 @@
+{
+  "type": "daily",
+  "date": "2026-07-13",
+  "generated_at": "2026-07-13T16:29:09.847996+00:00",
+  "stats": {
+    "trades": 2,
+    "wins": 1,
+    "losses": 1,
+    "win_rate": 50.0,
+    "total_pnl": -10.43,
+    "total_fee": 0.38,
+    "avg_pnl": -5.21,
+    "best_trade": 0.92,
+    "worst_trade": -11.35,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "buy": {
+        "trades": 1,
+        "win_rate": 100.0,
+        "pnl": 0.92
+      },
+      "sell": {
+        "trades": 1,
+        "win_rate": 0.0,
+        "pnl": -11.35
+      }
+    }
+  },
+  "summary": "交易次数不足 (2 < 5), 暂不生成总结",
+  "period": {
+    "start": "2026-07-13T00:00:00",
+    "end": "2026-07-13T23:59:59"
+  },
+  "trades": {
+    "wins": [
+      {
+        "trade_id": 561,
+        "pnl": 0.92,
+        "side": "buy",
+        "entry_price": 1772.49,
+        "exit_price": 0,
+        "reason": "平short反手",
+        "time": "2026-07-13T16:00:26.960958+00:00"
+      }
+    ],
+    "losses": [
+      {
+        "trade_id": 549,
+        "pnl": -11.35,
+        "side": "sell",
+        "entry_price": 1779.65,
+        "exit_price": 0,
+        "reason": "平long反手",
+        "time": "2026-07-13T05:30:28.808419+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 1,
+      "total_profit": 0.92,
+      "patterns": [
+        {
+          "pattern": "平空反手做多（平short反手）",
+          "wins_count": 1,
+          "avg_profit": 0.92,
+          "takeaway": "该模式盈利但样本太少，需结合趋势信号验证，避免盲目反手"
+        }
+      ]
+    },
+    "losses": {
+      "count": 1,
+      "total_loss": -11.35,
+      "patterns": [
+        {
+          "pattern": "平多反手做空（平long反手）",
+          "loss_count": 1,
+          "avg_loss": -11.35,
+          "cause": "反手做空后行情继续上涨，入场点1779.65高于盈利多单平仓价1772.49，可能追高或未等回调，反转失败",
+          "suggestion": "反手需等待确认信号，如破位后回踩或出现顶背离，避免直接反手追单；设定止损最小级别支撑/阻力"
+        }
+      ]
+    },
+    "summary": "今日两笔均为反手单，做多反手盈利0.92，做空反手亏损11.35，反手策略胜率50%，但亏损幅度远超盈利，需加强反转确认和风险控制。"
+  },
+  "pushed": false,
+  "push_time": null
+}

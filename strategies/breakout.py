@@ -42,11 +42,11 @@ class BreakoutStrategy(BaseStrategy):
         return (
             self.params["period"],
             self.params.get("atr_multiplier", 2.0),
-            self.params.get("stop_loss_pct", 2.0) / 100,
-            self.params.get("take_profit_pct", 6.0) / 100,
-            self.params.get("trailing_stop_activation", 3.0) / 100,
-            self.params.get("trailing_stop_distance", 1.5) / 100,
-            self.params.get("position_timeout_bars", 48),
+            self.params.get("stop_loss_pct", 5.0) / 100,
+            self.params.get("take_profit_pct", 10.0) / 100,
+            self.params.get("trailing_stop_activation", 6.0) / 100,
+            self.params.get("trailing_stop_distance", 3.0) / 100,
+            self.params.get("position_timeout_bars", 72),
         )
 
     # ── 指标计算 ──

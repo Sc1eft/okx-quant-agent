@@ -95,12 +95,12 @@ class StrategyConfig:
     breakout_period: int = 20
     breakout_atr_multiplier: float = 2.0
 
-    # ── 止盈止损（P0 优化） ──
-    stop_loss_pct: float = 2.0        # 止损百分比
-    take_profit_pct: float = 6.0      # 止盈百分比
-    trailing_stop_activation: float = 3.0  # 浮盈达到此比例后激活移动止损
-    trailing_stop_distance: float = 1.5    # 移动止损距离
-    position_timeout_bars: int = 48   # 持仓超过 48 根 K 线自动退出
+    # ── 止盈止损（激进模式 2026-07-10） ──
+    stop_loss_pct: float = 5.0        # 止损百分比
+    take_profit_pct: float = 10.0     # 止盈百分比
+    trailing_stop_activation: float = 6.0  # 浮盈达到此比例后激活移动止损
+    trailing_stop_distance: float = 3.0    # 移动止损距离
+    position_timeout_bars: int = 72   # 持仓超过 72 根 K 线自动退出
 
 
 # ──────────────────────────────────────────────
