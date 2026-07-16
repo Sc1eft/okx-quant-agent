@@ -47,7 +47,10 @@ class Agent1:
         self.bus = event_bus
         self.okx_client = okx_client  # 预热用（可选）
         self.kline_builder = KlineBuilder()
-        self.change_detector = ChangeDetector(default_cooldown=config.agent1_change_cooldown)
+        self.change_detector = ChangeDetector(
+            default_cooldown=config.agent1_change_cooldown,
+            cooldown_config=config.agent1_signal_cooldowns,
+        )
         self.ws_client = OKXWebSocketClient(
             symbols=[config.ws_symbol],
             reconnect_delay_base=config.ws_reconnect_delay_base,
@@ -373,11 +376,11 @@ class Agent1:
             if kdj.get("oversold"):
                 parts.append("🔥超卖")
         if boll:
-            pos = boll.get("position", 0.5)
+            pos = boll.get("position_pct", 50)
             if isinstance(pos, (int, float)):
-                if pos > 0.9:
+                if pos > 90:
                     parts.append("上轨")
-                elif pos < 0.1:
+                elif pos < 10:
                     parts.append("下轨")
         return " ".join(parts) if parts else "无新信号"
 

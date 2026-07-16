@@ -83,9 +83,14 @@ Rules:
 - If agent1_summary says "non-technical-trigger", focus on news sentiment and on-chain data
 - If agent1_summary says "periodic-check", only trade when conditions are clearly favorable
 - Use [Market State] regime guidance: trending → follow trend, ranging → mean-reversion, transition → reduce size
+- [Market State] conviction: <0.3 means the classification is unreliable — be conservative; >0.7 means strong alignment — trust the regime
 - Base stop_loss on [Multi-Timeframe Indicators] Bollinger bandwidth — wider bands need wider stops
+- Bollinger Bandwidth "squeeze 🌀" means the market is coiling (breakout coming soon); expanding bandwidth with trend confirms the trend is real
+- Squeezing market + low bandwidth on 1h/1d = reduce position size, trade mean-reversion only
+- Expanding bandwidth + clear MACD direction = trend is establishing, follow it with conviction
 - Consider [Recent Trades] patterns: identify and avoid repeating recent mistakes
 - [Trading Advisory] provides expert-level trading guidance — treat it as recommended strategy
+- **Quality over quantity**: if conviction is low (<50) and alignment is unclear, hold. Not every bar needs a trade.
 """
 
 # (不要注入用户输入到 f-string ── 下面用 .format() 安全处理)

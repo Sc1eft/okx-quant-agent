@@ -30,38 +30,39 @@ def test_macd_bullish_cross():
 
 def test_cooldown():
     detector = ChangeDetector()
-    detector._default_cooldown = 60.0  # 60s cooldown
+    # 使用 1d 时间帧测试冷却（避免 15m MACD 的 90s 冷却干扰）
+    detector._default_cooldown = 60.0
     ts = 1000.0
 
     # init
-    detector.check("15m",
+    detector.check("1d",
         macd={"crossover": None, "histogram": -0.1},
         kdj={}, boll={}, price=3000, current_ts=ts)
 
     # first bullish cross
-    signals = detector.check("15m",
+    signals = detector.check("1d",
         macd={"crossover": "bullish", "histogram": 0.05},
         kdj={}, boll={}, price=3020, current_ts=ts+1)
     assert len(signals) >= 1
 
     # go back to neutral before testing cooldown
-    detector.check("15m",
+    detector.check("1d",
         macd={"crossover": None, "histogram": 0.04},
         kdj={}, boll={}, price=3025, current_ts=ts+28)
 
     # trigger bullish again within cooldown window
-    signals = detector.check("15m",
+    signals = detector.check("1d",
         macd={"crossover": "bullish", "histogram": 0.06},
         kdj={}, boll={}, price=3030, current_ts=ts+30)
     assert len(signals) == 0, f"Expected cooldown, got {len(signals)}"
 
     # go back to neutral
-    detector.check("15m",
+    detector.check("1d",
         macd={"crossover": None, "histogram": 0.04},
         kdj={}, boll={}, price=3035, current_ts=ts+65)
 
-    # after cooldown expires, signal should flow again
-    signals = detector.check("15m",
+    # after cooldown expires (60s default), signal should flow again
+    signals = detector.check("1d",
         macd={"crossover": "bullish", "histogram": 0.07},
         kdj={}, boll={}, price=3040, current_ts=ts+70)
     assert len(signals) >= 1

@@ -70,9 +70,8 @@ class SignalAligner:
             # spread 最大 2.0 (从 -1 到 +1)
             alignment_score = max(0.0, min(1.0, 1.0 - spread / 2.0))
 
-        is_consensus = (
-            len(non_zero) >= 2
-            and all(s > 0 for s in non_zero)
+        is_consensus = len(non_zero) >= 2 and (
+            all(s > 0 for s in non_zero)
             or all(s < 0 for s in non_zero)
         )
         is_conflict = alignment_score < self._conflict_threshold
@@ -104,6 +103,13 @@ class SignalAligner:
                 bullish += 1
             elif any(k in sig for k in ("bearish", "negative", "overbought", "break_upper")):
                 bearish += 1
+            # expansion 本身无方向，但价格破位向上＝偏多 破位向下＝偏空
+            if "expansion" in sig:
+                desc = (ev.data.get("description", "") or "").lower()
+                if "向上" in desc:
+                    bullish += 1
+                elif "向下" in desc:
+                    bearish += 1
         total = bullish + bearish
         if total == 0:
             return 0.0

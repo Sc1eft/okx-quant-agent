@@ -27,6 +27,16 @@ class AgentSystemConfig:
     agent1_min_bars: dict[str, int] = field(
         default_factory=lambda: {"3m": 5, "5m": 5, "15m": 8, "1h": 10, "1d": 20}
     )
+    # 信号生成冷却时间（秒），按信号类型和周期
+    # 格式: { "signal_type": { "tf": seconds, "*": default } }
+    # 覆盖 change_detector.py 中的默认冷却配置
+    agent1_signal_cooldowns: dict = field(
+        default_factory=lambda: {
+            "kdj_*": {"3m": 300, "5m": 180, "15m": 120, "1h": 60, "1d": 30},
+            "macd_*": {"3m": 180, "5m": 120, "15m": 90, "1h": 60, "1d": 30},
+            "boll_*": {"3m": 180, "5m": 120, "15m": 90, "1h": 60, "1d": 30},
+        }
+    )
 
     # ── Agent 2: News Collector ──
     agent2_enabled: bool = True
@@ -111,27 +121,32 @@ class AgentSystemConfig:
     # ConfidenceScorer（多周期信心分）
     confidence_scorer_enabled: bool = True
     confidence_timeframe_weights: dict = field(
-        default_factory=lambda: {"15m": 0.3, "1h": 0.5, "1d": 0.7}
+        default_factory=lambda: {
+            "3m": 0.05, "5m": 0.10, "15m": 0.25, "1h": 0.40, "1d": 0.20,
+        }
     )
     confidence_signal_directions: dict = field(
         default_factory=lambda: {
+            # ── MACD（强信号）──
             "macd_bullish_cross": 0.8,
             "macd_bearish_cross": -0.8,
             "macd_hist_positive": 0.5,
             "macd_hist_negative": -0.5,
-            "macd_hist_momentum_up": 0.2,
-            "macd_hist_momentum_down": -0.2,
-            "kdj_bullish_cross": 0.6,
-            "kdj_bearish_cross": -0.6,
-            "kdj_overbought": -0.4,
-            "kdj_oversold": 0.4,
-            "kdj_k_above_50": 0.15,
-            "kdj_k_below_50": -0.15,
-            "boll_break_upper": 0.3,
-            "boll_break_lower": -0.3,
-            "boll_squeeze": 0.0,
-            "boll_upper_approach": 0.15,
-            "boll_lower_approach": -0.15,
+            # 移除 hist_momentum_up/down（±0.2 太噪，无实际价值）
+
+            # ── KDJ（中等信号，仅在 >=15m 生效）──
+            "kdj_bullish_cross": 0.55,
+            "kdj_bearish_cross": -0.55,
+            "kdj_overbought": -0.3,   # 超买 = 看空（逆向）
+            "kdj_oversold": 0.3,      # 超卖 = 看多（逆向）
+            # 移除 kdj_k_above/below_50（纯噪音）
+
+            # ── 布林（强信号，提升权重）──
+            "boll_break_upper": 0.6,   # 原 0.3，提升至 0.6
+            "boll_break_lower": -0.6,  # 原 -0.3，提升至 -0.6
+            "boll_expansion": 0.0,     # 仅提示变盘可能，无方向倾向
+            "boll_bandwidth_expanding": 0.0,  # 仅提示市场可能启动
+            # 移除 boll_upper/lower_approach（太噪）
         }
     )
 
