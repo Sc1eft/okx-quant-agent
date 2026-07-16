@@ -623,6 +623,8 @@ class Agent3:
                         trade_group_id=trade_group_id,
                         opened_with_limit=prefer_limit,
                         accumulate=is_add,
+                        confidence=decision.get("confidence", 0),
+                        position_size_pct=decision.get("position_size_pct", 0),
                     )
                 # 通知 Agent 4 复盘（如果配置了）
                 if self.agent4_reviewer:

@@ -61,6 +61,10 @@ class PositionMonitor:
         # 累计已支付的开仓手续费（补仓场景）
         self._total_open_fees: float = 0.0
 
+        # 开仓时的 DeepSeek 信心度与仓位比例（用于平仓记录追溯）
+        self._open_confidence: float = 0.0
+        self._open_position_size_pct: float = 0.0
+
         # 运行状态
         self._running: bool = False
         self._stats = {
@@ -83,6 +87,8 @@ class PositionMonitor:
         trade_group_id: str = "",
         opened_with_limit: bool = True,
         accumulate: bool = False,
+        confidence: float = 0.0,
+        position_size_pct: float = 0.0,
     ):
         """更新持仓信息（由 Agent 3 在新开仓后调用）
 
@@ -92,6 +98,8 @@ class PositionMonitor:
         Args:
             accumulate: True=同方向补仓（累加 size，加权均价），
                         False=覆盖新开仓（默认）
+            confidence: 开仓时 DeepSeek 的信心度（用于平仓记录追溯）
+            position_size_pct: 开仓时的仓位比例（用于平仓记录追溯）
         """
         # ── 补仓模式：同方向累加 ──
         if accumulate and self._has_position and side == self._position_side and size > 0:
@@ -114,6 +122,10 @@ class PositionMonitor:
             # _opened_with_limit：如果这次用了 maker 且之前是 taker，升级
             if opened_with_limit and not self._opened_with_limit:
                 self._opened_with_limit = True
+
+            # 用最新的信心度和仓位比例覆盖
+            self._open_confidence = confidence
+            self._open_position_size_pct = position_size_pct
 
             # 重置移动止损状态（以当前累计持仓为准重新跟踪）
             self._trailing_stop_active = False
@@ -157,6 +169,10 @@ class PositionMonitor:
         self._total_open_fees = (
             size * entry_price * (self._maker_fee_rate if opened_with_limit else self._taker_fee_rate)
         ) if size > 0 else 0.0  # 覆盖模式下重置为本次单笔费用
+
+        # 记录开仓时的原始决策信心与仓位比例
+        self._open_confidence = confidence if self._has_position else 0.0
+        self._open_position_size_pct = position_size_pct if self._has_position else 0.0
 
         # 重置移动止损状态
         self._trailing_stop_active = False
@@ -206,6 +222,8 @@ class PositionMonitor:
             "symbol": self.executor.symbol,
             "decision": {"action": close_side, "reason": reason},
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "confidence": self._open_confidence,
+            "position_size_pct": self._open_position_size_pct,
         })
 
         logger.info(
@@ -435,6 +453,8 @@ class PositionMonitor:
             "symbol": self.executor.symbol,
             "decision": {"action": side, "reason": reason},
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "confidence": self._open_confidence,
+            "position_size_pct": self._open_position_size_pct,
         })
 
         # 4. 通知 Agent 3 更新仓位状态（仅成功时）
