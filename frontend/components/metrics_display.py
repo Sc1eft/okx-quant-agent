@@ -70,7 +70,7 @@ def _infer_card_type(label: str, value: Any) -> str:
         return "gray"
     if label in ratio_keys:
         if isinstance(value, (int, float)):
-            return "green" if value > 1 else ("amber" if value > 0.5 else "red")
+            return "green" if value > 1.5 else ("amber" if value > 0.5 else "red")
         return "gray"
     if label in money_keys:
         if isinstance(value, (int, float)):

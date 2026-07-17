@@ -359,7 +359,7 @@ class TestOnchainCollectorIntegration:
     @pytest.mark.asyncio
     async def test_gas_with_api_key(self, config):
         """有 API key 时抓取 Gas 并推送"""
-        config.agent2_whale_alert_api_key = "test_key"
+        config.agent2_etherscan_api_key = "test_key"
         event_bus = EventBus()
         # 120 Gwei → high 级别
         http = _mock_http_client(json_data={

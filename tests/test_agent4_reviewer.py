@@ -55,8 +55,15 @@ def _make_db(trades: list[dict]) -> str:
     return path
 
 
-def _make_reviewer(db_path: str = ":memory:") -> Agent4Reviewer:
-    """创建测试用的 Agent4Reviewer 实例"""
+def _make_reviewer(db_path: str | None = None) -> Agent4Reviewer:
+    """创建测试用的 Agent4Reviewer 实例
+
+    默认使用独立的临时数据库文件：DatabaseManager 按路径做单例缓存，
+    共享 ":memory:" 会导致测试间通过持久化状态互相串扰。
+    """
+    if db_path is None:
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
     config = AgentSystemConfig()
     deepseek = DeepSeekTrader(api_key="test")
     kline_builder = MagicMock()
@@ -130,8 +137,10 @@ async def test_notify_trade_triggers_multiple_reviews():
 def test_load_recent_trades():
     """能从 SQLite 加载最近交易"""
     trades = [
-        {"side": "buy", "price": 3000, "pnl_close": 10.0, "decision": {"reason": "good"}},
-        {"side": "sell", "price": 3050, "pnl_close": -5.0, "decision": {"reason": "bad"}},
+        {"side": "buy", "price": 3000, "pnl_close": 10.0, "decision": {"reason": "good"},
+         "trade_type": "close"},
+        {"side": "sell", "price": 3050, "pnl_close": -5.0, "decision": {"reason": "bad"},
+         "trade_type": "close"},
     ]
     db = _make_db(trades)
     reviewer = _make_reviewer(db_path=db)
@@ -185,22 +194,23 @@ def test_validate_risk_param_strict():
 def test_validate_debounce():
     """同一参数最小修改间隔"""
     reviewer = _make_reviewer()
-    # 第一次应该通过
+    # 改成与默认值(60)不同的值，第一次应该通过
     assert reviewer._validate_adjustment({
-        "target": "agent3", "param": "agent3_debounce_seconds", "to": 60,
+        "target": "agent3", "param": "agent3_debounce_seconds", "to": 90,
     }) is True
     # 立即第二次应该被防抖拒绝
     assert reviewer._validate_adjustment({
-        "target": "agent3", "param": "agent3_debounce_seconds", "to": 90,
+        "target": "agent3", "param": "agent3_debounce_seconds", "to": 120,
     }) is False
 
 
 def test_validate_no_actual_change():
     """值没变化时跳过"""
     reviewer = _make_reviewer()
-    # agent3_max_daily_trades 默认是 10，调到 10 = 无变化
+    # agent3_max_daily_trades 当前默认值是 20，调到 20 = 无变化
     assert reviewer._validate_adjustment({
-        "target": "agent3", "param": "agent3_max_daily_trades", "to": 10,
+        "target": "agent3", "param": "agent3_max_daily_trades",
+        "to": reviewer._config.agent3_max_daily_trades,
     }) is False
 
 

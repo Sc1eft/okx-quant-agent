@@ -1,4 +1,4 @@
-﻿"""
+"""
 🤖 AI 自动交易 — 三 Agent 系统控制面板
 
 将 Streamlit 前端与后端三 Agent 系统打通：
@@ -400,6 +400,7 @@ def _init_state():
     _ss("ai_error", None)
     _ss("ai_market_mode", "futures")
     _ss("ai_leverage", 10)
+    _ss("ai_clear_armed", False)
 
 
 def _render_agent_dashboard(status_data: dict):
@@ -447,14 +448,25 @@ with ctrl_cols[2]:
     refresh_btn = st.button("🔄 刷新", use_container_width=True)
 
 with ctrl_cols[3]:
-    auto = st.checkbox("自动刷新", value=st.session_state.ai_auto_refresh, key="ai_auto_refresh")
+    auto = st.checkbox("自动刷新", key="ai_auto_refresh")
 
 with ctrl_cols[4]:
     st.caption("")
-    st.session_state.ai_use_live_mode = st.checkbox(
+    _live_checked = st.checkbox(
         "实盘模式", value=st.session_state.ai_use_live_mode,
         help="启用时 main.py 以 --mode live 启动（需 Trade 权限）",
     )
+
+# 实盘模式涉及真实资金：醒目警示 + 二次确认后才真正生效，未确认按模拟盘处理
+if _live_checked:
+    st.warning("⚠️ 实盘模式将使用真实资金交易，可能造成实际亏损，请谨慎操作！")
+    _live_confirmed = st.checkbox("我确认使用真实资金交易", key="ai_live_confirm")
+    st.session_state.ai_use_live_mode = _live_confirmed
+    if not _live_confirmed:
+        st.caption("💡 未勾选确认项，启动时将按模拟盘（PAPER）模式运行")
+else:
+    st.session_state.ai_use_live_mode = False
+    st.session_state.ai_live_confirm = False
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -480,23 +492,6 @@ btn_cols = st.columns([2, 2, 2, 2, 3])
 
 agent_running = _agent_is_running()
 
-# ── 进程诊断信息（debug 用，帮助用户理解按钮状态） ──
-_pid_exists = PID_FILE.exists() and PID_FILE.read_text().strip().isdigit()
-_pid_val = int(PID_FILE.read_text().strip()) if _pid_exists else None
-_stat_age = (_time.time() - STATUS_FILE.stat().st_mtime) if STATUS_FILE.exists() else None
-_debug_parts = []
-if _pid_val:
-    _alive = "🟢" if _pid_is_alive(_pid_val) else "🔴"
-    _debug_parts.append(f"PID {_pid_val} {_alive}")
-if _stat_age is not None:
-    _debug_parts.append(f"状态文件 {_stat_age:.0f}s")
-if _debug_parts:
-    _debug_str = " · ".join(_debug_parts)
-else:
-    _debug_str = "无进程"
-
-st.caption(f"🔍 {_debug_str}")
-
 with btn_cols[0]:
     if st.button("🚀 启动 Agent", type="primary", use_container_width=True,
                  disabled=agent_running):
@@ -518,11 +513,18 @@ with btn_cols[1]:
         st.rerun()
 
 with btn_cols[2]:
-    if st.button("🗑 清除", use_container_width=True):
-        for k in ["ai_analysis_result", "ai_news", "ai_data", "ai_ticker",
-                   "ai_entry_markers", "ai_exit_markers",
-                   "ai_chat_context", "ai_chat_messages", "ai_error"]:
-            st.session_state[k] = None
+    # 二次点击确认，防止误清空分析与对话记录
+    _clear_armed = st.session_state.get("ai_clear_armed", False)
+    if st.button("⚠️ 再次点击确认清除" if _clear_armed else "🗑 清除",
+                 use_container_width=True):
+        if not _clear_armed:
+            st.session_state.ai_clear_armed = True
+        else:
+            for k in ["ai_analysis_result", "ai_news", "ai_data", "ai_ticker",
+                       "ai_entry_markers", "ai_exit_markers",
+                       "ai_chat_context", "ai_chat_messages", "ai_error"]:
+                st.session_state[k] = None
+            st.session_state.ai_clear_armed = False
         st.rerun()
 
 with btn_cols[3]:
@@ -607,6 +609,7 @@ with mode_cols[1]:
         "杠杆", min_value=1, max_value=125,
         value=st.session_state.ai_leverage,
         step=1, disabled=not is_futures,
+        help="合约杠杆倍数（1-125x），杠杆越高强平风险越大，请谨慎设置",
         key="ai_lev_sel",
     )
 with mode_cols[2]:
@@ -614,6 +617,9 @@ with mode_cols[2]:
         "💡 合约模式：USDT 本位永续合约，含杠杆、保证金、强平价模拟"
         if is_futures else "💡 现货模式：全额交易，无杠杆"
     )
+
+if is_futures and st.session_state.ai_leverage > 10:
+    st.warning("⚠️ 高杠杆风险：超过 10x 杠杆极易触发强制平仓，可能造成重大亏损，请谨慎设置！")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -828,8 +834,9 @@ _tfl = st.session_state.get("ai_timeframe", "15分钟")
 _tk = TIMEFRAMES.get(_tfl, "1d")
 _tv_interval = TV_INTERVAL_MAP.get(_tk, "15")
 
+_tv_theme = st.session_state.get("theme_mode", "light")
 components.html(
-    _build_tradingview_html(interval=_tv_interval, theme="dark"),
+    _build_tradingview_html(interval=_tv_interval, theme=_tv_theme),
     height=560,
 )
 

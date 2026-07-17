@@ -1,4 +1,4 @@
-"""Dashboard page - system overview, account status, risk state, signals."""
+"""Dashboard page - system overview, account status, risk state."""
 
 import sys
 from pathlib import Path
@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from frontend.utils.session_state import get_config
 from frontend.utils.backtest_runner import run_all_strategies
 from frontend.components.metrics_display import _render_metric_card
-from strategies.base import get_available_strategies
+from agents.status_writer import read_agent_status, get_status_file_path
 
 
 st.title("📊 系统总览")
@@ -26,49 +26,52 @@ cfg = get_config()
 # ============ Top KPI Row ============
 st.subheader("系统状态")
 
+# 读取运行中 Agent 写入的真实状态；文件不存在时降级为「Agent 未运行」
+STATUS_FILE = Path(get_status_file_path())
+agent_running = STATUS_FILE.exists()
+status_data = read_agent_status() if agent_running else {}
+a3 = status_data.get("agent3", {})
+risk_status = a3.get("risk_status", {})
+pm_status = status_data.get("position_monitor", {})
+base_currency = cfg.trading.symbol.split("-")[0]
+
 kpi_cols = st.columns(5)
 with kpi_cols[0]:
     _render_metric_card("mode", cfg.mode)
 with kpi_cols[1]:
     _render_metric_card("symbol", cfg.trading.symbol)
-with kpi_cols[2]:
-    _render_metric_card("策略数", len(cfg.strategy.enabled_strategies))
-with kpi_cols[3]:
-    _render_metric_card("主周期", cfg.trading.primary_timeframe)
-with kpi_cols[4]:
-    paused = st.session_state.get("risk_paused", False)
-    status = "🟢 运行中" if not paused else "🔴 已暂停"
-    _render_metric_card("风控状态", status)
-
-
-# ============ Strategy Signal Board ============
-st.subheader("📡 策略信号看板")
-strategies = get_available_strategies()
-
-if strategies:
-    cols = st.columns(len(strategies))
-    for col, (name, info) in zip(cols, strategies.items()):
-        with col:
-            with st.container():
-                st.markdown(f"### {name}")
-                st.markdown(f"*{info.get('description', '')}*")
-                # Show latest signal if available
-                signal_history = st.session_state.get(f"signals_{name}", [])
-                if signal_history:
-                    latest = signal_history[-1]
-                    signal_emoji = {"BUY": "🟢", "SELL": "🔴", "EXIT": "⚫", "HOLD": "⚪"}
-                    emoji = signal_emoji.get(latest.get("signal", ""), "⚪")
-                    st.markdown(f"**最新信号:** {emoji} {latest.get('signal', 'N/A')}")
-                else:
-                    st.markdown("**最新信号:** ⚪ N/A")
-                st.markdown(f"默认参数: {info.get('default_params', {})}")
+if agent_running:
+    pos = a3.get("position") or {}
+    with kpi_cols[2]:
+        if pm_status.get("has_position") and pos:
+            side = "🟢 多" if pos.get("side") == "long" else "🔴 空"
+            pnl = pos.get("pnl", 0)
+            _render_metric_card(
+                "当前持仓",
+                f"{side} {pos.get('size', 0):.4f} {base_currency} (${pnl:+,.2f})",
+            )
+        else:
+            _render_metric_card("当前持仓", "无持仓")
+    with kpi_cols[3]:
+        _render_metric_card(
+            "今日交易",
+            f"{risk_status.get('daily_trade_count', 0)} / {risk_status.get('max_daily_trades', '?')}",
+        )
+    with kpi_cols[4]:
+        risk_text = "🔴 日限暂停" if a3.get("paused_for_daily_limit") else "🟢 风控正常"
+        _render_metric_card("风控状态", risk_text)
 else:
-    st.info("暂无可用策略")
+    with kpi_cols[2]:
+        _render_metric_card("当前持仓", "Agent 未运行")
+    with kpi_cols[3]:
+        _render_metric_card("今日交易", "Agent 未运行")
+    with kpi_cols[4]:
+        _render_metric_card("风控状态", "Agent 未运行")
 
 
 # ============ Quick Actions ============
 st.subheader("⚡ 快速操作")
-action_cols = st.columns(4)
+action_cols = st.columns(3)
 with action_cols[0]:
     if st.button("▶ 运行全部策略回测", use_container_width=True):
         with st.spinner("正在运行回测..."):
@@ -90,12 +93,8 @@ with action_cols[1]:
         st.session_state.show_config = not st.session_state.get("show_config", False)
 
 with action_cols[2]:
-    if st.button("🛡 切换暂停", use_container_width=True):
-        st.session_state.risk_paused = not st.session_state.risk_paused
-        st.rerun()
-
-with action_cols[3]:
-    st.button("📊 刷新", use_container_width=True, on_click=st.rerun)
+    # 按钮点击本身即触发 rerun，无需 on_click
+    st.button("📊 刷新", use_container_width=True)
 
 
 # ============ Config Display (toggle) ============
@@ -116,8 +115,10 @@ if st.session_state.get("show_config", False):
         "连续止损": cfg.risk.max_consecutive_losses,
         "恢复模式": cfg.risk.recovery_mode,
     }
-    for k, v in cfg_dict.items():
-        st.markdown(f"- **{k}**: {v}")
+    cfg_cols = st.columns(2)
+    for i, (k, v) in enumerate(cfg_dict.items()):
+        with cfg_cols[i % 2]:
+            st.markdown(f"- **{k}**: {v}")
 
 
 # ============ Recent Comparison Results ============

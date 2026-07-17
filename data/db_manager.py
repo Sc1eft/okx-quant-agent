@@ -44,6 +44,10 @@ class DatabaseManager:
         self._db_path = db_path
         self._conn: Optional[sqlite3.Connection] = None
         self._conn_lock = threading.Lock()
+        # 共享连接 check_same_thread=False 跨线程使用时，sqlite3 连接对象
+        # 本身并非线程安全：写路径（含 execute+commit 组合）必须持此锁。
+        # 读路径由 WAL 模式保护，可不持锁。
+        self._write_lock = threading.RLock()
         self._ref_count = 0
         logger.debug(f"DatabaseManager 创建: {db_path}")
 
@@ -98,8 +102,58 @@ class DatabaseManager:
 
     # ── 便捷方法 ──
 
+    @property
+    def write_lock(self) -> threading.RLock:
+        """写操作锁：跨线程共享连接时，写路径（execute+commit）必须持锁"""
+        return self._write_lock
+
     def execute(self, sql: str, params=()) -> sqlite3.Cursor:
-        return self.conn.execute(sql, params)
+        with self._write_lock:
+            return self.conn.execute(sql, params)
 
     def commit(self):
-        self.conn.commit()
+        with self._write_lock:
+            self.conn.commit()
+
+
+_schema_lock = threading.Lock()
+
+
+def ensure_trades_schema(conn: sqlite3.Connection) -> None:
+    """确保 trades 表存在且包含全部最新列（唯一 schema 权威）
+
+    所有使用 trades 表的模块（risk_layer / review_generator / agent4 等）
+    都必须通过本函数建表/迁移，禁止各自维护 DDL（避免 schema 分裂）。
+
+    迁移策略: CREATE IF NOT EXISTS + 逐列 ALTER（列已存在时跳过）。
+    模块级锁保证多线程同时初始化时不并发执行 DDL。
+    """
+    with _schema_lock:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                pnl REAL,
+                order_id TEXT,
+                symbol TEXT,
+                decision TEXT
+            )
+        """)
+        for col, col_def in [
+            ("pnl_close", "REAL DEFAULT 0"),
+            ("trade_group_id", "TEXT DEFAULT ''"),
+            ("trade_type", "TEXT DEFAULT 'open'"),
+            ("fee", "REAL DEFAULT 0.0"),
+            ("confidence", "INTEGER DEFAULT 0"),
+            ("position_size_pct", "REAL DEFAULT 0.0"),
+            ("stop_loss", "REAL DEFAULT 0"),
+            ("take_profit", "REAL DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_def}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+        conn.commit()

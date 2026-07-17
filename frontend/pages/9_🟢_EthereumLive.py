@@ -116,7 +116,6 @@ with ctrl_cols[2]:
 with ctrl_cols[3]:
     auto = st.checkbox(
         "自动刷新",
-        value=st.session_state.eth_auto_refresh,
         key="eth_auto_refresh")
 
 st.markdown('</div>', unsafe_allow_html=True)
@@ -414,7 +413,7 @@ elif _cached_df_display is not None and not _cached_df_display.empty:
         st.download_button("📥 导出 CSV", _df.to_csv(index=True).encode("utf-8"), "eth_usdt_klines.csv", "text/csv", use_container_width=True)
 
 # ════════════════════════════════════════════════════════════════
-# DATA FRAGMENT — 仅获取数据，无显示，全页刷新更新显示
+# DATA FRAGMENT — 仅获取数据写入 session_state，run_every 周期自行刷新
 # ════════════════════════════════════════════════════════════════
 
 refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
@@ -422,14 +421,9 @@ refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
 
 @st.fragment(run_every=refresh_interval_s)
 def _data_fragment():
-    """仅获取数据写入 session_state，然后 st.rerun() 全页刷新更新显示。
-    显示代码在 fragment 外，故刷新期间旧数据显示始终不变，不产生蒙版。
+    """仅获取数据写入 session_state，由 run_every 周期自动刷新。
+    显示代码在 fragment 外，读取 session_state 渲染，刷新期间旧数据显示不变，不产生蒙版。
     """
-    # Guard: 如果是自己的 st.rerun() 触发的全页重跑，跳过
-    if st.session_state.get("_eth_rerun_guard"):
-        st.session_state._eth_rerun_guard = False
-        return
-
     _tf_label = st.session_state.eth_timeframe
     _t_key = TIMEFRAMES.get(_tf_label, "1d")
     _d_count = st.session_state.eth_data_count
@@ -486,11 +480,6 @@ def _data_fragment():
                 for _, _bar in _new_bars.iterrows():
                     _engine.on_bar(_bar)
                 st.session_state.ai_trade_state = _engine.get_state()
-
-    # 触发全页重跑 → 更新 fragment 外的显示代码
-    if auto:
-        st.session_state._eth_rerun_guard = True
-        st.rerun()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -1162,6 +1151,6 @@ with st.expander("🤖 AI 交易", expanded=bool(st.session_state.ai_running)):
             st.info("⏳ 等待数据…")
 
 # ════════════════════════════════════════════════════════════════
-# DATA FRAGMENT — 放在页面末尾，避免 st.rerun() 吞掉按钮点击事件
+# DATA FRAGMENT — 放在页面末尾，周期获取数据写入 session_state
 # ════════════════════════════════════════════════════════════════
 _data_fragment()

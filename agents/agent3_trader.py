@@ -299,7 +299,7 @@ class Agent3:
             await asyncio.sleep(30)  # 每 30s 检查一次
             now = time.time()
             # 没有持仓时才做空闲评估（有持仓时 position_monitor 在管）
-            if self._current_position.get("side", "none") != "none":
+            if self._pos_state()[0] != "none":
                 continue
             idle_since = now - self._last_event_time
             if idle_since < interval:
@@ -343,27 +343,30 @@ class Agent3:
         if self._current_price > 0:
             self._last_idle_decision_price = self._current_price
 
-        # ── 每日交易上限暂停（睡到北京时间午夜，风控自动重置） ──
+        # ── 每日交易上限暂停（非阻塞：置标记即返回，风控跨日自动重置） ──
+        # 旧实现 asyncio.sleep 数小时会卡死事件消费协程，导致缓冲区堆积。
         if self.risk.is_daily_limit_reached():
             if not self._paused_for_daily_limit:
                 self._paused_for_daily_limit = True
-                self._event_buffer.clear()
                 now_utc = datetime.now(timezone.utc)
                 cst_now = now_utc + timedelta(hours=8)
                 next_midnight = cst_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
                 sleep_sec = (next_midnight - cst_now).total_seconds()
                 logger.warning(
                     f"🌙 今日交易已达上限 ({self.risk._daily_trade_count}/{self.config.agent3_max_daily_trades})，"
-                    f"暂停至 CST 午夜 ({sleep_sec:.0f}s)"
+                    f"暂停至 CST 午夜（约 {sleep_sec / 3600:.1f}h）"
                 )
-                self._current_activity = f"🌙 交易达上限，暂停 {sleep_sec:.0f}s 至午夜"
+                self._current_activity = f"🌙 交易达上限，暂停至 CST 午夜（约 {sleep_sec / 3600:.1f}h）"
                 self._last_activity_time = time.time()
-                await asyncio.sleep(sleep_sec)
-                self._paused_for_daily_limit = False
-                self._current_activity = "🌅 新日重置，恢复交易"
-                self._last_activity_time = time.time()
-                logger.info("🌅 每日上限暂停结束，恢复交易")
+            # 暂停期间丢弃缓冲事件，防止无限堆积（反正也不会交易）
+            self._event_buffer.clear()
             return
+        if self._paused_for_daily_limit:
+            # is_daily_limit_reached() 内部已跨日重置 → 恢复交易
+            self._paused_for_daily_limit = False
+            self._current_activity = "🌅 新日重置，恢复交易"
+            self._last_activity_time = time.time()
+            logger.info("🌅 每日上限暂停结束，恢复交易")
 
         async with self._decision_lock:
             if not self._event_buffer:
@@ -448,7 +451,7 @@ class Agent3:
                 pm_status = self.position_monitor.get_status()
                 current_side = pm_status.get("position_side", "none")
                 current_size = pm_status.get("position_size", 0.0)
-                if current_side != "none" and current_side != "none":
+                if current_side != "none":
                     pos_is_long = current_side == "long"
                     decision_is_long = trade_side == "buy"
                     is_reversal = pos_is_long != decision_is_long
@@ -573,14 +576,50 @@ class Agent3:
             # ── 6. Layer 3 记录（Phase 4: P&L 跟踪） ──
             if trade_result["success"]:
                 self._stats["trades_executed"] += 1
+                # 成交价兜底：真实模式下市价单可能暂时查不到 fillPx，
+                # 绝不用 0 入账（会污染 PnL/止损计算）
+                fill_price = trade_result["fill_price"]
+                if not fill_price or fill_price <= 0:
+                    fill_price = context.get("current_price", 0)
+                    logger.warning(f"成交价缺失，用当前价 ${fill_price:.2f} 兜底入账")
                 trade_group_id = str(uuid.uuid4())[:8]
+                # 止损止盈：取 DeepSeek 值并做方向校验（多头 SL<入场<TP，空头相反），
+                # 方向错误回退配置默认百分比——错误值会让 PositionMonitor 立即触发。
+                # 校验后的最终值随开仓记录入库，重启恢复时原样还原。
+                stop_loss = _safe_float(decision.get("stop_loss"), 0)
+                take_profit = _safe_float(decision.get("take_profit"), 0)
+                current_px = context.get("current_price") or fill_price
+                sl_pct = self.config.agent3_default_stop_loss_pct / 100
+                tp_pct = self.config.agent3_default_take_profit_pct / 100
+                if trade_side == "buy":
+                    default_sl, default_tp = current_px * (1 - sl_pct), current_px * (1 + tp_pct)
+                    sl_ok = 0 < stop_loss < fill_price
+                    tp_ok = take_profit > fill_price
+                else:
+                    default_sl, default_tp = current_px * (1 + sl_pct), current_px * (1 - tp_pct)
+                    sl_ok = stop_loss > fill_price
+                    tp_ok = 0 < take_profit < fill_price
+                if not sl_ok:
+                    if stop_loss != 0:
+                        logger.warning(
+                            f"DeepSeek 止损方向错误: {trade_side} SL=${stop_loss:.2f} "
+                            f"入场=${fill_price:.2f}，回退默认 {self.config.agent3_default_stop_loss_pct}%"
+                        )
+                    stop_loss = default_sl
+                if not tp_ok:
+                    if take_profit != 0:
+                        logger.warning(
+                            f"DeepSeek 止盈方向错误: {trade_side} TP=${take_profit:.2f} "
+                            f"入场=${fill_price:.2f}，回退默认 {self.config.agent3_default_take_profit_pct}%"
+                        )
+                    take_profit = default_tp
                 trade_record = {
                     "side": trade_side,
                     "size": size_eth,
-                    "price": trade_result["fill_price"],
+                    "price": fill_price,
                     "pnl": 0,
                     "pnl_close": 0,
-                    "fee": round(size_eth * trade_result["fill_price"] * (
+                    "fee": round(size_eth * fill_price * (
                         self.config.maker_fee_rate if prefer_limit else self.config.taker_fee_rate
                     ), 2),
                     "trade_group_id": trade_group_id,
@@ -591,35 +630,21 @@ class Agent3:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "confidence": decision.get("confidence", 0),
                     "position_size_pct": decision.get("position_size_pct", 0),
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
                 }
                 if trade_side == "sell":
                     trade_record["short"] = True
                 self.risk.record_trade(trade_record)
-                logger.info(f"交易成功: {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}")
+                logger.info(f"交易成功: {trade_side} {size_eth:.4f} ETH @ ${fill_price:.2f}")
 
                 # Phase 2: 通知持仓监控器 (Phase 4: 传入 trade_group_id)
                 if self.position_monitor:
-                    # 从 DeepSeek 获取止损止盈（buy/sell 时是必填，但保底用配置默认值）
-                    stop_loss = _safe_float(decision.get("stop_loss"), 0)
-                    take_profit = _safe_float(decision.get("take_profit"), 0)
-                    current_px = context.get("current_price", trade_result["fill_price"])
-                    if stop_loss == 0:
-                        if trade_side == "buy":
-                            stop_loss = current_px * (1 - self.config.agent3_default_stop_loss_pct / 100)
-                        else:
-                            stop_loss = current_px * (1 + self.config.agent3_default_stop_loss_pct / 100)
-                        logger.info(f"DeepSeek 未提供止损，使用默认 {self.config.agent3_default_stop_loss_pct}% → ${stop_loss:.2f}")
-                    if take_profit == 0:
-                        if trade_side == "buy":
-                            take_profit = current_px * (1 + self.config.agent3_default_take_profit_pct / 100)
-                        else:
-                            take_profit = current_px * (1 - self.config.agent3_default_take_profit_pct / 100)
-                        logger.info(f"DeepSeek 未提供止盈，使用默认 {self.config.agent3_default_take_profit_pct}% → ${take_profit:.2f}")
                     pos_side = "long" if trade_side == "buy" else "short"
                     self.position_monitor.update_position(
                         side=pos_side,
                         size=size_eth,
-                        entry_price=trade_result["fill_price"],
+                        entry_price=fill_price,
                         stop_loss=stop_loss,
                         take_profit=take_profit,
                         trade_group_id=trade_group_id,
@@ -635,7 +660,7 @@ class Agent3:
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "side": trade_side,
                         "size": size_eth,
-                        "price": trade_result["fill_price"],
+                        "price": fill_price,
                         "pnl": 0.0,
                         "order_id": trade_result["order_id"],
                         "symbol": self.executor.symbol,
@@ -652,10 +677,10 @@ class Agent3:
                     old_size = self._current_position["size"]
                     old_entry = self._current_position["entry_price"]
                     new_size = old_size + size_eth
-                    new_entry = (old_size * old_entry + size_eth * trade_result["fill_price"]) / new_size if new_size > 0 else trade_result["fill_price"]
+                    new_entry = (old_size * old_entry + size_eth * fill_price) / new_size if new_size > 0 else fill_price
                     self._current_position["size"] = new_size
                     self._current_position["entry_price"] = new_entry
-                    self._current_position["current_price"] = context.get("current_price", trade_result["fill_price"])
+                    self._current_position["current_price"] = context.get("current_price") or fill_price
                     # 合约字段累加
                     if trade_result.get("market_mode") == "futures":
                         self._current_position["market_mode"] = "futures"
@@ -668,8 +693,8 @@ class Agent3:
                 else:
                     self._current_position["side"] = "long" if trade_side == "buy" else "short"
                     self._current_position["size"] = size_eth
-                    self._current_position["entry_price"] = trade_result["fill_price"]
-                    self._current_position["current_price"] = context.get("current_price", trade_result["fill_price"])
+                    self._current_position["entry_price"] = fill_price
+                    self._current_position["current_price"] = context.get("current_price") or fill_price
                     # 合约模式：额外记录保证金/强平价等
                     if trade_result.get("market_mode") == "futures":
                         self._current_position["market_mode"] = "futures"
@@ -678,7 +703,7 @@ class Agent3:
                         self._current_position["liquidation_price"] = trade_result.get("liquidation_price", 0)
                         self._current_position["position_value"] = trade_result.get("position_value", 0)
                         self._current_position["margin_rate"] = trade_result.get("margin_rate", 0)
-                self._current_activity = f"✅ {trade_side} {size_eth:.4f} ETH @ ${trade_result['fill_price']:.2f}"
+                self._current_activity = f"✅ {trade_side} {size_eth:.4f} ETH @ ${fill_price:.2f}"
                 self._last_activity_time = time.time()
             else:
                 self.risk.report_api_error()
@@ -753,11 +778,12 @@ class Agent3:
             self._stats["last_monthly_pnl"] = monthly.get("total_pnl", 0)
             self._stats["last_win_rate"] = monthly.get("win_rate", 0)
 
+        pos_side, pos_size, pos_entry = self._pos_state()
         return {
             "symbol": self.root_config.trading.symbol,
-            "position_direction": self._current_position["side"],
-            "position_size": self._current_position["size"],
-            "entry_price": self._current_position["entry_price"],
+            "position_direction": pos_side,
+            "position_size": pos_size,
+            "entry_price": pos_entry,
             "pnl_pct": self._calc_pnl_pct(current_price),
             # ── 合约模式字段 ──
             "market_mode": self._current_position.get("market_mode", "spot"),
@@ -813,6 +839,7 @@ class Agent3:
             RuleEngine context dict
         """
         now = datetime.now(timezone.utc)
+        pos_side, pos_size = self.risk.get_position()
         ctx = {
             Ctx.TIME: now,
             Ctx.SYMBOL: self.executor.symbol,
@@ -822,8 +849,8 @@ class Agent3:
             Ctx.CONSECUTIVE_LOSSES: self.risk._consecutive_losses,
             Ctx.LAST_TRADE_TIME: self.risk._last_trade_time,
             Ctx.API_BREAKER_UNTIL: self.risk._api_breaker_until,
-            Ctx.POSITION_SIDE: self.risk._current_position_side,
-            Ctx.POSITION_SIZE: self.risk._current_position_eth,
+            Ctx.POSITION_SIDE: pos_side,
+            Ctx.POSITION_SIZE: pos_size,
             Ctx.MAX_POSITION_ETH: self.config.agent3_max_position_eth,
             Ctx.MAX_DAILY_TRADES: self.config.agent3_max_daily_trades,
             Ctx.MAX_CONSECUTIVE_LOSSES: self.config.agent3_max_consecutive_losses,
@@ -892,10 +919,25 @@ class Agent3:
             logger.debug(f"直接查 DB 加载近期交易失败: {e}")
             return "近期交易数据不可用"
 
+    def _pos_state(self) -> tuple[str, float, float]:
+        """持仓权威状态: (side, size, entry_price)
+
+        PositionMonitor 是唯一仓位事实源；未接入时（如单元测试）
+        回退到本地 _current_position 展示缓存。
+        """
+        if self.position_monitor:
+            st = self.position_monitor.get_status()
+            return (
+                st.get("position_side", "none"),
+                st.get("position_size", 0.0),
+                st.get("entry_price", 0.0),
+            )
+        pos = self._current_position
+        return pos.get("side", "none"), pos.get("size", 0.0), pos.get("entry_price", 0.0)
+
     def _calc_pnl_pct(self, current_price: float) -> str:
         """根据当前仓位计算浮盈/浮亏百分比（合约模式含杠杆放大）"""
-        direction = self._current_position["side"]
-        entry = self._current_position["entry_price"]
+        direction, _, entry = self._pos_state()
         if direction != "none" and entry > 0 and current_price > 0:
             if direction == "long":
                 pnl_pct = (current_price - entry) / entry * 100
@@ -1145,9 +1187,11 @@ class Agent3:
         """
         pos = self._current_position
         pos["current_price"] = self._current_price
-        entry = pos.get("entry_price", 0)
-        size = pos.get("size", 0)
-        direction = pos.get("side", "none")
+        # side/size/entry 以 PositionMonitor 为权威（未接入时回退本地缓存）
+        direction, size, entry = self._pos_state()
+        pos["side"] = direction
+        pos["size"] = size
+        pos["entry_price"] = entry
         price = self._current_price
 
         if direction != "none" and entry > 0 and price > 0 and size > 0:

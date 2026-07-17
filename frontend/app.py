@@ -22,7 +22,7 @@ st.set_page_config(
     page_title="OKX Quant Agent",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="auto",
 )
 
 # Load custom CSS
@@ -30,12 +30,6 @@ css_path = Path(__file__).parent / "assets" / "style.css"
 if css_path.exists():
     with open(css_path, encoding="utf-8") as f:
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-
-# ── Viewport meta tag for mobile responsiveness ──
-st.markdown(
-    "<meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0'>",
-    unsafe_allow_html=True,
-)
 
 # ── Load Streamlit secrets into environment variables ──
 # 本地开发: .streamlit/secrets.toml
@@ -127,6 +121,8 @@ if st.session_state.theme_mode == "dark":
         --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.4);
     }
     .stApp { background-color: #0f172a !important; }
+    header[data-testid="stHeader"], .stAppHeader { background-color: #0f172a !important; }
+    .stAppHeader .stDeployButton button, .stAppHeader [data-testid="stHeaderActionElements"] * { color: #cbd5e1 !important; }
     .stDataFrame thead tr th { background: #1e293b !important; border-color: #334155 !important; }
     .stDataFrame tbody tr:hover { background: #253349 !important; }
     div[data-baseweb="tag"] { background: #334155 !important; }
@@ -179,32 +175,40 @@ if st.session_state.theme_mode == "dark":
     *[style*="color: #334155"],*[style*="color:#334155"] { color: #94a3b8 !important; }
     </style>""", unsafe_allow_html=True)
 
-# Navigation pages
-pages = [
-    ("📊 仪表盘", "pages/1_📊_Dashboard.py"),
-    ("📈 回测", "pages/2_📈_Backtest.py"),
-    ("⚙ 策略", "pages/3_⚙_Strategies.py"),
-    ("🔬 滚动优化", "pages/4_🔬_WalkForward.py"),
-    ("🛡 风控", "pages/5_🛡_Risk.py"),
-    ("📋 交易日志", "pages/6_📋_TradeLog.py"),
-    ("🤖 智能分析", "pages/7_🤖_AgentAnalysis.py"),
-    ("💰 模拟交易", "pages/8_💰_PaperTrading.py"),
-    ("🟢 以太坊", "pages/9_🟢_EthereumLive.py"),
-    ("💓 ETH 心跳", "pages/10_💓_ETHHeartbeat.py"),
-    ("🤖 AI 交易", "pages/11_🤖_AI_Trading.py"),
-    ("📋 交易报告", "pages/13_📋_TradeReport.py"),
-]
+# Navigation pages (grouped)
+pages = {
+    "实盘 Agent": [
+        ("🟢 以太坊", "pages/9_🟢_EthereumLive.py"),
+        ("💓 ETH 心跳", "pages/10_💓_ETHHeartbeat.py"),
+        ("🤖 AI 交易", "pages/11_🤖_AI_Trading.py"),
+        ("🛡 Agent 风控", "pages/12_🛡_AgentRisk.py"),
+        ("📋 交易报告", "pages/13_📋_TradeReport.py"),
+    ],
+    "回测沙盒": [
+        ("📊 仪表盘", "pages/1_📊_Dashboard.py"),
+        ("📈 回测", "pages/2_📈_Backtest.py"),
+        ("💰 模拟交易", "pages/8_💰_PaperTrading.py"),
+        ("⚙ 策略", "pages/3_⚙_Strategies.py"),
+        ("🔬 滚动优化", "pages/4_🔬_WalkForward.py"),
+        ("🛡 风控", "pages/5_🛡_Risk.py"),
+        ("📋 回测交易日志", "pages/6_📋_TradeLog.py"),
+        ("🤖 智能分析", "pages/7_🤖_AgentAnalysis.py"),
+    ],
+}
 
 # Use page navigation
-nav = st.Page
-page_objects = []
-for title, path in pages:
-    full_path = Path(__file__).parent / path
-    if full_path.exists():
-        page_objects.append(nav(str(full_path), title=title))
+page_groups = {}
+for group_title, group_pages in pages.items():
+    page_objects = []
+    for title, path in group_pages:
+        full_path = Path(__file__).resolve().parent / path
+        if full_path.exists():
+            page_objects.append(st.Page(str(full_path), title=title))
+    if page_objects:
+        page_groups[group_title] = page_objects
 
-if page_objects:
-    pg = st.navigation(page_objects, position="sidebar")
+if page_groups:
+    pg = st.navigation(page_groups, position="sidebar")
     pg.run()
 else:
     st.error("未找到页面文件。请确保 pages/ 目录存在。")

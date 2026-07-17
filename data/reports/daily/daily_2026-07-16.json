@@ -1,0 +1,66 @@
+{
+  "type": "daily",
+  "date": "2026-07-16",
+  "generated_at": "2026-07-16T16:28:29.307922+00:00",
+  "stats": {
+    "trades": 1,
+    "wins": 0,
+    "losses": 1,
+    "win_rate": 0.0,
+    "total_pnl": -3.61,
+    "total_fee": 0.2,
+    "avg_pnl": -3.61,
+    "best_trade": -3.61,
+    "worst_trade": -3.61,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "sell": {
+        "trades": 1,
+        "win_rate": 0.0,
+        "pnl": -3.61
+      }
+    }
+  },
+  "summary": "交易次数不足 (1 < 5), 暂不生成总结",
+  "period": {
+    "start": "2026-07-16T00:00:00",
+    "end": "2026-07-16T23:59:59"
+  },
+  "trades": {
+    "wins": [],
+    "losses": [
+      {
+        "trade_id": 605,
+        "pnl": -3.61,
+        "side": "sell",
+        "entry_price": 1888.11,
+        "exit_price": 0,
+        "reason": "多头止损",
+        "time": "2026-07-16T08:14:12.649705+00:00"
+      }
+    ]
+  },
+  "ai_analysis": {
+    "wins": {
+      "count": 0,
+      "total_profit": 0.0,
+      "patterns": []
+    },
+    "losses": {
+      "count": 1,
+      "total_loss": 3.61,
+      "patterns": [
+        {
+          "pattern": "做空交易遭遇多头止损",
+          "loss_count": 1,
+          "avg_loss": 3.61,
+          "cause": "逆势做空，市场多头力量强劲，触发预设止损",
+          "suggestion": "避免在强势多头趋势下做空，或缩小仓位，设置更严格的止损"
+        }
+      ]
+    },
+    "summary": "当日仅一笔做空交易，触发多头止损导致亏损，需警惕逆势风险。"
+  },
+  "pushed": false,
+  "push_time": null
+}

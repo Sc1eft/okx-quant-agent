@@ -50,11 +50,18 @@ okx-quant-agent/
 ├── execution/
 │   ├── order.py            # 🔧 订单类型分析
 │   └── paper.py            # 模拟盘
-├── agent/
-│   ├── report_analyzer.py  # DeepSeek 回测分析
-│   └── audit.py            # 边界审计
-├── notification/
-│   └── notifier.py         # 🔧 通知系统
+├── agents/
+│   ├── agent1_technical.py   # 技术指标 Agent
+│   ├── agent2_news.py        # 新闻/链上 Agent
+│   ├── agent3_trader.py      # 交易决策 Agent
+│   ├── agent4_reviewer.py    # 复盘改进 Agent
+│   ├── risk_layer.py         # 三层风控
+│   ├── trade_executor.py     # 订单执行（限价/市价/模拟）
+│   ├── position_monitor.py   # 持仓监控（止盈止损/移动止损）
+│   ├── deepseek_caller.py    # DeepSeek API 封装
+│   ├── notifier.py           # ServerChan 推送
+│   └── rule_engine/          # 可插拔规则引擎
+├── frontend/                 # Streamlit 监控面板
 ├── tests/
 │   ├── test_strategy.py    # 策略测试
 │   ├── test_risk.py        # 风控测试

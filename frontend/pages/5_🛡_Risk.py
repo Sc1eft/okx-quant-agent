@@ -25,7 +25,7 @@ cfg = get_config()
 st.subheader("📊 风控状态")
 
 # Initialize risk engine in session state
-if st.session_state.risk_engine is None:
+if st.session_state.get("risk_engine") is None:
     st.session_state.risk_engine = RiskEngine(cfg)
     st.session_state.risk_paused = False
 

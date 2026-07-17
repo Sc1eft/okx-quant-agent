@@ -1,13 +1,20 @@
 # tests/test_risk_layer.py
 import sys; sys.path.insert(0, ".")
+import tempfile, os
 from datetime import datetime, timezone, timedelta
 from agents.config import AgentSystemConfig
 from agents.risk_layer import RiskManager
 
 
+def _make_rm(**overrides) -> RiskManager:
+    """创建 RiskManager 实例，使用临时数据库避免污染生产环境"""
+    tmpdir = tempfile.mkdtemp()
+    cfg = AgentSystemConfig(db_path=os.path.join(tmpdir, "test_trades.db"), **overrides)
+    return RiskManager(cfg)
+
+
 def test_layer1_min_interval():
-    cfg = AgentSystemConfig(agent3_min_interval_between_trades=300)
-    rm = RiskManager(cfg)
+    rm = _make_rm(agent3_min_interval_between_trades=300)
     now = datetime.now(timezone.utc)
 
     # First trade should pass
@@ -27,16 +34,16 @@ def test_layer1_min_interval():
 
 
 def test_layer1_daily_loss():
-    cfg = AgentSystemConfig(agent3_max_daily_loss_usdt=100.0)
-    rm = RiskManager(cfg)
+    rm = _make_rm(agent3_max_daily_loss_usdt=100.0, agent3_min_interval_between_trades=300,
+                  agent3_min_position_for_loss_tracking=0.01)
     now = datetime.now(timezone.utc)
 
     ok, _ = rm.check_layer1("buy", 0.01, 3000, now)
     assert ok
     rm.record_trade({"side": "sell", "size": 0.01, "pnl": -60})
 
-    ok, _ = rm.check_layer1("buy", 0.01, 3000, now + timedelta(seconds=301))
-    assert ok
+    ok, reason = rm.check_layer1("buy", 0.01, 3000, now + timedelta(seconds=301))
+    assert ok, f"Second trade failed: {reason}"
     rm.record_trade({"side": "sell", "size": 0.01, "pnl": -50})
 
     # Now daily loss exceeds limit
@@ -47,8 +54,8 @@ def test_layer1_daily_loss():
 
 
 def test_consecutive_losses():
-    cfg = AgentSystemConfig(agent3_max_consecutive_losses=3)
-    rm = RiskManager(cfg)
+    rm = _make_rm(agent3_max_consecutive_losses=3, agent3_min_interval_between_trades=300,
+                  agent3_min_position_for_loss_tracking=0.01)
     now = datetime.now(timezone.utc)
 
     # 3 consecutive losses
@@ -57,7 +64,7 @@ def test_consecutive_losses():
         # 重置间隔以便继续检查
         rm._last_trade_time = None
 
-    ok, reason = rm.check_layer1("buy", 0.01, 3000, now + timedelta(seconds=999))
+    ok, reason = rm.check_layer1("buy", 0.01, 3000, now + timedelta(seconds=301))
     assert not ok, "Should fail: consecutive losses"
     assert "连续亏损" in reason
     print("test_consecutive_losses PASSED")

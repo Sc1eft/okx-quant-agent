@@ -25,6 +25,11 @@ Thumbs.db
 data/
 logs/
 
+# ── Secrets（绝不进入镜像） ──
+.env
+.env.*
+!.env.example
+
 # ── Docs ──
 README.md
 *.md

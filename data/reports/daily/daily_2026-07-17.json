@@ -1,35 +1,30 @@
 {
-  "type": "monthly",
-  "date": "2026-07",
-  "generated_at": "2026-07-17T04:01:09.781870+00:00",
+  "type": "daily",
+  "date": "2026-07-17",
+  "generated_at": "2026-07-17T04:01:09.992299+00:00",
   "stats": {
     "trades": 2,
     "wins": 1,
     "losses": 1,
     "win_rate": 50.0,
-    "total_pnl": 7.0,
+    "total_pnl": 5.0,
     "total_fee": 0.0,
-    "avg_pnl": 3.5,
+    "avg_pnl": 2.5,
     "best_trade": 10.0,
-    "worst_trade": -3.0,
+    "worst_trade": -5.0,
     "max_drawdown_pct": 0.0,
     "by_side": {
-      "long": {
-        "trades": 1,
-        "win_rate": 0.0,
-        "pnl": -3.0
-      },
       "short": {
-        "trades": 1,
-        "win_rate": 100.0,
-        "pnl": 10.0
+        "trades": 2,
+        "win_rate": 50.0,
+        "pnl": 5.0
       }
     }
   },
   "summary": "交易次数不足 (2 < 3), 暂不生成总结",
   "period": {
-    "start": "2026-07-01T00:00:00+00:00",
-    "end": "2026-07-17T04:01:09.776341+00:00"
+    "start": "2026-07-17T00:00:00",
+    "end": "2026-07-17T23:59:59"
   },
   "trades": {
     "wins": [
@@ -39,19 +34,19 @@
         "side": "short",
         "entry_price": 0,
         "exit_price": 3500.0,
-        "reason": "MACD cross",
-        "time": "2026-07-17T04:01:09.774206+00:00"
+        "reason": "",
+        "time": "2026-07-17T04:01:09.982034+00:00"
       }
     ],
     "losses": [
       {
         "trade_id": 2,
-        "pnl": -3.0,
-        "side": "long",
+        "pnl": -5.0,
+        "side": "short",
         "entry_price": 0,
         "exit_price": 3500.0,
         "reason": "",
-        "time": "2026-07-17T04:01:09.774206+00:00"
+        "time": "2026-07-17T04:01:09.983034+00:00"
       }
     ]
   },

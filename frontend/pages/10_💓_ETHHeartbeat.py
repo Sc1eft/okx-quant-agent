@@ -256,21 +256,34 @@ with ctrl_cols[0]:
             st.rerun()
 
 with ctrl_cols[1]:
-    # Clear data button
+    # Clear data button — 点击后需二次确认，防止误删
     if st.button("🗑 清空数据", use_container_width=True):
-        try:
-            db = HeartbeatDB()
-            db.conn.execute("DELETE FROM ticks")
-            db.conn.commit()
-            db.close()
-            st.toast("✅ 心跳数据已清空", icon="🗑")
-            time.sleep(0.3)
-            st.rerun()
-        except Exception as e:
-            st.error(f"清空失败: {e}")
+        st.session_state.hb_confirm_clear = True
 
 with ctrl_cols[2]:
     auto = st.checkbox("自动刷新", value=True, key="hb_auto_refresh")
+
+# ── 清空数据二次确认 ──
+if st.session_state.get("hb_confirm_clear"):
+    st.warning("⚠️ 此操作将删除全部心跳数据，且不可恢复。")
+    confirm_cols = st.columns([1, 1, 4])
+    with confirm_cols[0]:
+        if st.button("✅ 确认清空", key="hb_clear_yes", type="primary"):
+            try:
+                db = HeartbeatDB()
+                db.conn.execute("DELETE FROM ticks")
+                db.conn.commit()
+                db.close()
+                st.toast("✅ 心跳数据已清空", icon="🗑")
+            except Exception as e:
+                st.error(f"清空失败: {e}")
+            st.session_state.hb_confirm_clear = False
+            time.sleep(0.3)
+            st.rerun()
+    with confirm_cols[1]:
+        if st.button("取消", key="hb_clear_no"):
+            st.session_state.hb_confirm_clear = False
+            st.rerun()
 
 if not running:
     st.markdown("""
@@ -288,43 +301,50 @@ if not running:
 
 
 # ════════════════════════════════════════════════════════════════
-# 2. LIVE PRICE DISPLAY (only when running)
+# 2. LIVE DISPLAY — 动态行情区（独立 fragment，每秒刷新，不闪全页）
 # ════════════════════════════════════════════════════════════════
 
-status = read_status()
-if not status:
-    st.warning("⏳ 等待采集器就绪……")
-    if auto:
-        time.sleep(1)
+@st.fragment(run_every=1 if auto else None)
+def _live_fragment():
+    """价格卡 / sparkline / KPI / 最近心跳记录 — 数据获取与渲染都在 fragment 内"""
+    # 采集器停止时退回整页重跑，走顶部「已停止 / 自动重启」逻辑
+    if not is_collector_running():
         st.rerun()
-    st.stop()
 
-last_price = status.get("last_price", 0) or 0
-change_24h = status.get("change_24h")
-bid = status.get("last_bid")
-ask = status.get("last_ask")
-volume_24h = status.get("volume_24h")
+    status = read_status()
+    if not status:
+        st.warning("⏳ 等待采集器就绪……")
+        return
 
-# Determine direction for coloring
-prev_price = _ss("hb_prev_price", last_price)
-if last_price > prev_price:
-    price_dir = "up"
-elif last_price < prev_price:
-    price_dir = "down"
-else:
-    price_dir = "flat"
-st.session_state.hb_prev_price = last_price
+    tick_count = status.get("tick_count", 0)
+    tps = _calc_ticks_per_second(status)
 
-# Pre-compute display values
-change_class = "change-up" if (change_24h or 0) >= 0 else "change-down"
-price_value_class = f"price-{price_dir}"
-bid_str = _fmt_price(bid) if bid else "N/A"
-ask_str = _fmt_price(ask) if ask else "N/A"
-spread_str = f"{(ask - bid) / bid * 100:.3f}%" if bid and ask else "N/A"
-vol_str = f"{volume_24h:,.0f}" if volume_24h else "N/A"
+    last_price = status.get("last_price", 0) or 0
+    change_24h = status.get("change_24h")
+    bid = status.get("last_bid")
+    ask = status.get("last_ask")
+    volume_24h = status.get("volume_24h")
 
-# ── Price card ──
-st.markdown(f"""
+    # Determine direction for coloring
+    prev_price = _ss("hb_prev_price", last_price)
+    if last_price > prev_price:
+        price_dir = "up"
+    elif last_price < prev_price:
+        price_dir = "down"
+    else:
+        price_dir = "flat"
+    st.session_state.hb_prev_price = last_price
+
+    # Pre-compute display values
+    change_class = "change-up" if (change_24h or 0) >= 0 else "change-down"
+    price_value_class = f"price-{price_dir}"
+    bid_str = _fmt_price(bid) if bid else "N/A"
+    ask_str = _fmt_price(ask) if ask else "N/A"
+    spread_str = f"{(ask - bid) / bid * 100:.3f}%" if bid and ask else "N/A"
+    vol_str = f"{volume_24h:,.0f}" if volume_24h else "N/A"
+
+    # ── Price card ──
+    st.markdown(f"""
 <div class="price-card">
     <div class="price-value {price_value_class}">
         {_fmt_price(last_price)}
@@ -344,100 +364,92 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+    # ════════════════════════════════════════════════════════════
+    # 3. SPARKLINE
+    # ════════════════════════════════════════════════════════════
 
-# ════════════════════════════════════════════════════════════════
-# 3. SPARKLINE
-# ════════════════════════════════════════════════════════════════
+    db = HeartbeatDB()
+    recent_ticks = db.get_recent_ticks(limit=120)  # last ~10-20s of data
 
-db = HeartbeatDB()
-recent_ticks = db.get_recent_ticks(limit=120)  # last ~10-20s of data
+    if recent_ticks:
+        sparkline = _build_sparkline(recent_ticks, height=110)
+        st.markdown('<div class="sparkline-box">', unsafe_allow_html=True)
+        st.plotly_chart(sparkline, use_container_width=True, config={"displayModeBar": False})
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.info("⏳ 等待心跳数据……")
 
-if recent_ticks:
-    sparkline = _build_sparkline(recent_ticks, height=110)
-    st.markdown('<div class="sparkline-box">', unsafe_allow_html=True)
-    st.plotly_chart(sparkline, use_container_width=True, config={"displayModeBar": False})
-    st.markdown('</div>', unsafe_allow_html=True)
-else:
-    st.info("⏳ 等待心跳数据……")
+    # ════════════════════════════════════════════════════════════
+    # 4. KPI ROW
+    # ════════════════════════════════════════════════════════════
 
+    kpi_cols = st.columns(5)
 
-# ════════════════════════════════════════════════════════════════
-# 4. KPI ROW
-# ════════════════════════════════════════════════════════════════
+    # Price stats from recent ticks
+    if recent_ticks:
+        prices = [t["price"] for t in recent_ticks if t.get("price")]
+        if prices:
+            with kpi_cols[0]:
+                st.metric("时段最高", f"${max(prices):,.2f}",
+                          f"+{(max(prices) - prices[0]) / prices[0] * 100:+.2f}%")
+            with kpi_cols[1]:
+                st.metric("时段最低", f"${min(prices):,.2f}",
+                          f"-{(prices[0] - min(prices)) / prices[0] * 100:+.2f}%")
+            with kpi_cols[2]:
+                st.metric("时段波幅", f"${max(prices) - min(prices):,.2f}")
+            with kpi_cols[3]:
+                st.metric("心跳总数", f"{tick_count:,}")
+            with kpi_cols[4]:
+                sample_rate = f"{tps}/s"
+                st.metric("采集速率", sample_rate)
 
-kpi_cols = st.columns(5)
+    # ════════════════════════════════════════════════════════════
+    # 5. RECENT TICKS TABLE
+    # ════════════════════════════════════════════════════════════
 
-# Price stats from recent ticks
-if recent_ticks:
-    prices = [t["price"] for t in recent_ticks if t.get("price")]
-    if prices:
-        with kpi_cols[0]:
-            st.metric("时段最高", f"${max(prices):,.2f}",
-                      f"+{(max(prices) - prices[0]) / prices[0] * 100:+.2f}%")
-        with kpi_cols[1]:
-            st.metric("时段最低", f"${min(prices):,.2f}",
-                      f"-{(prices[0] - min(prices)) / prices[0] * 100:+.2f}%")
-        with kpi_cols[2]:
-            st.metric("时段波幅", f"${max(prices) - min(prices):,.2f}")
-        with kpi_cols[3]:
-            st.metric("心跳总数", f"{tick_count:,}")
-        with kpi_cols[4]:
-            sample_rate = f"{tps}/s"
-            st.metric("采集速率", sample_rate)
+    if recent_ticks:
+        st.markdown("### 📋 最近心跳记录")
 
-# ════════════════════════════════════════════════════════════════
-# 5. RECENT TICKS TABLE
-# ════════════════════════════════════════════════════════════════
+        # Prepare display data
+        rows = []
+        for t in recent_ticks[:50]:  # last 50 ticks
+            try:
+                ts = datetime.fromisoformat(t["ts"]).strftime("%H:%M:%S.%f")[:10]
+            except Exception:
+                ts = str(t.get("ts", ""))[:10]
+            rows.append({
+                "时间": ts,
+                "价格": f"${t['price']:,.2f}",
+                "买一": f"${t['bid']:,.2f}" if t.get("bid") else "-",
+                "卖一": f"${t['ask']:,.2f}" if t.get("ask") else "-",
+                "24h 涨跌": f"{t.get('change_24h', 0):+.2f}%" if t.get("change_24h") is not None else "-",
+            })
 
-if recent_ticks:
-    st.markdown("### 📋 最近心跳记录")
+        df_display = pd.DataFrame(rows)
 
-    # Prepare display data
-    rows = []
-    for t in recent_ticks[:50]:  # last 50 ticks
-        try:
-            ts = datetime.fromisoformat(t["ts"]).strftime("%H:%M:%S.%f")[:10]
-        except Exception:
-            ts = str(t.get("ts", ""))[:10]
-        rows.append({
-            "时间": ts,
-            "价格": f"${t['price']:,.2f}",
-            "买一": f"${t['bid']:,.2f}" if t.get("bid") else "-",
-            "卖一": f"${t['ask']:,.2f}" if t.get("ask") else "-",
-            "24h 涨跌": f"{t.get('change_24h', 0):+.2f}%" if t.get("change_24h") is not None else "-",
-        })
+        # Color the price column
+        def _color_price(val):
+            return ""  # Keep default — we use the price-value class above
 
-    df_display = pd.DataFrame(rows)
+        st.dataframe(
+            df_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "时间": st.column_config.TextColumn("时间", width="small"),
+                "价格": st.column_config.TextColumn("价格 💰", width="small"),
+                "买一": st.column_config.TextColumn("买一", width="small"),
+                "卖一": st.column_config.TextColumn("卖一", width="small"),
+                "24h 涨跌": st.column_config.TextColumn("24h 涨跌", width="small"),
+            },
+        )
 
-    # Color the price column
-    def _color_price(val):
-        return ""  # Keep default — we use the price-value class above
+        total = db.count_ticks()
+        st.caption(f"显示最近 {min(50, len(recent_ticks))} / 共 {total:,} 条心跳记录")
+    else:
+        st.info("💡 启动后实时心跳将在此显示")
 
-    st.dataframe(
-        df_display,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "时间": st.column_config.TextColumn("时间", width="small"),
-            "价格": st.column_config.TextColumn("价格 💰", width="small"),
-            "买一": st.column_config.TextColumn("买一", width="small"),
-            "卖一": st.column_config.TextColumn("卖一", width="small"),
-            "24h 涨跌": st.column_config.TextColumn("24h 涨跌", width="small"),
-        },
-    )
-
-    total = db.count_ticks()
-    st.caption(f"显示最近 {min(50, len(recent_ticks))} / 共 {total:,} 条心跳记录")
-else:
-    st.info("💡 启动后实时心跳将在此显示")
+    db.close()
 
 
-# ════════════════════════════════════════════════════════════════
-# 6. AUTO-REFRESH
-# ════════════════════════════════════════════════════════════════
-
-db.close()
-
-if auto and running:
-    time.sleep(1)
-    st.rerun()
+_live_fragment()

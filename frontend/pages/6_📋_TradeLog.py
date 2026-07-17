@@ -18,7 +18,7 @@ from frontend.components.metrics_display import _render_metric_card
 from strategies.base import get_available_strategies
 
 
-st.title("📋 交易日志")
+st.title("📋 回测交易日志")
 st.markdown("查看交易历史、分析盈亏分布")
 
 

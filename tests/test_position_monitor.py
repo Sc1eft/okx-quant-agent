@@ -38,6 +38,17 @@ def mock_executor():
     ex.execute_market = AsyncMock(return_value={
         "success": True, "order_id": "sl123", "fill_price": 3400.0,
     })
+
+    async def _fake_execute_safe(**kwargs):
+        # 模拟盘语义：以 signal_price 成交
+        return {
+            "success": True,
+            "order_id": "mock_ord",
+            "fill_price": kwargs.get("signal_price", 0.0),
+            "filled_size": kwargs.get("size_eth", 0.0),
+        }
+
+    ex.execute_safe = AsyncMock(side_effect=_fake_execute_safe)
     return ex
 
 
@@ -397,3 +408,167 @@ class TestPositionMonitor:
         assert monitor._position_size == 0.01
         assert monitor._entry_price == 3500.0
         assert monitor._has_position is True
+
+
+class TestCloseRetryAndRestore:
+    """平仓失败保留状态重试 / 启动状态恢复（P0 修复的回归锁定）"""
+
+    @pytest.mark.asyncio
+    async def test_close_failure_keeps_position_and_retries(
+        self, config, mock_risk_manager, mock_executor, mock_okx_client
+    ):
+        """平仓 3 次全失败 → 保留持仓、不记账、计数失败；下次成功才清算"""
+        monitor = PositionMonitor(
+            config=config,
+            risk_manager=mock_risk_manager,
+            executor=mock_executor,
+            okx_client=mock_okx_client,
+        )
+        monitor._running = True
+        monitor.update_position(side="long", size=0.01, entry_price=3500.0,
+                                stop_loss=3400.0, take_profit=3700.0)
+
+        # 全部尝试失败
+        mock_executor.execute_safe = AsyncMock(return_value={
+            "success": False, "error": "API timeout",
+        })
+        # 跳过指数退避的真实等待
+        with patch("agents.position_monitor.asyncio.sleep", new=AsyncMock()):
+            await monitor._close_position("止损", current_price=3390.0)
+
+        # 持仓保留、未记账、失败计数 +1
+        assert monitor._has_position is True
+        assert monitor._close_failures == 1
+        mock_risk_manager.record_trade.assert_not_called()
+        assert mock_executor.execute_safe.call_count == 3
+
+        # 下一轮重试成功 → 正常清算
+        mock_executor.execute_safe = AsyncMock(return_value={
+            "success": True, "order_id": "retry1", "fill_price": 3390.0,
+        })
+        await monitor._close_position("止损", current_price=3390.0)
+        assert monitor._has_position is False
+        assert monitor._close_failures == 0
+        mock_risk_manager.record_trade.assert_called_once()
+        close_rec = mock_risk_manager.record_trade.call_args[0][0]
+        assert close_rec["trade_type"] == "close"
+        assert close_rec["side"] == "sell"  # 平多
+
+    @pytest.mark.asyncio
+    async def test_close_uses_close_only_no_reversal(
+        self, config, mock_risk_manager, mock_executor, mock_okx_client
+    ):
+        """平仓必须走 close_only 通道，防止止损变反向开仓"""
+        monitor = PositionMonitor(
+            config=config,
+            risk_manager=mock_risk_manager,
+            executor=mock_executor,
+            okx_client=mock_okx_client,
+        )
+        monitor._running = True
+        monitor.update_position(side="short", size=0.02, entry_price=3500.0,
+                                stop_loss=3600.0, take_profit=3300.0)
+        await monitor._close_position("止损", current_price=3610.0)
+        _, kwargs = mock_executor.execute_safe.call_args
+        assert kwargs["close_only"] is True
+        assert kwargs["side"] == "buy"  # 平空
+        assert kwargs["prefer_limit"] is False  # 平仓用市价
+
+    def test_restore_from_db_rebuilds_position(self, config, mock_executor, mock_okx_client, tmp_path):
+        """重启后从 trades 表回放恢复未平仓持仓"""
+        import json
+        import sqlite3
+        from agents.risk_layer import RiskManager
+
+        db = str(tmp_path / "trades.db")
+        conn = sqlite3.connect(db)
+        conn.execute("""
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT, side TEXT, size REAL, price REAL,
+                pnl REAL, order_id TEXT, symbol TEXT, decision TEXT,
+                pnl_close REAL DEFAULT 0,
+                trade_group_id TEXT DEFAULT '',
+                trade_type TEXT DEFAULT 'open'
+            )
+        """)
+        # 两笔同向开仓（加权均价）+ 一笔已平仓的不应恢复
+        conn.execute(
+            "INSERT INTO trades (timestamp, side, size, price, pnl, decision, trade_type) "
+            "VALUES ('2026-07-17T01:00:00', 'buy', 0.2, 3000.0, 0, '{}', 'open')")
+        conn.execute(
+            "INSERT INTO trades (timestamp, side, size, price, pnl, decision, trade_type) "
+            "VALUES ('2026-07-17T02:00:00', 'buy', 0.1, 2850.0, 0, '{}', 'open')")
+        conn.execute(
+            "INSERT INTO trades (timestamp, side, size, price, pnl, decision, trade_type) "
+            "VALUES ('2026-07-17T03:00:00', 'sell', 0.05, 3100.0, 5, '{}', 'open')")
+        conn.execute(
+            "INSERT INTO trades (timestamp, side, size, price, pnl, decision, trade_type) "
+            "VALUES ('2026-07-17T04:00:00', 'buy', 0.05, 3000.0, 0, '{}', 'close')")
+        conn.commit()
+        conn.close()
+
+        config.db_path = db
+        rm = RiskManager(config)
+        monitor = PositionMonitor(
+            config=config, risk_manager=rm,
+            executor=mock_executor, okx_client=mock_okx_client,
+        )
+        # 最后一笔 close 平掉了 sell 空仓 → 无持仓可恢复
+        assert monitor.restore_from_db() is False
+        assert monitor._has_position is False
+
+        # 去掉 close 记录再恢复 → 应恢复为 short 0.05
+        conn = sqlite3.connect(db)
+        conn.execute("DELETE FROM trades WHERE trade_type='close'")
+        conn.commit()
+        conn.close()
+        from data.db_manager import DatabaseManager
+        DatabaseManager._instances.pop(db, None)  # 清连接缓存避免脏读
+        rm2 = RiskManager(config)
+        monitor2 = PositionMonitor(
+            config=config, risk_manager=rm2,
+            executor=mock_executor, okx_client=mock_okx_client,
+        )
+        assert monitor2.restore_from_db() is True
+        assert monitor2._has_position is True
+        assert monitor2._position_side == "short"
+        assert abs(monitor2._position_size - 0.05) < 1e-9
+        assert abs(monitor2._entry_price - 3100.0) < 1e-9
+
+    def test_restore_preserves_persisted_sltp(self, config, mock_executor, mock_okx_client, tmp_path):
+        """开仓时入库的 SL/TP 在重启恢复后原样还原（不回退默认值）"""
+        import sqlite3
+        from agents.risk_layer import RiskManager
+
+        db = str(tmp_path / "trades.db")
+        conn = sqlite3.connect(db)
+        conn.execute("""
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT, side TEXT, size REAL, price REAL,
+                pnl REAL, order_id TEXT, symbol TEXT, decision TEXT,
+                pnl_close REAL DEFAULT 0,
+                trade_group_id TEXT DEFAULT '',
+                trade_type TEXT DEFAULT 'open',
+                stop_loss REAL DEFAULT 0,
+                take_profit REAL DEFAULT 0
+            )
+        """)
+        conn.execute(
+            "INSERT INTO trades (timestamp, side, size, price, pnl, decision, trade_type, "
+            "stop_loss, take_profit) "
+            "VALUES ('2026-07-17T01:00:00', 'buy', 0.2, 3000.0, 0, '{}', 'open', 2800.0, 3300.0)")
+        conn.commit()
+        conn.close()
+
+        config.db_path = db
+        rm = RiskManager(config)
+        monitor = PositionMonitor(
+            config=config, risk_manager=rm,
+            executor=mock_executor, okx_client=mock_okx_client,
+        )
+        assert monitor.restore_from_db() is True
+        # 持久化值原样还原，而非默认 5%/10%（2850/3150）
+        assert monitor._stop_loss == 2800.0
+        assert monitor._take_profit == 3300.0

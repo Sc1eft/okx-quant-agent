@@ -65,6 +65,12 @@ class PositionMonitor:
         self._open_confidence: float = 0.0
         self._open_position_size_pct: float = 0.0
 
+        # 开平配对 ID（由 update_position 赋值）
+        self._trade_group_id: str = ""
+
+        # 连续平仓失败次数（>0 时说明交易所有仓位未被正确平掉）
+        self._close_failures: int = 0
+
         # 运行状态
         self._running: bool = False
         self._stats = {
@@ -245,6 +251,99 @@ class PositionMonitor:
         self._total_open_fees = 0.0
         self.update_position("none", 0, 0, 0, 0)
 
+    def restore_from_db(self) -> bool:
+        """启动时从 SQLite 回放交易记录，重建持仓状态
+
+        回放规则:
+        - trade_type='open': side=buy → 多头, side=sell → 空头;
+          同方向 → 加权累加，反方向 → 视为反转（替换）
+        - trade_type='close': 清仓
+        - 止损/止盈取开仓记录中的持久化值（P2-3 起入库）；
+          旧记录无此值时按配置默认百分比重建（日志告警）
+
+        Returns:
+            True = 恢复出了持仓；False = 无持仓
+        """
+        if not getattr(self.risk, "_db_conn", None):
+            return False
+        try:
+            rows = self.risk._db_conn.execute(
+                "SELECT * FROM trades ORDER BY id"
+            ).fetchall()
+        except Exception as e:
+            logger.error(f"持仓恢复查询失败: {e}")
+            return False
+
+        side = "none"
+        size = 0.0
+        entry = 0.0
+        group_id = ""
+        saved_sl = 0.0
+        saved_tp = 0.0
+        for r in rows:
+            t_side = r["side"] or ""
+            t_size = float(r["size"] or 0)
+            t_price = float(r["price"] or 0)
+            if t_size <= 0 or t_price <= 0:
+                continue
+            if r["trade_type"] == "close":
+                side, size, entry, group_id = "none", 0.0, 0.0, ""
+                saved_sl = saved_tp = 0.0
+                continue
+            # open 记录
+            direction = "long" if t_side == "buy" else "short"
+            if side == direction and size > 0:
+                entry = (size * entry + t_size * t_price) / (size + t_size)
+                size += t_size
+            else:
+                side, size, entry = direction, t_size, t_price
+            group_id = r["trade_group_id"] or ""
+            # 开仓时持久化的止损止盈（旧记录无此列则为 0）
+            keys = r.keys()
+            saved_sl = float(r["stop_loss"]) if "stop_loss" in keys and r["stop_loss"] else 0.0
+            saved_tp = float(r["take_profit"]) if "take_profit" in keys and r["take_profit"] else 0.0
+
+        if side == "none" or size <= 0:
+            logger.info("持仓恢复: 无未平仓记录，空仓启动")
+            return False
+
+        if saved_sl > 0 and saved_tp > 0:
+            # 开仓时入库的止损止盈原样还原（含 DeepSeek 定制值）
+            stop_loss, take_profit = saved_sl, saved_tp
+            logger.warning(
+                f"持仓已从 DB 恢复: {side} {size:.4f} ETH @ ${entry:.2f}, "
+                f"SL=${stop_loss:.2f} TP=${take_profit:.2f}（开仓时保存值）"
+            )
+        else:
+            # 旧记录无 SL/TP，用配置默认值重建
+            sl_pct = self.config.agent3_default_stop_loss_pct / 100
+            tp_pct = self.config.agent3_default_take_profit_pct / 100
+            if side == "long":
+                stop_loss = entry * (1 - sl_pct)
+                take_profit = entry * (1 + tp_pct)
+            else:
+                stop_loss = entry * (1 + sl_pct)
+                take_profit = entry * (1 - tp_pct)
+            logger.warning(
+                f"持仓已从 DB 恢复: {side} {size:.4f} ETH @ ${entry:.2f}, "
+                f"止损/止盈按配置默认重建 SL=${stop_loss:.2f} TP=${take_profit:.2f}"
+            )
+
+        self._has_position = True
+        self._position_side = side
+        self._position_size = size
+        self._entry_price = entry
+        self._entry_time = datetime.now(timezone.utc)
+        self._stop_loss = stop_loss
+        self._take_profit = take_profit
+        self._current_stop_loss = stop_loss
+        self._trade_group_id = group_id
+        self._trailing_stop_active = False
+        self._trailing_high = entry if side == "long" else 0.0
+        self._trailing_low = entry if side == "short" else float("inf")
+
+        return True
+
     async def run(self):
         """启动持仓监控主循环"""
         self._running = True
@@ -396,6 +495,9 @@ class PositionMonitor:
     async def _close_position(self, reason: str, current_price: float = 0.0):
         """平仓（按市价卖出/买入）
 
+        失败时保留持仓状态并交由下一轮检查重试——绝不出现
+        "系统以为平了、交易所仓位裸奔"的状态分叉。
+
         Args:
             reason: 平仓原因描述
             current_price: 触发平仓时的当前价格（用于 execute_safe 模拟模式）
@@ -404,27 +506,49 @@ class PositionMonitor:
 
         logger.info(f"平仓: {self._position_side} {self._position_size:.4f} ETH (原因: {reason})")
 
-        # 1. 尝试执行平仓
+        # 1. 执行平仓（最多 3 次尝试，指数退避）
         success = False
-        fill_price = current_price if current_price > 0 else self._entry_price
+        fill_price = 0.0
         order_id = ""
-        try:
-            result = await self.executor.execute_safe(
-                side=side,
-                size_eth=self._position_size,
-                signal_price=fill_price,
-                prefer_limit=False,  # 平仓用市价单
-            )
-            success = result.get("success", False)
-            if success:
-                fill_price = result.get("fill_price", fill_price)
-                order_id = result.get("order_id", "")
-            else:
-                logger.error(f"平仓失败: {result.get('error', '')}")
-        except Exception as e:
-            logger.error(f"平仓异常: {e}, 使用估算价格 {fill_price:.2f} 记录盈亏")
+        last_error = ""
+        for attempt in range(3):
+            try:
+                result = await self.executor.execute_safe(
+                    side=side,
+                    size_eth=self._position_size,
+                    signal_price=current_price if current_price > 0 else self._entry_price,
+                    prefer_limit=False,  # 平仓用市价单
+                    close_only=True,     # 只平仓，不反转开新仓
+                )
+                if result.get("success"):
+                    success = True
+                    fill_price = result.get("fill_price", 0.0) or 0.0
+                    order_id = result.get("order_id", "")
+                    break
+                last_error = result.get("error", "未知错误")
+                logger.warning(f"平仓失败 (尝试 {attempt + 1}/3): {last_error}")
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"平仓异常 (尝试 {attempt + 1}/3): {e}")
+            if attempt < 2:
+                await asyncio.sleep(2 * (2 ** attempt))
 
-        # 2. 计算 PnL（无论 execute_safe 成功与否都记账，确保亏损不丢失）
+        # 2. 平仓未成功 → 保留持仓，下轮检查自动重试
+        if not success:
+            self._close_failures += 1
+            logger.error(
+                f"平仓未成功 ({reason})，保留持仓状态，下轮重试。"
+                f"累计失败 {self._close_failures} 次。最后错误: {last_error}"
+            )
+            return
+
+        self._close_failures = 0
+        # 成交价兜底：模拟/查询异常时可能返回 0，用触发价或入场价替代
+        if fill_price <= 0:
+            fill_price = current_price if current_price > 0 else self._entry_price
+            logger.warning(f"平仓成交价缺失，使用兜底价 {fill_price:.2f} 记账")
+
+        # 3. 计算 PnL
         if self._position_side == "long":
             gross_pnl = (fill_price - self._entry_price) * self._position_size
         else:
@@ -439,7 +563,7 @@ class PositionMonitor:
         total_fee = open_fee + close_fee
         net_pnl = gross_pnl - total_fee
 
-        # 3. 记录平仓到风控系统（trade_type='close'，Agent 4 复盘依赖此记录）
+        # 4. 记录平仓到风控系统（trade_type='close'，Agent 4 复盘依赖此记录）
         self.risk.record_trade({
             "side": side,
             "size": self._position_size,
@@ -457,8 +581,8 @@ class PositionMonitor:
             "position_size_pct": self._open_position_size_pct,
         })
 
-        # 4. 通知 Agent 3 更新仓位状态（仅成功时）
-        if success and self.close_callback:
+        # 5. 通知 Agent 3 更新仓位状态
+        if self.close_callback:
             self.close_callback(
                 side=side,
                 size=self._position_size,
@@ -466,7 +590,7 @@ class PositionMonitor:
                 pnl=round(net_pnl, 2),
             )
 
-        # 5. 清空持仓标记（先清状态标记，防止 clear_position → update_position 重复记账）
+        # 6. 清空持仓标记（先清状态标记，防止 clear_position → update_position 重复记账）
         self._has_position = False
         self.clear_position()
 
@@ -483,5 +607,6 @@ class PositionMonitor:
             "trailing_stop_active": self._trailing_stop_active,
             "trailing_high": self._trailing_high,
             "total_open_fees": round(self._total_open_fees, 4),
+            "close_failures": self._close_failures,
             **self._stats,
         }

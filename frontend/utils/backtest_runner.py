@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import Config
-from strategies.base import create_strategy, get_available_strategies
+from strategies.base import Signal, create_strategy, get_available_strategies
 from backtest.engine import BacktestEngine
 from backtest.metrics import compute_metrics
 from backtest.analyzer import WalkForwardAnalyzer
@@ -64,6 +64,7 @@ def run_backtest(
       - trades: list of trade dicts (JSON-friendly)
       - equity_curve: list of {time, equity} dicts
       - signals: list of signal records
+      - price_data: list of {time, close} dicts (回测真实 K 线收盘价)
       - strategy_name: str
     """
     try:
@@ -217,14 +218,18 @@ def _serialize_result(result) -> Dict[str, Any]:
             equity_curve.append({"time": ts_str, "equity": float(val)})
 
     signals = []
+    price_data = []
     if result.signals_df is not None and not result.signals_df.empty:
         df = result.signals_df.reset_index()
         for _, row in df.iterrows():
+            sig = row.get("signal", "")
+            close = float(row.get("close", 0)) if pd.notna(row.get("close", 0)) else 0
             signals.append({
                 "time": str(row.iloc[0]),
-                "signal": str(row.get("signal", "")),
-                "price": float(row.get("price", 0)) if pd.notna(row.get("price", 0)) else 0,
+                "signal": sig.name if isinstance(sig, Signal) else str(sig).upper(),
+                "price": close,
             })
+            price_data.append({"time": str(row.iloc[0]), "close": close})
 
     return {
         "strategy_name": result.strategy_name,
@@ -232,6 +237,7 @@ def _serialize_result(result) -> Dict[str, Any]:
         "trades": trades,
         "equity_curve": equity_curve,
         "signals": signals,
+        "price_data": price_data,
         "symbol": result.symbol,
         "fee_model": result.fee_model,
         "slippage_pct": result.slippage_pct,

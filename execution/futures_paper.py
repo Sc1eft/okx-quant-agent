@@ -248,7 +248,7 @@ class FuturesAccount:
                 return {"note": "insufficient_balance", "side": "open_long"}
             size = max_pos_value / price
             pos_value = price * size
-            fee = pos_value * self.taker_fee_rate
+            fee = pos_value * self._fee_rate(prefer_limit)
             margin = pos_value / leverage
 
         self.wallet_balance -= fee
@@ -302,7 +302,7 @@ class FuturesAccount:
                 return {"note": "insufficient_balance", "side": "open_short"}
             size = max_pos_value / price
             pos_value = price * size
-            fee = pos_value * self.taker_fee_rate
+            fee = pos_value * self._fee_rate(prefer_limit)
             margin = pos_value / leverage
 
         self.wallet_balance -= fee
@@ -361,14 +361,16 @@ class FuturesAccount:
             fee = revenue * fee_rate
             cost_portion = pos.position_value * (close_size / pos.size)
             pnl = revenue - fee - cost_portion
-            self.wallet_balance += (revenue - fee)
+            # 开仓时保证金未从钱包扣除（仅扣手续费），
+            # 平仓只入账已实现盈亏，不能把名义价值计入钱包
+            self.wallet_balance += pnl
         else:  # short
             cost = price * close_size
             fee = cost * fee_rate
             credit_portion = pos.position_value * (close_size / pos.size)
             pnl = credit_portion - cost - fee
-            self.wallet_balance += (credit_portion - cost - fee)
-            # wallet_balance did: we subtract cost and add remaining credit
+            # 与多头一致：平仓只入账已实现盈亏
+            self.wallet_balance += pnl
 
         # 更新持仓
         remaining_size = pos.size - close_size

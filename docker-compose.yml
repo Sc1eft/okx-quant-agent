@@ -19,7 +19,7 @@ services:
     volumes:
       - data_volume:/app/data
       - logs_volume:/app/logs
-      - ./config.yaml:/app/config.yaml:ro
+      - ./configs/default.json:/app/configs/default.json:ro
     env_file:
       - .env
     restart: unless-stopped
@@ -42,7 +42,7 @@ services:
       - "8501:8501"
     volumes:
       - data_volume:/app/data
-      - ./config.yaml:/app/config.yaml:ro
+      - ./configs/default.json:/app/configs/default.json:ro
     env_file:
       - .env
     restart: unless-stopped

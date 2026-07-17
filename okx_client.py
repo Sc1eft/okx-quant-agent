@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import base64
+import json
 import logging
 import random
 import time
@@ -146,7 +147,7 @@ class OKXClient:
     # ── 订单（阶段 10 启用） ──
 
     def place_order(self, symbol: str, side: str, sz: str, ord_type: str = "market", px: str = "",
-                    td_mode: str = "cash", lever: str = "") -> dict:
+                    td_mode: str = "cash", lever: str = "", clord_id: str = "") -> dict:
         """
         下单（需要 Trade 权限）
         side: "buy" / "sell"
@@ -154,6 +155,7 @@ class OKXClient:
         px: 限价单价格，市价单留空
         td_mode: "cash"(现货) / "isolated"(逐仓) / "cross"(全仓)
         lever: 杠杆倍数（非 cash 模式必填）
+        clord_id: 客户端订单 ID（幂等键，重试时去重，防重复下单）
         """
         ts = self._timestamp()
         body = {
@@ -167,6 +169,8 @@ class OKXClient:
             body["px"] = px
         if lever:
             body["lever"] = lever
+        if clord_id:
+            body["clOrdId"] = clord_id
         json_body = json.dumps(body, ensure_ascii=False)
         headers = self._sign("POST", "/api/v5/trade/order", json_body, ts)
         headers["Content-Type"] = "application/json"
@@ -193,16 +197,21 @@ class OKXClient:
         self._check_api_response(data)
         return self._normalize_order_data(data.get("data", []))
 
-    def get_order(self, symbol: str, order_id: str) -> dict:
+    def get_order(self, symbol: str, order_id: str = "", clord_id: str = "") -> dict:
         """查询订单状态
 
         https://www.okx.com/docs-v5/en/#rest-api-trade-get-order-details
-        需要 Trade 权限。
+        需要 Trade 权限。ordId 与 clOrdId 二选一。
         返回字段: ordId, state(canceled/filled/partially_filled/live),
-        fillPx, fillSz, accFillSz, side, instId
+        fillPx, fillSz, accFillSz, avgPx, side, instId
         """
         ts = self._timestamp()
-        path = f"/api/v5/trade/order?{urlencode({'instId': symbol, 'ordId': order_id})}"
+        query = {"instId": symbol}
+        if clord_id:
+            query["clOrdId"] = clord_id
+        else:
+            query["ordId"] = order_id
+        path = f"/api/v5/trade/order?{urlencode(query)}"
         headers = self._sign("GET", path, "", ts)
         resp = self._request("GET", path, headers=headers)
         data = resp.json()
@@ -299,7 +308,8 @@ class OKXClient:
 
     @staticmethod
     def _timestamp() -> str:
-        return datetime.now(timezone.utc).isoformat()[:-3] + "Z"
+        # OKX 要求 ISO8601 毫秒级 UTC 时间戳，如 "2020-12-08T09:08:57.715Z"
+        return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     @staticmethod
     def _tf_to_bar(tf: str) -> str:

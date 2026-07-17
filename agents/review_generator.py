@@ -81,7 +81,7 @@ class ReviewGenerator:
         ).fetchall()
 
         if rows:
-            win_trades, loss_trades = self.extract_wins_and_losses(rows)
+            win_trades, loss_trades = self.extract_wins_and_losses(rows, conn)
             report["trades"] = {"wins": win_trades, "losses": loss_trades}
             if self.deepseek and len(rows) >= self.config.report_min_trades_for_analysis:
                 report["ai_analysis"] = self._analyze_trades_with_deepseek(
@@ -116,7 +116,7 @@ class ReviewGenerator:
         ).fetchall()
 
         if rows:
-            win_trades, loss_trades = self.extract_wins_and_losses(rows)
+            win_trades, loss_trades = self.extract_wins_and_losses(rows, conn)
             report["trades"] = {"wins": win_trades, "losses": loss_trades}
             if self.deepseek and len(rows) >= self.config.report_min_trades_for_analysis:
                 report["ai_analysis"] = self._analyze_trades_with_deepseek(
@@ -168,18 +168,9 @@ class ReviewGenerator:
     def _get_conn(self) -> sqlite3.Connection:
         """返回共享连接（由 DatabaseManager 缓存，不要 close）"""
         conn = self._db.conn
-        # 确保 trades 表存在（幂等，仅首次创建）
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT, side TEXT, size REAL, price REAL,
-                pnl REAL, order_id TEXT, symbol TEXT, decision TEXT,
-                pnl_close REAL DEFAULT 0,
-                trade_group_id TEXT DEFAULT '',
-                trade_type TEXT DEFAULT 'open'
-            )
-        """)
-        conn.commit()
+        # 确保 trades 表 schema 完整（唯一权威定义在 data.db_manager）
+        from data.db_manager import ensure_trades_schema
+        ensure_trades_schema(conn)
         return conn
 
     def _compute_range_stats(
@@ -242,15 +233,15 @@ class ReviewGenerator:
 
         win_rate = round(wins / total * 100, 1) if total > 0 else 0.0
 
-        # 按方向拆分
+        # 按持仓方向拆分（close 行的 side 是平仓单方向：sell=平多, buy=平空）
         side_row = conn.execute(
             f"""
-            SELECT side,
+            SELECT CASE WHEN side='sell' THEN 'long' ELSE 'short' END as pos_side,
                 COUNT(*) as cnt,
                 SUM(CASE WHEN pnl_close > 0 THEN 1 ELSE 0 END) as side_wins,
                 ROUND(SUM(pnl_close), 2) as side_pnl
             FROM trades WHERE {where}
-            GROUP BY side
+            GROUP BY pos_side
             """,
             params,
         ).fetchall()
@@ -259,7 +250,7 @@ class ReviewGenerator:
         for sr in side_row:
             sc = sr["cnt"] or 0
             sw = sr["side_wins"] or 0
-            by_side[sr["side"]] = {
+            by_side[sr["pos_side"]] = {
                 "trades": sc,
                 "win_rate": round(sw / sc * 100, 1) if sc > 0 else 0.0,
                 "pnl": sr["side_pnl"] or 0.0,
@@ -283,14 +274,42 @@ class ReviewGenerator:
         }
 
     def extract_wins_and_losses(
-        self, rows: list[sqlite3.Row],
+        self,
+        rows: list[sqlite3.Row],
+        conn: sqlite3.Connection | None = None,
     ) -> tuple[list[dict], list[dict]]:
         """从 SQLite Row 列表中提取盈利和亏损交易详情
+
+        close 行的 price 是平仓价（exit_price），side 是平仓单方向
+        （sell=平多, buy=平空）。持仓方向与 entry_price 通过
+        trade_group_id 关联的开仓行补全（需传入 conn）。
 
         Returns:
             (win_trades, loss_trades) — 每个元素是 dict:
             { pnl, side, reason, entry_price, exit_price, time }
+            side 为持仓方向 "long" / "short"
         """
+        # 批量查询关联开仓行: trade_group_id → (price, side)
+        open_map: dict[str, tuple] = {}
+        if conn is not None:
+            group_ids = list({
+                r["trade_group_id"] for r in rows
+                if "trade_group_id" in r.keys() and r["trade_group_id"]
+            })
+            if group_ids:
+                marks = ",".join("?" * len(group_ids))
+                try:
+                    for orow in conn.execute(
+                        f"SELECT trade_group_id, price, side FROM trades "
+                        f"WHERE trade_type='open' AND trade_group_id IN ({marks})",
+                        group_ids,
+                    ):
+                        open_map[orow["trade_group_id"]] = (
+                            orow["price"] or 0, orow["side"] or "",
+                        )
+                except sqlite3.Error as e:
+                    logger.debug(f"查询关联开仓行失败: {e}")
+
         win_trades = []
         loss_trades = []
         for r in rows:
@@ -303,12 +322,22 @@ class ReviewGenerator:
                 except (json.JSONDecodeError, TypeError):
                     reason = r["decision"][:100] if isinstance(r["decision"], str) else ""
 
+            close_side = r["side"] or ""
+            group_id = r["trade_group_id"] if "trade_group_id" in r.keys() else ""
+            open_price, open_side = open_map.get(group_id, (0, ""))
+            # 持仓方向：优先取开仓行（buy=long, sell=short），
+            # 找不到时按平仓单方向推断（sell=平多→long, buy=平空→short）
+            if open_side:
+                pos_side = "long" if open_side == "buy" else "short"
+            else:
+                pos_side = "long" if close_side == "sell" else "short"
+
             trade = {
                 "trade_id": r["id"],
                 "pnl": pnl,
-                "side": r["side"],
-                "entry_price": r["price"] or 0,
-                "exit_price": 0,  # 无法从单行推断出场价，后续可扩展
+                "side": pos_side,
+                "entry_price": open_price,
+                "exit_price": r["price"] or 0,
                 "reason": reason,
                 "time": r["timestamp"],
             }
@@ -383,7 +412,7 @@ class ReviewGenerator:
 
         # 提取盈亏交易
         if rows:
-            win_trades, loss_trades = self.extract_wins_and_losses(rows)
+            win_trades, loss_trades = self.extract_wins_and_losses(rows, conn)
             report["trades"] = {
                 "wins": win_trades,
                 "losses": loss_trades,

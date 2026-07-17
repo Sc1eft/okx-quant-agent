@@ -1,4 +1,4 @@
-"""Agent Analysis page - DeepSeek analysis display and interaction."""
+"""Agent Analysis page - local heuristic rules analysis display and interaction."""
 
 import sys
 from pathlib import Path
@@ -15,12 +15,14 @@ from strategies.base import get_available_strategies
 
 
 st.title("🤖 Agent 分析")
-st.markdown("DeepSeek 驱动的回测分析和交易复盘")
+st.markdown("基于本地启发式规则的回测分析和交易复盘")
+st.caption("ℹ️ 本页分析由内置规则引擎在本地生成，不调用 DeepSeek API")
 
 
 cfg = get_config()
 strategies = get_available_strategies()
 strategy_names = list(strategies.keys())
+st.session_state.setdefault("agent_analysis", {})
 
 # ============ Run Analysis Section ============
 st.subheader("📊 回测分析")
@@ -34,7 +36,7 @@ with ana_cols[0]:
         st.stop()
 
 with ana_cols[1]:
-    run_analysis_btn = st.button("▶ 运行 DeepSeek 分析", type="primary", use_container_width=True)
+    run_analysis_btn = st.button("▶ 运行规则分析（本地启发式）", type="primary", use_container_width=True)
 
 with ana_cols[2]:
     use_local = st.checkbox("使用本地分析 (不调用 API)", value=True, key="agent_local")
@@ -147,12 +149,13 @@ elif analysis_data:
         analysis_lines.append(f"- {k}: {v}")
     st.markdown("\n".join(analysis_lines))
 else:
-    st.info("👈 选择一个策略并点击「运行 DeepSeek 分析」")
+    st.info("👈 选择一个策略并点击「运行规则分析（本地启发式）」")
 
 
 # ============ Custom Question ============
 st.divider()
 st.subheader("💬 自定义分析")
+st.caption("ℹ️ 以下为关键词匹配的本地规则回复，非 AI 大模型生成")
 
 question = st.text_area(
     "输入你对策略或回测结果的疑问",

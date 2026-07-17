@@ -177,39 +177,54 @@ class TestReviewGenerator:
         assert stats.get("_fallback") is True
 
     def test_by_side_breakdown(self, config, temp_db):
-        """按方向拆分统计"""
+        """按持仓方向拆分统计（close 的 side 是平仓单方向：sell=平多, buy=平空）"""
         _populate_trades(temp_db, [
-            {"side": "buy", "pnl_close": 10, "trade_type": "close"},
-            {"side": "buy", "pnl_close": -5, "trade_type": "close"},
-            {"side": "sell", "pnl_close": 15, "trade_type": "close"},
+            {"side": "buy", "pnl_close": 10, "trade_type": "close"},   # 平空 → short
+            {"side": "buy", "pnl_close": -5, "trade_type": "close"},   # 平空 → short
+            {"side": "sell", "pnl_close": 15, "trade_type": "close"},  # 平多 → long
         ])
         gen = ReviewGenerator(config, temp_db)
         stats = gen.compute_monthly_stats()
-        assert "buy" in stats["by_side"]
-        assert "sell" in stats["by_side"]
-        assert stats["by_side"]["buy"]["trades"] == 2
-        assert stats["by_side"]["buy"]["pnl"] == 5.0
+        assert "short" in stats["by_side"]
+        assert "long" in stats["by_side"]
+        assert stats["by_side"]["short"]["trades"] == 2
+        assert stats["by_side"]["short"]["pnl"] == 5.0
+        assert stats["by_side"]["long"]["trades"] == 1
 
     # ── Task 3: 交易报告扩展测试 ──
 
     def test_extract_wins_and_losses(self, config, temp_db):
-        """提取盈亏交易"""
+        """提取盈亏交易（含持仓方向与开/平仓价还原）"""
         _populate_trades(temp_db, [
-            {"pnl_close": 10, "side": "buy", "decision": '{"reason": "MACD golden cross"}', "trade_type": "close"},
-            {"pnl_close": -5, "side": "sell", "decision": '{"reason": "Resistance break"}', "trade_type": "close"},
+            {"pnl_close": 10, "side": "sell", "price": 3600.0,
+             "decision": '{"reason": "MACD golden cross"}',
+             "trade_type": "close", "trade_group_id": "g1"},
+            {"pnl_close": -5, "side": "buy", "price": 3400.0,
+             "decision": '{"reason": "Resistance break"}',
+             "trade_type": "close", "trade_group_id": "g2"},
+            # 关联的开仓行：g1 开多 @3500, g2 开空 @3500
+            {"side": "buy", "price": 3500.0, "trade_type": "open", "trade_group_id": "g1"},
+            {"side": "sell", "price": 3500.0, "trade_type": "open", "trade_group_id": "g2"},
         ])
         gen = ReviewGenerator(config, temp_db)
         conn = sqlite3.connect(temp_db)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM trades").fetchall()
+        rows = conn.execute("SELECT * FROM trades WHERE trade_type='close'").fetchall()
+        wins, losses = gen.extract_wins_and_losses(rows, conn)
         conn.close()
-        wins, losses = gen.extract_wins_and_losses(rows)
         assert len(wins) == 1, f"expected 1 win, got {len(wins)}"
         assert len(losses) == 1, f"expected 1 loss, got {len(losses)}"
         assert wins[0]["pnl"] == 10, f"expected pnl 10, got {wins[0]['pnl']}"
         assert losses[0]["pnl"] == -5, f"expected pnl -5, got {losses[0]['pnl']}"
-        assert wins[0]["reason"], f"expected non-empty reason, got {repr(wins[0]['reason'])} (rows: {[(r['id'], repr(r['decision'])) for r in rows]})"
+        assert wins[0]["reason"], f"expected non-empty reason, got {repr(wins[0]['reason'])}"
         assert "golden cross" in wins[0]["reason"]
+        # 方向与价格还原：sell 平仓 + 开仓 buy → long；entry=开仓价, exit=平仓价
+        assert wins[0]["side"] == "long"
+        assert wins[0]["entry_price"] == 3500.0
+        assert wins[0]["exit_price"] == 3600.0
+        assert losses[0]["side"] == "short"
+        assert losses[0]["entry_price"] == 3500.0
+        assert losses[0]["exit_price"] == 3400.0
 
     def test_monthly_report_no_trades(self, config, temp_db):
         """无交易时月度报告返回零值"""

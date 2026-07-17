@@ -111,20 +111,11 @@ def _render_report_card(report: dict):
 st.title("📋 交易报告")
 
 # ── 顶部操作栏 ──
-col1, col2, col3, col4 = st.columns([1, 1, 1, 3])
+col1, _ = st.columns([1, 3])
 with col1:
-    filter_type = st.selectbox(
-        "报告类型", ["全部", "日报", "周报", "月报"], label_visibility="collapsed"
-    )
-with col2:
-    if st.button("📅 生成日报", use_container_width=True):
-        st.toast("日报由 Agent 3 在 UTC 16:00 自动生成", icon="ℹ️")
-with col3:
-    if st.button("📅 生成周报", use_container_width=True):
-        st.toast("周报由 Agent 3 每周日 UTC 16:00 自动生成", icon="ℹ️")
-with col4:
-    if st.button("📅 生成月报", use_container_width=True):
-        st.toast("月报由 Agent 3 每月 1 日 UTC 16:00 自动生成", icon="ℹ️")
+    filter_type = st.selectbox("报告类型", ["全部", "日报", "周报", "月报"])
+
+st.info("报告由 Agent 定时自动生成（日报：每日 UTC 16:00；周报：每周日；月报：每月 1 日），本页面仅用于浏览历史报告。")
 
 # ── 报告列表 ──
 type_map = {"全部": None, "日报": "daily", "周报": "weekly", "月报": "monthly"}

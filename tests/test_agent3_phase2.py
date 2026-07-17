@@ -351,6 +351,10 @@ class TestPositionMonitorNotify:
         agent3.okx_client = mock_client
 
         mock_monitor = MagicMock()
+        # PositionMonitor 是仓位事实源：mock 需返回真实的空持仓状态
+        mock_monitor.get_status.return_value = {
+            "position_side": "none", "position_size": 0.0, "entry_price": 0.0,
+        }
         agent3.position_monitor = mock_monitor
 
         mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
@@ -390,6 +394,10 @@ class TestPositionMonitorNotify:
         agent3.okx_client = mock_client
 
         mock_monitor = MagicMock()
+        # PositionMonitor 是仓位事实源：mock 需返回真实的空持仓状态
+        mock_monitor.get_status.return_value = {
+            "position_side": "none", "position_size": 0.0, "entry_price": 0.0,
+        }
         agent3.position_monitor = mock_monitor
 
         mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
@@ -447,3 +455,80 @@ class TestPositionMonitorNotify:
         # Should not raise
         await agent3._make_decision()
         assert agent3._stats["trades_executed"] == 1
+
+
+class TestSlTpDirectionValidation:
+    """DeepSeek 给出方向错误的 SL/TP 时回退默认值（防开仓即触发止损）"""
+
+    @pytest.mark.asyncio
+    async def test_wrong_direction_sltp_falls_back_to_defaults(self, agent3, mock_risk_manager):
+        """多头 SL>入场 / TP<入场 → 回退配置默认百分比"""
+        agent3.okx_client = MagicMock()
+        mock_monitor = MagicMock()
+        mock_monitor.get_status.return_value = {
+            "position_side": "none", "position_size": 0.0, "entry_price": 0.0,
+        }
+        agent3.position_monitor = mock_monitor
+
+        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
+        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
+        mock_risk_manager.check_layer1.return_value = (True, "")
+
+        agent3._event_buffer = [
+            AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
+                       data={"description": "测试", "timeframe": "1h", "price": 3500},
+                       timestamp=datetime.now(timezone.utc)),
+        ]
+        # buy（多头）却给了 SL=3600 > 入场、TP=3400 < 入场 — 方向全错
+        agent3.deepseek.analyze.return_value = {
+            "action": "buy", "confidence": 80,
+            "entry_price_min": "", "entry_price_max": "",
+            "position_size_pct": "10", "stop_loss": "3600", "take_profit": "3400",
+            "reason": "方向错误的止损止盈",
+        }
+        agent3.executor.execute_safe = AsyncMock(return_value={
+            "success": True, "order_id": "order123", "fill_price": 3500.0,
+        })
+
+        await agent3._make_decision()
+
+        mock_monitor.update_position.assert_called_once()
+        _, kwargs = mock_monitor.update_position.call_args
+        # 回退到配置默认值：SL 5% → 3500*0.95, TP 10% → 3500*1.10
+        assert kwargs["stop_loss"] == pytest.approx(3325.0)
+        assert kwargs["take_profit"] == pytest.approx(3850.0)
+
+    @pytest.mark.asyncio
+    async def test_correct_direction_sltp_kept(self, agent3, mock_risk_manager):
+        """方向正确的 SL/TP 原样保留"""
+        agent3.okx_client = MagicMock()
+        mock_monitor = MagicMock()
+        mock_monitor.get_status.return_value = {
+            "position_side": "none", "position_size": 0.0, "entry_price": 0.0,
+        }
+        agent3.position_monitor = mock_monitor
+
+        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
+        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
+        mock_risk_manager.check_layer1.return_value = (True, "")
+
+        agent3._event_buffer = [
+            AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
+                       data={"description": "测试", "timeframe": "1h", "price": 3500},
+                       timestamp=datetime.now(timezone.utc)),
+        ]
+        agent3.deepseek.analyze.return_value = {
+            "action": "buy", "confidence": 80,
+            "entry_price_min": "", "entry_price_max": "",
+            "position_size_pct": "10", "stop_loss": "3450", "take_profit": "3600",
+            "reason": "正常的止损止盈",
+        }
+        agent3.executor.execute_safe = AsyncMock(return_value={
+            "success": True, "order_id": "order123", "fill_price": 3500.0,
+        })
+
+        await agent3._make_decision()
+
+        _, kwargs = mock_monitor.update_position.call_args
+        assert kwargs["stop_loss"] == pytest.approx(3450.0)
+        assert kwargs["take_profit"] == pytest.approx(3600.0)

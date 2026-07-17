@@ -33,12 +33,38 @@ sys.path.insert(0, "")
 _BASE_DIR = Path(__file__).parent.resolve()
 _PID_FILE = _BASE_DIR / "data" / "agent.pid"
 
+def _pid_belongs_to_agent(pid: int) -> bool | None:
+    """确认 PID 对应的进程是否是本 agent（main.py），防止 PID 复用误杀。
+
+    Returns:
+        True  — 进程存在且命令行包含 main.py（是本 agent）
+        False — 进程不存在，或命令行与本 agent 无关（陈旧锁/被复用）
+        None  — 无法确定（查询失败，调用方应保守处理）
+    """
+    try:
+        out = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    cmdline = (out.stdout or "").strip()
+    if not cmdline:
+        return False  # 进程不存在
+    return "main.py" in cmdline
+
+
 def _acquire_pid_lock():
     """用原子性文件创建 (O_EXCL) 实现 PID 锁，消除 TOCTOU 竞争条件。
 
     O_CREAT | O_EXCL 保证文件创建是原子操作：
     - 成功 → 获得锁，写入 PID
-    - 失败 → 另一实例持有锁，读其 PID 杀掉后重试
+    - 失败 → 另一实例持有锁；先核实旧 PID 身份，仅当确属本 agent 才结束它
     """
     _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -56,13 +82,26 @@ def _acquire_pid_lock():
             # 原子创建失败 → 另一实例占用
             try:
                 old_pid = int(_PID_FILE.read_text().strip())
-                if old_pid > 0 and old_pid != os.getpid():
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", str(old_pid)],
-                        capture_output=True, timeout=10,
+            except (ValueError, OSError):
+                old_pid = 0
+            if old_pid > 0 and old_pid != os.getpid():
+                belongs = _pid_belongs_to_agent(old_pid)
+                if belongs is True:
+                    print(f"检测到旧 agent 实例 (PID {old_pid})，正在结束…", file=sys.stderr)
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/PID", str(old_pid)],
+                            capture_output=True, timeout=10,
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                elif belongs is None:
+                    # 无法确认旧 PID 身份 — 保守起见不杀任何进程
+                    raise SystemExit(
+                        f"❌ 无法确认 PID {old_pid} 是否为本 agent 进程，"
+                        f"为防误杀已放弃启动。请人工检查后删除 {_PID_FILE}"
                     )
-            except (ValueError, OSError, subprocess.TimeoutExpired):
-                pass
+                # belongs is False → 进程不存在或 PID 被无关进程复用，属陈旧锁，直接清理
             # 清理旧锁后重试
             try:
                 _PID_FILE.unlink(missing_ok=True)
@@ -126,6 +165,43 @@ def _install_signal_handlers(loop, shutdown_cb):
         _signal.signal(_signal.SIGTERM, lambda *_: loop.call_soon_threadsafe(shutdown_cb))
 
 
+async def _preflight_check(root_config, okx_rest, mode: str) -> bool:
+    """启动前检查：把"第一笔真单才炸"提前到启动即报错
+
+    live 模式下任一失败都拒绝启动；其他模式仅跳过（不检查）。
+    """
+    if mode != "live":
+        return True
+
+    logger = logging.getLogger("main")
+    problems: list[str] = []
+
+    ex = root_config.exchange
+    if not ex.api_key or not ex.secret_key or not ex.passphrase:
+        problems.append("OKX API 凭证不完整 (api_key/secret_key/passphrase)")
+    if ex.permissions != "trade":
+        problems.append(
+            f"OKX 权限为 '{ex.permissions}'，live 模式会静默走模拟成交，必须改为 'trade'"
+        )
+    if not root_config.agent.api_key:
+        problems.append("DeepSeek API key 未设置 (DEEPSEEK_API_KEY)")
+
+    # 账户连通性 + 签名验证（真实请求一次）
+    if not problems:
+        try:
+            balances = await asyncio.to_thread(okx_rest.get_balance)
+            logger.info(f"✅ Preflight: OKX 账户连接正常（{len(balances)} 个资产条目）")
+        except Exception as e:
+            problems.append(f"OKX 账户查询失败（凭证/权限/网络）: {e}")
+
+    for p in problems:
+        logger.error(f"Preflight: {p}")
+    if problems:
+        logger.error("❌ Preflight 未通过，live 模式终止启动")
+        return False
+    return True
+
+
 async def main():
     parser = ArgumentParser(description="OKX Quant Agent — 三 Agent 交易系统")
     parser.add_argument(
@@ -176,6 +252,10 @@ async def main():
     # OKX REST 客户端（供 TradeExecutor 使用）
     okx_rest = OKXClient(root_config.exchange)
 
+    # ── 启动前检查（live 模式：凭证/权限/连通性，不过则退出） ──
+    if not await _preflight_check(root_config, okx_rest, args.mode):
+        raise SystemExit(1)
+
     # 风控
     risk_manager = RiskManager(agent_config)
 
@@ -213,6 +293,10 @@ async def main():
         executor=trade_executor,
         okx_client=okx_rest,
     ) if agent_config.agent3_enabled else None
+
+    # 仓位唯一事实源：RiskManager 的持仓检查/状态均从 PositionMonitor 读取
+    if position_monitor:
+        risk_manager.position_monitor = position_monitor
 
     # DeepSeek 决策器
     deepseek = DeepSeekTrader(
@@ -275,6 +359,21 @@ async def main():
     logger.info(f"Agent 2 (新闻)={'✅' if agent2 else '❌'}")
     logger.info(f"Agent 3 (交易)={'✅' if agent3 else '❌'}")
     logger.info(f"Agent 4 (复盘)={'✅' if agent4_reviewer else '❌'}")
+
+    # ── 启动恢复：从 DB 重建未平仓持仓（重启后止损监控不丢仓） ──
+    if position_monitor and position_monitor.restore_from_db():
+        pm_status = position_monitor.get_status()
+        logger.warning(
+            f"⚠️ 检测到未平仓持仓: {pm_status['position_side']} "
+            f"{pm_status['position_size']:.4f} ETH @ ${pm_status['entry_price']:.2f} — "
+            f"已恢复监控（止损/止盈为配置默认值）"
+        )
+        if agent3:
+            agent3.update_position(
+                side=pm_status["position_side"],
+                size=pm_status["position_size"],
+                entry_price=pm_status["entry_price"],
+            )
 
     # ── 启动所有 Agent ──
     tasks = []

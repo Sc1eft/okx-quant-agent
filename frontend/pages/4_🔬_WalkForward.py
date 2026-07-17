@@ -31,6 +31,10 @@ if not strategies:
     st.stop()
 
 strategy_names = list(strategies.keys())
+
+st.session_state.setdefault("wf_results", {})
+st.session_state.setdefault("param_sweep_results", {})
+st.session_state.setdefault("oos_results", {})
 selected_strategy = st.selectbox(
     "选择策略",
     strategy_names,
@@ -253,6 +257,13 @@ with tab3:
             st.metric("收益保留率", f"{retention:.0%}")
 
         # Simple bar chart
+        theme = st.session_state.get("theme_mode", "light")
+        if theme == "dark":
+            chart_bg, paper_bg = "#1e293b", "#1e293b"
+            grid_color, font_color, title_color = "#334155", "#94a3b8", "#f1f5f9"
+        else:
+            chart_bg, paper_bg = "#ffffff", "#f8fafc"
+            grid_color, font_color, title_color = "#e2e8f0", "#475569", "#0f172a"
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=["样本内", "样本外"],
@@ -262,14 +273,14 @@ with tab3:
             marker_line=dict(color="white", width=1),
         ))
         fig.update_layout(
-            title=dict(text="样本内 vs 样本外收益对比", font=dict(size=14, color="#0f172a"), x=0, xanchor="left"),
+            title=dict(text="样本内 vs 样本外收益对比", font=dict(size=14, color=title_color), x=0, xanchor="left"),
             yaxis_title="收益率 (%)",
-            plot_bgcolor="#ffffff",
-            paper_bgcolor="#f8fafc",
-            font=dict(color="#475569", family="-apple-system, BlinkMacSystemFont, sans-serif"),
+            plot_bgcolor=chart_bg,
+            paper_bgcolor=paper_bg,
+            font=dict(color=font_color, family="-apple-system, BlinkMacSystemFont, sans-serif"),
         )
-        fig.update_xaxes(gridcolor="#e2e8f0", zeroline=False)
-        fig.update_yaxes(gridcolor="#e2e8f0", zeroline=True, zerolinecolor="#e2e8f0")
+        fig.update_xaxes(gridcolor=grid_color, zeroline=False)
+        fig.update_yaxes(gridcolor=grid_color, zeroline=True, zerolinecolor=grid_color)
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("点击「运行 OOS 测试」开始样本外验证")

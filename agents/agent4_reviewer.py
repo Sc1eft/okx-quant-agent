@@ -319,16 +319,17 @@ class Agent4Reviewer:
     def _save_persistent_state(self) -> None:
         """保存 trade_count / last_review_count 到 SQLite（使用共享连接）"""
         try:
-            conn = self._db.conn
-            conn.execute(
-                "INSERT OR REPLACE INTO agent4_state (key, value) VALUES (?, ?)",
-                ("trade_count", str(self._trade_count)),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO agent4_state (key, value) VALUES (?, ?)",
-                ("last_review_count", str(self._last_review_count)),
-            )
-            conn.commit()
+            with self._db.write_lock:
+                conn = self._db.conn
+                conn.execute(
+                    "INSERT OR REPLACE INTO agent4_state (key, value) VALUES (?, ?)",
+                    ("trade_count", str(self._trade_count)),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO agent4_state (key, value) VALUES (?, ?)",
+                    ("last_review_count", str(self._last_review_count)),
+                )
+                conn.commit()
         except Exception as e:
             logger.debug(f"Agent 4: 持久化状态保存失败: {e}")
 

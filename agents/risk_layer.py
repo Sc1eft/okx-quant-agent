@@ -46,8 +46,9 @@ class RiskManager:
         self._consecutive_losses: int = 0
         self._current_date: date = datetime.now(timezone.utc).date()
         self._current_cst_date: date = self._utc_to_cst_date(datetime.now(timezone.utc))
-        self._current_position_eth: float = 0.0
-        self._current_position_side: Optional[str] = None  # "long" / "short"
+        # 仓位唯一事实源是 PositionMonitor（由 main.py 接线）；
+        # RiskManager 不再自行记账仓位（旧记账逻辑方向处理有误且与 PM 分叉）
+        self.position_monitor = None
 
         # ── Layer 2 状态 ──
         self._consecutive_api_errors: int = 0
@@ -61,6 +62,8 @@ class RiskManager:
 
         # ── SQLite 持久化 ──
         self._init_db()
+        # 启动恢复：从 DB 重建当日风控状态（重启不清零，防绕过日内限制）
+        self._restore_daily_state()
 
     # ── Layer 1: 交易前检查 ──
 
@@ -130,14 +133,30 @@ class RiskManager:
         if size_eth > self.config.agent3_max_position_eth:
             return False, f"单笔 {size_eth:.4f} ETH 超过上限 {self.config.agent3_max_position_eth} ETH"
 
-        # 8. 方向冲突（同方向累加检查）
+        # 8. 方向冲突（同方向累加检查）— 仓位以 PositionMonitor 为准
         direction = "long" if side == "buy" else "short"
-        if self._current_position_side == direction:
-            new_total = self._current_position_eth + size_eth
+        pos_side, pos_eth = self.get_position()
+        if pos_side == direction:
+            new_total = pos_eth + size_eth
             if new_total > self.config.agent3_max_position_eth:
                 return False, f"同方向累加 {new_total:.4f} ETH 超过上限"
 
         return True, ""
+
+    def get_position(self) -> Tuple[Optional[str], float]:
+        """当前持仓 (side, size_eth)，side 为 None 表示无持仓
+
+        PositionMonitor 是唯一仓位事实源；未接入时视为无持仓。
+        """
+        pm = self.position_monitor
+        if pm is not None:
+            st = pm.get_status()
+            side = st.get("position_side", "none")
+            size = st.get("position_size", 0.0)
+            if side in (None, "none") or size <= 0:
+                return None, 0.0
+            return side, size
+        return None, 0.0
 
     def _check_hft(self, now: datetime) -> bool:
         """检查过去一小时内交易是否超过上限"""
@@ -203,21 +222,6 @@ class RiskManager:
         if trade_data.get("trade_type") == "close" and trade_data.get("trade_group_id"):
             self._update_pnl_close(trade_data)
 
-        # 更新仓位信息
-        side = trade_data.get("side", "")
-        size = trade_data.get("size", 0)
-        if side == "buy":
-            self._current_position_side = "long"
-            self._current_position_eth += size
-        elif side == "sell":
-            if trade_data.get("short"):
-                self._current_position_side = "short"
-            else:
-                # closing a long / reducing long position
-                self._current_position_eth = max(0, self._current_position_eth - size)
-                if self._current_position_eth <= 0:
-                    self._current_position_side = None
-
         pnl = trade_data.get("pnl", 0)
         size = trade_data.get("size", 0)
         _is_small_position = size < self.config.agent3_min_position_for_loss_tracking
@@ -243,12 +247,13 @@ class RiskManager:
         if not self._db_conn:
             return
         try:
-            self._db_conn.execute(
-                "UPDATE trades SET pnl_close = ? "
-                "WHERE trade_group_id = ? AND trade_type = 'open'",
-                (trade_data.get("pnl", 0), trade_data["trade_group_id"])
-            )
-            self._db_conn.commit()
+            with self._db.write_lock:
+                self._db_conn.execute(
+                    "UPDATE trades SET pnl_close = ? "
+                    "WHERE trade_group_id = ? AND trade_type = 'open'",
+                    (trade_data.get("pnl", 0), trade_data["trade_group_id"])
+                )
+                self._db_conn.commit()
         except Exception as e:
             logger.debug(f"更新 pnl_close 失败: {e}")
 
@@ -295,6 +300,7 @@ class RiskManager:
 
     def get_status(self) -> dict:
         """返回风控状态摘要"""
+        pos_side, pos_eth = self.get_position()
         return {
             "daily_trade_count": self._daily_trade_count,
             "max_daily_trades": self.config.agent3_max_daily_trades,
@@ -304,8 +310,8 @@ class RiskManager:
             "consecutive_losses": self._consecutive_losses,
             "max_consecutive_losses": self.config.agent3_max_consecutive_losses,
             "position_size_multiplier": self.get_position_size_multiplier(),
-            "position_eth": round(self._current_position_eth, 6),
-            "position_side": self._current_position_side,
+            "position_eth": round(pos_eth, 6),
+            "position_side": pos_side,
             "max_trades_per_hour": self.config.max_trades_per_hour,
         }
 
@@ -428,64 +434,98 @@ class RiskManager:
         try:
             self._db = DatabaseManager(db_path)
             self._db_conn = self._db.conn
-            self._db_conn.execute("""
-                CREATE TABLE IF NOT EXISTS trades (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT,
-                    side TEXT,
-                    size REAL,
-                    price REAL,
-                    pnl REAL,
-                    order_id TEXT,
-                    symbol TEXT,
-                    decision TEXT
-                )
-            """)
-            # Phase 4 迁移: 新增 P&L 跟踪列 + 手续费列
-            for col, col_def in [
-                ("pnl_close", "REAL DEFAULT 0"),
-                ("trade_group_id", "TEXT DEFAULT ''"),
-                ("trade_type", "TEXT DEFAULT 'open'"),
-                ("fee", "REAL DEFAULT 0.0"),
-                ("confidence", "INTEGER DEFAULT 0"),
-                ("position_size_pct", "REAL DEFAULT 0.0"),
-            ]:
-                try:
-                    self._db_conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_def}")
-                except sqlite3.OperationalError:
-                    pass  # 列已存在
-            self._db_conn.commit()
+            # 建表/迁移统一走 db_manager.ensure_trades_schema（单一 schema 权威）
+            from data.db_manager import ensure_trades_schema
+            ensure_trades_schema(self._db_conn)
         except Exception as e:
             logger.error(f"SQLite 初始化失败: {e}")
             self._db = None
             self._db_conn = None
+
+    def _restore_daily_state(self):
+        """启动时从 DB 回放当日交易，重建内存风控状态
+
+        恢复规则与 record_trade 的记账规则保持一致：
+        - 每行（open/close）都计入当日交易次数
+        - pnl<0 且仓位 >= 最小跟踪仓位 → 连亏+1、日亏损累加
+        - pnl>0 → 连亏清零
+        - 仅处理北京时间当日（CST 00:00 = UTC 16:00）以来的记录
+        """
+        if not self._db_conn:
+            return
+        try:
+            cst_now = datetime.now(timezone.utc) + timedelta(hours=8)
+            cst_midnight = cst_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            utc_cutoff = (cst_midnight - timedelta(hours=8)).isoformat()
+
+            rows = self._db_conn.execute(
+                "SELECT * FROM trades WHERE timestamp >= ? ORDER BY id",
+                (utc_cutoff,),
+            ).fetchall()
+            if not rows:
+                return
+
+            min_size = self.config.agent3_min_position_for_loss_tracking
+            for r in rows:
+                trade = dict(r)
+                self._daily_trade_count += 1
+                self._daily_trades.append(trade)
+
+                pnl = trade.get("pnl") or 0
+                size = trade.get("size") or 0
+                if pnl < 0 and size >= min_size:
+                    self._consecutive_losses += 1
+                    self._daily_loss_usdt += abs(pnl)
+                elif pnl > 0:
+                    self._consecutive_losses = 0
+                if pnl != 0:
+                    self._daily_realized_pnl = round(self._daily_realized_pnl + pnl, 2)
+
+            last_ts = rows[-1]["timestamp"]
+            if last_ts:
+                try:
+                    self._last_trade_time = datetime.fromisoformat(last_ts)
+                except ValueError:
+                    pass
+
+            self._daily_loss_usdt = round(self._daily_loss_usdt, 2)
+            logger.info(
+                f"风控状态已恢复: 今日 {self._daily_trade_count} 笔, "
+                f"亏损 {self._daily_loss_usdt:.2f} USDT, 连亏 {self._consecutive_losses} 次"
+            )
+        except Exception as e:
+            logger.error(f"风控状态恢复失败（按零状态启动）: {e}")
 
     def _log_trade_sync(self, trade_data: dict):
         """同步写入交易到 SQLite（含 Phase 4 P&L 列 + 手续费 + 信心度）"""
         if not self._db_conn:
             return
         try:
-            self._db_conn.execute(
-                "INSERT INTO trades (timestamp, side, size, price, pnl, order_id, symbol, decision, "
-                "pnl_close, trade_group_id, trade_type, fee, confidence, position_size_pct) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    trade_data.get("timestamp", ""),
-                    trade_data.get("side", ""),
-                    trade_data.get("size", 0),
-                    trade_data.get("price", 0),
-                    trade_data.get("pnl", 0),
-                    trade_data.get("order_id", ""),
-                    trade_data.get("symbol", ""),
-                    json.dumps(trade_data.get("decision", {})),
-                    trade_data.get("pnl_close", 0),
-                    trade_data.get("trade_group_id", ""),
-                    trade_data.get("trade_type", "open"),
-                    trade_data.get("fee", 0.0),
-                    trade_data.get("confidence", 0),
-                    trade_data.get("position_size_pct", 0.0),
+            with self._db.write_lock:
+                self._db_conn.execute(
+                    "INSERT INTO trades (timestamp, side, size, price, pnl, order_id, symbol, decision, "
+                    "pnl_close, trade_group_id, trade_type, fee, confidence, position_size_pct, "
+                    "stop_loss, take_profit) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        trade_data.get("timestamp", ""),
+                        trade_data.get("side", ""),
+                        trade_data.get("size", 0),
+                        trade_data.get("price", 0),
+                        trade_data.get("pnl", 0),
+                        trade_data.get("order_id", ""),
+                        trade_data.get("symbol", ""),
+                        json.dumps(trade_data.get("decision", {})),
+                        trade_data.get("pnl_close", 0),
+                        trade_data.get("trade_group_id", ""),
+                        trade_data.get("trade_type", "open"),
+                        trade_data.get("fee", 0.0),
+                        trade_data.get("confidence", 0),
+                        trade_data.get("position_size_pct", 0.0),
+                        trade_data.get("stop_loss", 0),
+                        trade_data.get("take_profit", 0),
+                    )
                 )
-            )
-            self._db_conn.commit()
+                self._db_conn.commit()
         except Exception as e:
             logger.error(f"SQLite 写入失败: {e}")

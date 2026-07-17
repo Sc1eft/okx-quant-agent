@@ -200,8 +200,8 @@ else:
     with tab3:
         signals = result.get("signals", [])
         if signals:
-            # Build price data from equity curve times
-            price_data = [{"time": p["time"], "close": p["equity"]} for p in equity_curve] if equity_curve else []
+            # 使用回测真实 K 线收盘价序列定位信号
+            price_data = result.get("price_data", [])
             fig = signal_price_chart(price_data, signals, title=f"{selected_strategy} - 信号标记", theme=st.session_state.get("theme_mode", "light"))
             st.plotly_chart(fig, use_container_width=True)
         else:

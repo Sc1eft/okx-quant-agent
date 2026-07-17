@@ -142,6 +142,7 @@ with tab2:
         except Exception as e:
             st.info(f"读取交易记录失败: {e}")
     else:
+        st.warning("以下为演示数据，非真实交易记录")
         demo_trades = pd.DataFrame([
             {"时间": "2026-06-24 10:30:00", "方向": "🟢 买入", "数量": "0.01 ETH",
              "价格": "$3,450.00", "状态": "成交", "订单ID": "12345"},
@@ -155,7 +156,7 @@ with tab2:
 
     if has_live_status:
         exec_stats = executor_stats or {}
-        total = a3.get("trades_executed", 0)
+        total = agent3.get("trades_executed", 0)
         failed = exec_stats.get("failed_orders", 0)
         deepseek_calls = deepseek_stats.get("total_calls", 0)
         deepseek_errors = deepseek_stats.get("total_errors", 0)
@@ -203,6 +204,7 @@ with tab3:
             with cols[i % 4]:
                 st.metric(key, val)
     else:
+        st.warning("以下为演示数据，非真实持仓")
         demo_pos = {
             "方向": "🟢 多头 / Long",
             "数量": "0.01 ETH",
