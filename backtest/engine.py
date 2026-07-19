@@ -42,7 +42,7 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    """Long-only spot backtester using no-lookahead signal execution."""
+    """多空双向回测：多单现货式记账、空单合约式盈亏结算，next-bar 执行无前视"""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -62,12 +62,14 @@ class BacktestEngine:
         if not strategies:
             raise ValueError("No enabled strategies")
 
+        stops_enabled = all(getattr(s, "use_engine_stops", True) for s in strategies)
         signal_frames = [strategy.generate_signals(df).signals for strategy in strategies]
         signals_df = self._combine_signals(signal_frames, strategies)
         trades: list[Trade] = []
         equity = self.initial_capital
         equity_curve = []
-        position = entry_price = entry_fee = highest_price = 0.0
+        position = entry_price = entry_fee = extreme_price = 0.0
+        pos_side: Optional[str] = None  # None=空仓, "long"=多, "short"=空
         entry_time: Optional[pd.Timestamp] = None
         fee_rate = self.cfg.trading.taker_fee if order_type == "market" else self.cfg.trading.maker_fee
         slippage = self.cfg.trading.slippage_pct / 100 if order_type == "market" else 0.0
@@ -77,40 +79,71 @@ class BacktestEngine:
             open_price, high_price = float(row["open"]), float(row["high"])
             low_price, close_price = float(row["low"]), float(row["close"])
 
-            if pending_signal == Signal.BUY and position == 0:
+            if pending_signal == Signal.BUY and pos_side is None:
                 fill_price = self._entry_fill_price(order_type, pending_reference_price, open_price, low_price, slippage)
                 if fill_price is not None:
                     position = equity * self.cfg.risk.max_single_order_pct / fill_price
                     entry_fee = fill_price * position * fee_rate
                     equity -= fill_price * position + entry_fee
-                    entry_price, entry_time, highest_price = fill_price, idx, open_price
-            elif pending_signal in (Signal.SELL, Signal.EXIT) and position > 0:
+                    entry_price, entry_time, extreme_price, pos_side = fill_price, idx, open_price, "long"
+            elif pending_signal == Signal.SHORT and pos_side is None:
+                fill_price = self._short_entry_fill_price(order_type, pending_reference_price, open_price, high_price, slippage)
+                if fill_price is not None:
+                    position = equity * self.cfg.risk.max_single_order_pct / fill_price
+                    entry_fee = fill_price * position * fee_rate
+                    equity -= entry_fee  # 合约式记账：名义价值的盈亏在平仓时结算
+                    entry_price, entry_time, extreme_price, pos_side = fill_price, idx, open_price, "short"
+            elif pending_signal in (Signal.SELL, Signal.EXIT) and pos_side == "long":
                 fill_price = self._exit_fill_price(order_type, pending_reference_price, open_price, high_price, slippage)
                 if fill_price is not None:
-                    equity, position, entry_price, entry_time, entry_fee, highest_price = self._close_position(
-                        trades, equity, position, entry_price, entry_time, entry_fee, idx, fill_price, fee_rate, pending_reason)
+                    equity, position, entry_price, entry_time, entry_fee, extreme_price, pos_side = self._close_position(
+                        trades, equity, position, entry_price, entry_time, entry_fee, idx, fill_price, fee_rate, pending_reason, pos_side)
+            elif pending_signal in (Signal.COVER, Signal.EXIT) and pos_side == "short":
+                fill_price = self._short_exit_fill_price(order_type, pending_reference_price, open_price, low_price, slippage)
+                if fill_price is not None:
+                    equity, position, entry_price, entry_time, entry_fee, extreme_price, pos_side = self._close_position(
+                        trades, equity, position, entry_price, entry_time, entry_fee, idx, fill_price, fee_rate, pending_reason, pos_side)
             pending_signal = Signal.HOLD
 
-            if position > 0:
-                intrabar_exit = self._intrabar_exit_price(open_price, high_price, low_price, entry_price, highest_price)
+            if pos_side is not None:
+                # 策略可声明 use_engine_stops=False 关闭引擎级止损（如日线趋势策略，
+                # 其出场由 regime 翻转负责，分钟级止损模型对周线级持仓是噪声）
+                intrabar_exit = (
+                    self._intrabar_exit_price(pos_side, open_price, high_price, low_price, entry_price, extreme_price)
+                    if stops_enabled else None
+                )
                 if intrabar_exit is not None:
                     fill_price, reason = intrabar_exit
-                    equity, position, entry_price, entry_time, entry_fee, highest_price = self._close_position(
+                    slip = (1 - slippage) if pos_side == "long" else (1 + slippage)
+                    equity, position, entry_price, entry_time, entry_fee, extreme_price, pos_side = self._close_position(
                         trades, equity, position, entry_price, entry_time, entry_fee, idx,
-                        fill_price * (1 - slippage), fee_rate, reason)
+                        fill_price * slip, fee_rate, reason, pos_side)
+                elif pos_side == "long":
+                    extreme_price = max(extreme_price, high_price)
                 else:
-                    highest_price = max(highest_price, high_price)
+                    extreme_price = min(extreme_price, low_price)
 
             signal = row["signal"]
-            if position == 0 or signal in (Signal.SELL, Signal.EXIT):
+            if pos_side is None and signal != Signal.HOLD:
                 pending_signal, pending_reason, pending_reference_price = signal, row.get("reason", ""), close_price
-            equity_curve.append({"time": idx, "equity": equity + position * close_price if position > 0 else equity})
+            elif pos_side == "long" and signal in (Signal.SELL, Signal.EXIT):
+                pending_signal, pending_reason, pending_reference_price = signal, row.get("reason", ""), close_price
+            elif pos_side == "short" and signal in (Signal.COVER, Signal.EXIT):
+                pending_signal, pending_reason, pending_reference_price = signal, row.get("reason", ""), close_price
 
-        if position > 0 and entry_time is not None:
+            if pos_side == "long":
+                equity_curve.append({"time": idx, "equity": equity + position * close_price})
+            elif pos_side == "short":
+                equity_curve.append({"time": idx, "equity": equity + (entry_price - close_price) * position})
+            else:
+                equity_curve.append({"time": idx, "equity": equity})
+
+        if pos_side is not None and entry_time is not None:
             last_idx, last_close = signals_df.index[-1], float(signals_df.iloc[-1]["close"])
-            equity, position, entry_price, entry_time, entry_fee, highest_price = self._close_position(
+            slip = (1 - slippage) if pos_side == "long" else (1 + slippage)
+            equity, position, entry_price, entry_time, entry_fee, extreme_price, pos_side = self._close_position(
                 trades, equity, position, entry_price, entry_time, entry_fee, last_idx,
-                last_close * (1 - slippage), fee_rate, "end_of_data")
+                last_close * slip, fee_rate, "end_of_data", pos_side)
             equity_curve[-1]["equity"] = equity
 
         equity_series = pd.DataFrame(equity_curve).set_index("time")["equity"]
@@ -134,21 +167,25 @@ class BacktestEngine:
         combined = signal_frames[0].copy()
         combined["signal"], combined["reason"] = Signal.HOLD, ""
         for idx in combined.index:
-            buy_weight = sell_weight = 0.0
+            weights = {Signal.BUY: 0.0, Signal.SELL: 0.0, Signal.SHORT: 0.0, Signal.COVER: 0.0}
             reasons = []
             for frame, strategy in zip(signal_frames, strategies):
                 signal = frame.at[idx, "signal"]
                 weight = self.cfg.strategy.strategy_weights.get(strategy.name, 1.0)
                 if signal == Signal.BUY:
-                    buy_weight += weight
-                    reasons.append(f"{strategy.name}:buy")
+                    weights[Signal.BUY] += weight
+                elif signal == Signal.SHORT:
+                    weights[Signal.SHORT] += weight
+                elif signal == Signal.COVER:
+                    weights[Signal.COVER] += weight
                 elif signal in (Signal.SELL, Signal.EXIT):
-                    sell_weight += weight
+                    weights[Signal.SELL] += weight
+                if signal != Signal.HOLD:
                     reasons.append(f"{strategy.name}:{signal.value}")
-            if buy_weight > sell_weight and buy_weight > 0:
-                combined.at[idx, "signal"] = Signal.BUY
-            elif sell_weight > buy_weight and sell_weight > 0:
-                combined.at[idx, "signal"] = Signal.SELL
+            # 取权重最大且 >0 的方向（单策略时等价于透传）
+            best_signal = max(weights, key=lambda s: weights[s])
+            if weights[best_signal] > 0:
+                combined.at[idx, "signal"] = best_signal
             combined.at[idx, "reason"] = "; ".join(reasons)
         return combined
 
@@ -168,40 +205,84 @@ class BacktestEngine:
         limit_price = reference * (1 + 0.0005)
         return limit_price if high_price >= limit_price else None
 
-    def _intrabar_exit_price(self, open_price: float, high_price: float, low_price: float,
-                             entry_price: float, highest_price: float) -> Optional[tuple[float, str]]:
+    @staticmethod
+    def _short_entry_fill_price(order_type: str, reference: float, open_price: float,
+                                high_price: float, slippage: float) -> Optional[float]:
+        """开空成交价：市价按开盘价（劣后滑点），限价挂在参考价上方"""
+        if order_type == "market":
+            return open_price * (1 - slippage)
+        limit_price = reference * (1 + 0.0005)
+        return limit_price if high_price >= limit_price else None
+
+    @staticmethod
+    def _short_exit_fill_price(order_type: str, reference: float, open_price: float,
+                               low_price: float, slippage: float) -> Optional[float]:
+        """平空成交价：市价按开盘价（劣后滑点），限价挂在参考价下方"""
+        if order_type == "market":
+            return open_price * (1 + slippage)
+        limit_price = reference * (1 - 0.0005)
+        return limit_price if low_price <= limit_price else None
+
+    def _intrabar_exit_price(self, side: str, open_price: float, high_price: float, low_price: float,
+                             entry_price: float, extreme_price: float) -> Optional[tuple[float, str]]:
         """Conservative OHLC exit model: stop loss wins if stop and target share a bar."""
-        stop_price = entry_price * (1 - self.cfg.strategy.stop_loss_pct / 100)
-        target_price = entry_price * (1 + self.cfg.strategy.take_profit_pct / 100)
-        if open_price <= stop_price:
-            return open_price, "stop_loss_gap"
-        if low_price <= stop_price:
-            return stop_price, "stop_loss"
+        sl_pct = self.cfg.strategy.stop_loss_pct / 100
+        tp_pct = self.cfg.strategy.take_profit_pct / 100
         activation = self.cfg.strategy.trailing_stop_activation / 100
         distance = self.cfg.strategy.trailing_stop_distance / 100
-        if activation > 0 and distance > 0 and highest_price >= entry_price * (1 + activation):
-            trail_price = highest_price * (1 - distance)
-            if open_price <= trail_price:
-                return open_price, "trailing_stop_gap"
-            if low_price <= trail_price:
-                return trail_price, "trailing_stop"
-        if open_price >= target_price:
-            return open_price, "take_profit_gap"
-        if high_price >= target_price:
-            return target_price, "take_profit"
+        if side == "long":
+            stop_price = entry_price * (1 - sl_pct)
+            target_price = entry_price * (1 + tp_pct)
+            if open_price <= stop_price:
+                return open_price, "stop_loss_gap"
+            if low_price <= stop_price:
+                return stop_price, "stop_loss"
+            if activation > 0 and distance > 0 and extreme_price >= entry_price * (1 + activation):
+                trail_price = extreme_price * (1 - distance)
+                if open_price <= trail_price:
+                    return open_price, "trailing_stop_gap"
+                if low_price <= trail_price:
+                    return trail_price, "trailing_stop"
+            if open_price >= target_price:
+                return open_price, "take_profit_gap"
+            if high_price >= target_price:
+                return target_price, "take_profit"
+        else:  # short：止损在上方、止盈在下方，extreme_price 为持仓期最低价
+            stop_price = entry_price * (1 + sl_pct)
+            target_price = entry_price * (1 - tp_pct)
+            if open_price >= stop_price:
+                return open_price, "stop_loss_gap"
+            if high_price >= stop_price:
+                return stop_price, "stop_loss"
+            if activation > 0 and distance > 0 and extreme_price <= entry_price * (1 - activation):
+                trail_price = extreme_price * (1 + distance)
+                if open_price >= trail_price:
+                    return open_price, "trailing_stop_gap"
+                if high_price >= trail_price:
+                    return trail_price, "trailing_stop"
+            if open_price <= target_price:
+                return open_price, "take_profit_gap"
+            if low_price <= target_price:
+                return target_price, "take_profit"
         return None
 
     @staticmethod
     def _close_position(trades: list[Trade], equity: float, position: float, entry_price: float,
                         entry_time: pd.Timestamp, entry_fee: float, exit_time: pd.Timestamp,
-                        exit_price: float, fee_rate: float, reason: str) -> tuple[float, float, float, Optional[pd.Timestamp], float, float]:
+                        exit_price: float, fee_rate: float, reason: str,
+                        side: str) -> tuple[float, float, float, Optional[pd.Timestamp], float, float, Optional[str]]:
         exit_fee = exit_price * position * fee_rate
-        pnl = (exit_price - entry_price) * position - entry_fee - exit_fee
+        if side == "long":
+            pnl = (exit_price - entry_price) * position - entry_fee - exit_fee
+            new_equity = equity + exit_price * position - exit_fee
+        else:  # short：名义价值不进现金，平仓时按价差结算盈亏
+            pnl = (entry_price - exit_price) * position - entry_fee - exit_fee
+            new_equity = equity + (entry_price - exit_price) * position - exit_fee
         trades.append(Trade(
             entry_time=entry_time, exit_time=exit_time, entry_price=round(entry_price, 2),
-            exit_price=round(exit_price, 2), side="long", size=round(position, 6), pnl=round(pnl, 2),
+            exit_price=round(exit_price, 2), side=side, size=round(position, 6), pnl=round(pnl, 2),
             pnl_pct=round(pnl / (entry_price * position) * 100, 2), fee=round(entry_fee + exit_fee, 4), reason=reason))
-        return equity + exit_price * position - exit_fee, 0.0, 0.0, None, 0.0, 0.0
+        return new_equity, 0.0, 0.0, None, 0.0, 0.0, None
 
     def run_all_strategies(self, df: pd.DataFrame, order_type: str = "market") -> dict[str, BacktestResult]:
         results = {}

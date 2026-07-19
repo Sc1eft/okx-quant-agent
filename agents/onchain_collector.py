@@ -16,12 +16,14 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import httpx
 
 from agents.event_bus import EventBus, AgentEvent, AgentEventType
 from agents.config import AgentSystemConfig
+from agents.percentile_tracker import RollingPercentile
 
 logger = logging.getLogger("onchain_collector")
 
@@ -122,18 +124,71 @@ class OnchainCollector:
         self._last_funding_rate: float = 0.0
         self._last_gas_level: str = ""
         self._last_whale_hashes: set[str] = set()
+        self._last_oi: float = 0.0  # 上一周期 OI（算 ΔOI% 用）
+
+        # 事件触发层：滚动分位极端检测（P95/P5 → 高优信号事件）
+        self._pct_enabled: bool = getattr(config, "agent2_percentile_enabled", False)
+        self._trackers: dict[str, RollingPercentile] = {}
+        if self._pct_enabled:
+            self._load_percentiles()
 
         self._stats = {
             "gas_fetches": 0,
             "whale_fetches": 0,
             "taker_fetches": 0,
             "funding_fetches": 0,
+            "oi_fetches": 0,
             "events_pushed": 0,
+            "extreme_events": 0,
             "last_gas_gwei": 0,
             "last_taker_buy_ratio": 0,
             "last_funding_rate": 0,
             "last_whale_count": 0,
+            "last_oi_change_pct": 0,
         }
+
+    # ── 分位状态持久化（重启保留分布，免去 17h 预热）──
+
+    def _load_percentiles(self):
+        self._trackers = {
+            k: RollingPercentile(self.cfg.agent2_percentile_window,
+                                 self.cfg.agent2_percentile_min_samples)
+            for k in ("taker", "funding", "oi")
+        }
+        path = Path(self.cfg.agent2_percentile_state_path)
+        try:
+            if path.exists():
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                for k, d in saved.items():
+                    if k in self._trackers and isinstance(d, dict):
+                        self._trackers[k] = RollingPercentile.from_dict(d)
+                logger.info(f"分位状态已加载: { {k: t.n for k, t in self._trackers.items()} }")
+        except Exception as e:
+            logger.warning(f"分位状态加载失败（忽略，从头累计）: {e}")
+
+    def _save_percentiles(self):
+        try:
+            path = Path(self.cfg.agent2_percentile_state_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({k: t.to_dict() for k, t in self._trackers.items()}),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+        except Exception as e:
+            logger.debug(f"分位状态保存失败: {e}")
+
+    def _pct_extreme(self, key: str, value: float) -> str | None:
+        """更新分布并判定极端；未启用返回 None。先判后更，避免自评自"""
+        if not self._pct_enabled:
+            return None
+        t = self._trackers[key]
+        ext = t.extreme(value, self.cfg.agent2_percentile_upper,
+                        self.cfg.agent2_percentile_lower)
+        t.update(value)
+        self._save_percentiles()
+        return ext
 
     # ── 主入口 ──
 
@@ -150,6 +205,8 @@ class OnchainCollector:
             tasks.append(asyncio.create_task(self._taker_volume_loop(), name="taker_volume"))
         if self.cfg.agent2_funding_rate_enabled:
             tasks.append(asyncio.create_task(self._funding_rate_loop(), name="funding_rate"))
+        if getattr(self.cfg, "agent2_oi_enabled", False):
+            tasks.append(asyncio.create_task(self._open_interest_loop(), name="open_interest"))
 
         if not tasks:
             logger.info("OnchainCollector: 所有监控均已禁用")
@@ -348,19 +405,28 @@ class OnchainCollector:
         buy_ratio = buy_vol / total
         sell_ratio = sell_vol / total
 
+        # 事件触发层：分位极端判定（在去抖 return 之前更新，保证分布连续）
+        extreme = self._pct_extreme("taker", buy_ratio)
+
         # 检测变化：超过阈值或方向翻转
         threshold = self.cfg.agent2_taker_volume_buy_ratio_threshold
         is_bullish = buy_ratio >= threshold
         is_bearish = sell_ratio >= threshold
 
-        # 避免重复推送相近值
-        if abs(buy_ratio - self._last_taker_ratio) < 0.05 and not (is_bullish or is_bearish):
+        # 避免重复推送相近值（极端分位事件不受去抖限制）
+        if abs(buy_ratio - self._last_taker_ratio) < 0.05 and not (is_bullish or is_bearish) and not extreme:
             return
         self._last_taker_ratio = buy_ratio
         self._stats["last_taker_buy_ratio"] = round(buy_ratio, 4)
 
         sentiment = "bullish" if is_bullish else ("bearish" if is_bearish else "neutral")
         urgency = "high" if sentiment != "neutral" else "low"
+        confidence = 0.65 if sentiment != "neutral" else 0.35
+        if extreme:  # 分位极端覆盖静态判定：高=买方极端主导，低=卖方极端主导
+            sentiment = "bullish" if extreme == "high" else "bearish"
+            urgency = "high"
+            confidence = 0.75
+            self._stats["extreme_events"] += 1
 
         event = AgentEvent(
             type=AgentEventType.NEWS_EVENT,
@@ -372,11 +438,13 @@ class OnchainCollector:
                 "buy_vol_ccy": buy_vol,
                 "sell_vol_ccy": sell_vol,
                 "sentiment": sentiment,
+                "extreme": bool(extreme),
                 "description": (
                     f"📊 吃单比: 买 {buy_ratio:.1%} / 卖 {sell_ratio:.1%} ({sentiment})"
+                    + (f" ⚠️ 分位极端{extreme}" if extreme else "")
                 ),
             },
-            confidence=0.65 if sentiment != "neutral" else 0.35,
+            confidence=confidence,
             urgency=urgency,
         )
         await self.bus.publish_b(event)
@@ -420,15 +488,25 @@ class OnchainCollector:
         except (ValueError, TypeError):
             next_rate = rate
 
+        # 事件触发层：分位极端判定（在去抖 return 之前更新，保证分布连续）
+        extreme = self._pct_extreme("funding", rate)
+
         # 检测显著变化（ETH 正常费率在 0.000x%，变化 0.0001% 即推送）
-        if abs(rate - self._last_funding_rate) < 0.0001 and abs(rate) < self.cfg.agent2_funding_rate_high_threshold * 100:
+        # rate 已是百分数（上方 *100）；阈值为百分数语义（0.01 = 0.01%），勿再换算
+        if abs(rate - self._last_funding_rate) < 0.0001 and abs(rate) < self.cfg.agent2_funding_rate_high_threshold and not extreme:
             return
         self._last_funding_rate = rate
         self._stats["last_funding_rate"] = round(rate, 4)
 
-        is_high = abs(rate) >= self.cfg.agent2_funding_rate_high_threshold * 100
+        is_high = abs(rate) >= self.cfg.agent2_funding_rate_high_threshold
         sentiment = "bearish" if rate > 0 else ("bullish" if rate < 0 else "neutral")
         urgency = "high" if is_high else "medium"
+        confidence = 0.6 if is_high else 0.4
+        if extreme:  # 分位极端覆盖静态判定
+            is_high = True
+            urgency = "high"
+            confidence = 0.75
+            self._stats["extreme_events"] += 1
 
         event = AgentEvent(
             type=AgentEventType.NEWS_EVENT,
@@ -439,22 +517,99 @@ class OnchainCollector:
                 "next_funding_rate_pct": round(next_rate, 4),
                 "sentiment": sentiment,
                 "is_high": is_high,
+                "extreme": bool(extreme),
                 "description": (
                     f"💰 资金费率: {rate:+.4f}% ({sentiment})"
                     + (" ⚠️ 高" if is_high else "")
+                    + (f" ⚠️ 分位极端{extreme}" if extreme else "")
                 ),
             },
-            confidence=0.6 if is_high else 0.4,
+            confidence=confidence,
             urgency=urgency,
         )
         await self.bus.publish_b(event)
         self._stats["events_pushed"] += 1
         logger.info(f"💰 资金费率: {rate:+.4f}% ({sentiment})")
 
+    # ── OI 持仓量监控（事件触发层） ──
+
+    async def _open_interest_loop(self):
+        """定时获取永续 OI"""
+        logger.info("OI 监控已启动")
+        while self._running:
+            try:
+                await self._fetch_and_push_oi()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"OI 获取异常: {e}")
+            await asyncio.sleep(self.cfg.agent2_onchain_interval_seconds)
+
+    async def _fetch_and_push_oi(self):
+        """获取 OKX 永续 OI，ΔOI% 分位极端时推送高优事件
+
+        方向解读：OI 激增 = 有人在加杠杆，方向看最近的吃单比（买方主导→新多，
+        卖方主导→新空）；OI 骤降 = 去杠杆/平仓潮，方向中性（信息性事件）。
+        """
+        self._stats["oi_fetches"] += 1
+
+        try:
+            data = await asyncio.to_thread(self.okx.get_open_interest)
+        except Exception as e:
+            logger.debug(f"OI 获取失败: {e}")
+            return
+
+        try:
+            oi = float(data.get("oi", "0") or "0")
+        except (ValueError, TypeError):
+            return
+        if oi <= 0:
+            return
+        if self._last_oi <= 0:
+            self._last_oi = oi  # 首个样本只建基准
+            return
+
+        change_pct = (oi - self._last_oi) / self._last_oi * 100
+        self._last_oi = oi
+        if abs(change_pct) < self.cfg.agent2_oi_min_change_pct:
+            return  # 噪声：不入分布（避免分布被 ~0 值填充导致极端误报）
+        self._stats["last_oi_change_pct"] = round(change_pct, 3)
+
+        extreme = self._pct_extreme("oi", change_pct)
+        if not extreme:
+            return
+
+        if extreme == "high":
+            sentiment = "bullish" if self._last_taker_ratio >= 0.5 else "bearish"
+        else:
+            sentiment = "neutral"  # 去杠杆，方向中性
+
+        event = AgentEvent(
+            type=AgentEventType.NEWS_EVENT,
+            source="agent2_oi",
+            data={
+                "type": "open_interest",
+                "oi": oi,
+                "oi_change_pct": round(change_pct, 3),
+                "extreme": extreme,
+                "sentiment": sentiment,
+                "description": (
+                    f"📈 OI 分位极端{extreme}: Δ{change_pct:+.2f}% → {sentiment}"
+                ),
+            },
+            confidence=0.7,
+            urgency="high",
+        )
+        await self.bus.publish_b(event)
+        self._stats["events_pushed"] += 1
+        self._stats["extreme_events"] += 1
+        logger.info(f"📈 OI 分位极端{extreme}: Δ{change_pct:+.2f}% → {sentiment}")
+
     # ── 状态 ──
 
     def get_status(self) -> dict:
         return {
             "running": self._running,
+            "percentile_samples": {k: t.n for k, t in self._trackers.items()},
             **self._stats,
         }

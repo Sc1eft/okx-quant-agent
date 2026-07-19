@@ -11,6 +11,31 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Literal, Optional
 
+_DOTENV_LOADED = False
+
+
+def _load_dotenv(path: str | Path | None = None):
+    """轻量 .env 加载（默认项目根目录；不覆盖已有环境变量，只加载一次）。
+
+    密钥优先级：系统环境变量 / st.secrets > .env > configs/default.json。
+    """
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+    env_path = Path(path) if path else Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    except OSError:
+        pass
+
 # ──────────────────────────────────────────────
 # 合约配置
 # ──────────────────────────────────────────────
@@ -109,10 +134,15 @@ class StrategyConfig:
 
 @dataclass
 class RiskConfig:
-    """风控参数"""
-    max_position_pct: float = 0.50       # 最大持仓 50%
-    max_single_order_pct: float = 0.10   # 单笔最大 10%
-    max_daily_loss_pct: float = 2.0      # 单日最大亏损 2%
+    """风控参数
+
+    单位约定（历史并存，UI 层负责转换）：
+      max_position_pct / max_single_order_pct 为小数比例（0.10 = 10%）
+      max_daily_loss_pct 为百分比数值（2.0 = 2%）
+    """
+    max_position_pct: float = 0.50       # 最大持仓比例（小数，0.50 = 50%）
+    max_single_order_pct: float = 0.10   # 单笔下单比例（小数，0.10 = 10%）
+    max_daily_loss_pct: float = 2.0      # 单日最大亏损（百分比数值，2.0 = 2%）
     max_consecutive_losses: int = 3      # 连续亏损暂停
     cooldown_bars: int = 4               # 亏损后冷却 K 线数
     signal_expiry_bars: int = 1          # 信号过期（根 K 线）
@@ -122,6 +152,17 @@ class RiskConfig:
     recovery_cooldown_bars: int = 24     # 恢复冷却：24 根 K 线后才可重启
     recovery_switch_threshold: int = 2   # 连续 2 次暂停后自动切换策略
     max_daily_starts: int = 3            # 每天最大重启次数
+
+    def __post_init__(self):
+        # 仓位比例必须为小数（0.10 = 10%）；>1 即杠杆，现货体系下属配置错误。
+        # 防止 UI/配置文件把百分比数值（如 50.0）直接写入导致隐形杠杆。
+        for name in ("max_position_pct", "max_single_order_pct"):
+            val = getattr(self, name)
+            if not 0 < val <= 1.0:
+                raise ValueError(
+                    f"risk.{name} 必须是 (0, 1] 的小数比例（0.10 = 10%），当前值 {val}。"
+                    f"若来自百分比数值请除以 100"
+                )
 
 
 # ──────────────────────────────────────────────
@@ -209,15 +250,39 @@ class Config:
         self.exchange.secret_key = os.getenv("OKX_SECRET_KEY", self.exchange.secret_key)
         self.exchange.passphrase = os.getenv("OKX_PASSPHRASE", self.exchange.passphrase)
 
+    # 敏感字段：env 注入的密钥绝不明文回写配置文件
+    _SENSITIVE_FIELDS = [
+        ("exchange", "api_key"),
+        ("exchange", "secret_key"),
+        ("exchange", "passphrase"),
+        ("agent", "api_key"),
+    ]
+
     def save(self, path: str):
-        """保存配置到 JSON"""
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(asdict(self), f, indent=2, ensure_ascii=False)
+        """保存配置到 JSON
+
+        敏感字段（API 密钥）保护：保留文件原值；文件原本没有则写空串。
+        防止 env / st.secrets 注入的密钥被前端保存操作回写成明文。
+        """
+        data = asdict(self)
+        p = Path(path)
+        existing: dict = {}
+        if p.exists():
+            try:
+                existing = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                existing = {}
+        for section, key in self._SENSITIVE_FIELDS:
+            old_val = (existing.get(section) or {}).get(key)
+            data[section][key] = old_val if old_val else ""
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
 
     @classmethod
     def load(cls, path: str) -> "Config":
-        """从 JSON 文件加载配置"""
+        """从 JSON 文件加载配置（密钥优先级：环境变量 > .env > 配置文件）"""
+        _load_dotenv()
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         cfg = cls()
@@ -234,6 +299,7 @@ class Config:
                 setattr(cfg, k, v)
         # __post_init__ 中可能触发校验
         cfg.futures.__post_init__()
+        cfg.risk.__post_init__()
         # 环境变量覆盖配置文件中对应的值（最高优先级）
         for _env_key, _cfg_path in [
             ("OKX_API_KEY", ("exchange", "api_key")),

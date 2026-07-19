@@ -29,12 +29,31 @@ import pandas as pd
 from config import Config
 from strategies.base import BaseStrategy, Signal
 from risk.rules import RiskEngine
+from execution import intrabar
+from execution.trade_result import make_trade, reject_trade
 
 logger = logging.getLogger("execution.futures_paper")
 
 # ─────────────────────────────────────────────
 # 帮助函数
 # ─────────────────────────────────────────────
+
+
+def _to_bar_tz(ts: str | None) -> str | None:
+    """tick 路径时间戳（UTC ISO，来自心跳）→ bar 路径时区（Asia/Shanghai）。
+
+    同一本账（account.trades / equity_history）里 bar 成交记 +08:00、
+    tick 成交记 +00:00 会导致前端按时间排序/展示错乱，入账前统一。
+    """
+    if not ts:
+        return ts
+    try:
+        t = pd.Timestamp(ts)
+        if t.tzinfo is None:
+            t = t.tz_localize("UTC")
+        return t.tz_convert("Asia/Shanghai").isoformat()
+    except (ValueError, TypeError):
+        return ts
 
 
 def _mmr_for_leverage(leverage: int) -> float:
@@ -176,6 +195,8 @@ class FuturesAccount:
         self.equity_history: list[dict] = []
         self.last_price: float = 0.0
         self.position: FuturesPosition | None = None
+        self.funding_fee_total: float = 0.0  # 累计资金费（负=净支出，正=净收入）
+        self.funding_events: list[dict] = []
 
     def __repr__(self) -> str:
         return (
@@ -221,22 +242,49 @@ class FuturesAccount:
 
     # ── 价格更新 ──
 
-    def update_price(self, price: float):
+    def update_price(self, price: float, ts: str | None = None):
         self.last_price = price
         self.equity_history.append({
-            "time": datetime.now(timezone.utc).isoformat(),
+            "time": ts or datetime.now(timezone.utc).isoformat(),
             "price": price,
             "equity": self.total_equity,
         })
         if len(self.equity_history) > 1000:
             self.equity_history = self.equity_history[-1000:]
 
+    # ── 资金费结算（永续合约每 8h 一次） ──
+
+    def settle_funding(self, rate: float, mark_price: float, ts: str | None = None) -> dict | None:
+        """按 OKX 永续规则结算一次资金费。
+
+        fee = -方向符号 × 持仓名义价值 × rate：
+          rate > 0 → 多方支付给空方；rate < 0 → 空方支付给多方。
+        空仓时无结算，返回 None。
+        """
+        if not self.position or not self.position.is_active:
+            return None
+        notional = self.position.size * mark_price
+        sign = 1.0 if self.position.direction == "long" else -1.0
+        fee = -sign * notional * rate
+        self.wallet_balance += fee
+        self.funding_fee_total += fee
+        event = {
+            "time": ts or datetime.now(timezone.utc).isoformat(),
+            "rate": rate,
+            "direction": self.position.direction,
+            "notional": round(notional, 2),
+            "fee": round(fee, 4),
+            "wallet_after": round(self.wallet_balance, 2),
+        }
+        self.funding_events.append(event)
+        return event
+
     # ── 开仓 ──
 
-    def open_long(self, price: float, size: float, leverage: int, prefer_limit: bool = False) -> dict:
+    def open_long(self, price: float, size: float, leverage: int, prefer_limit: bool = False, ts: str | None = None) -> dict:
         """开多 / 加多"""
         if self.position and self.position.direction == "short" and self.position.is_active:
-            return {"note": "exist_opposite", "side": "open_long"}
+            return reject_trade("open_long", "exist_opposite", time=ts)
 
         pos_value = price * size
         fee = pos_value * self._fee_rate(prefer_limit)
@@ -245,7 +293,7 @@ class FuturesAccount:
         if self.wallet_balance < margin + fee:
             max_pos_value = (self.wallet_balance - fee) * leverage
             if max_pos_value <= 0:
-                return {"note": "insufficient_balance", "side": "open_long"}
+                return reject_trade("open_long", "insufficient_balance", time=ts)
             size = max_pos_value / price
             pos_value = price * size
             fee = pos_value * self._fee_rate(prefer_limit)
@@ -274,23 +322,19 @@ class FuturesAccount:
                 maintenance_margin_rate=_mmr_for_leverage(leverage),
             )
 
-        trade = {
-            "time": datetime.now(timezone.utc).isoformat(),
-            "side": "open_long",
-            "price": round(price, 2),
-            "size": round(size, 6),
-            "margin": round(margin, 2),
-            "fee": round(fee, 4),
-            "leverage": leverage,
-            "wallet_after": round(self.wallet_balance, 2),
-        }
+        trade = make_trade(
+            "open_long", price, size, fee=fee, time=ts,
+            margin=round(margin, 2),
+            leverage=leverage,
+            wallet_after=round(self.wallet_balance, 2),
+        )
         self.trades.append(trade)
         return trade
 
-    def open_short(self, price: float, size: float, leverage: int, prefer_limit: bool = False) -> dict:
+    def open_short(self, price: float, size: float, leverage: int, prefer_limit: bool = False, ts: str | None = None) -> dict:
         """开空 / 加空"""
         if self.position and self.position.direction == "long" and self.position.is_active:
-            return {"note": "exist_opposite", "side": "open_short"}
+            return reject_trade("open_short", "exist_opposite", time=ts)
 
         pos_value = price * size
         fee = pos_value * self._fee_rate(prefer_limit)
@@ -299,7 +343,7 @@ class FuturesAccount:
         if self.wallet_balance < margin + fee:
             max_pos_value = (self.wallet_balance - fee) * leverage
             if max_pos_value <= 0:
-                return {"note": "insufficient_balance", "side": "open_short"}
+                return reject_trade("open_short", "insufficient_balance", time=ts)
             size = max_pos_value / price
             pos_value = price * size
             fee = pos_value * self._fee_rate(prefer_limit)
@@ -327,31 +371,27 @@ class FuturesAccount:
                 maintenance_margin_rate=_mmr_for_leverage(leverage),
             )
 
-        trade = {
-            "time": datetime.now(timezone.utc).isoformat(),
-            "side": "open_short",
-            "price": round(price, 2),
-            "size": round(size, 6),
-            "margin": round(margin, 2),
-            "fee": round(fee, 4),
-            "leverage": leverage,
-            "wallet_after": round(self.wallet_balance, 2),
-        }
+        trade = make_trade(
+            "open_short", price, size, fee=fee, time=ts,
+            margin=round(margin, 2),
+            leverage=leverage,
+            wallet_after=round(self.wallet_balance, 2),
+        )
         self.trades.append(trade)
         return trade
 
     # ── 平仓 ──
 
-    def close_position(self, price: float, size: float | None = None, prefer_limit: bool = False) -> dict:
+    def close_position(self, price: float, size: float | None = None, prefer_limit: bool = False, ts: str | None = None) -> dict:
         """平仓 (多仓卖出 / 空仓买入)"""
         if not self.position or not self.position.is_active:
-            return {"note": "no_position", "side": "close"}
+            return reject_trade("close", "no_position", time=ts)
 
         close_size = size if size is not None else self.position.size
         if close_size > self.position.size:
             close_size = self.position.size
         if close_size <= 0:
-            return {"note": "invalid_size", "side": "close"}
+            return reject_trade("close", "invalid_size", time=ts)
 
         pos = self.position
         fee_rate = self._fee_rate(prefer_limit)
@@ -385,28 +425,24 @@ class FuturesAccount:
             pos.position_value = 0.0
             pos.margin = 0.0
 
-        trade = {
-            "time": datetime.now(timezone.utc).isoformat(),
-            "side": "close_short" if pos.direction == "short" else "close_long",
-            "price": round(price, 2),
-            "size": round(close_size, 6),
-            "pnl": round(pnl, 2),
-            "fee": round(fee, 4),
-            "wallet_after": round(self.wallet_balance, 2),
-            "leverage": pos.leverage,
-        }
+        trade = make_trade(
+            "close_short" if pos.direction == "short" else "close_long",
+            price, close_size, fee=fee, pnl=pnl, time=ts,
+            wallet_after=round(self.wallet_balance, 2),
+            leverage=pos.leverage,
+        )
         self.trades.append(trade)
         return trade
 
-    def close_all(self, price: float, prefer_limit: bool = False) -> dict | None:
+    def close_all(self, price: float, prefer_limit: bool = False, ts: str | None = None) -> dict | None:
         """全额平仓"""
         if not self.position or not self.position.is_active:
             return None
-        return self.close_position(price, prefer_limit=prefer_limit)
+        return self.close_position(price, prefer_limit=prefer_limit, ts=ts)
 
     # ── 爆仓 ──
 
-    def liquidate(self, price: float) -> dict | None:
+    def liquidate(self, price: float, ts: str | None = None) -> dict | None:
         """强平 — 剩余资产归零 / 按破产价处理"""
         if not self.position or not self.position.is_active:
             return None
@@ -419,17 +455,13 @@ class FuturesAccount:
         self.wallet_balance -= lost
         self.wallet_balance = max(self.wallet_balance, 0)
 
-        trade = {
-            "time": datetime.now(timezone.utc).isoformat(),
-            "side": "liquidation",
-            "direction": pos.direction,
-            "price": round(price, 2),
-            "size": round(pos.size, 6),
-            "pnl": round(-pos.margin, 2),
-            "margin_lost": round(lost, 2),
-            "wallet_after": round(self.wallet_balance, 2),
-            "leverage": pos.leverage,
-        }
+        trade = make_trade(
+            "liquidation", price, pos.size, pnl=-pos.margin, time=ts,
+            direction=pos.direction,
+            margin_lost=round(lost, 2),
+            wallet_after=round(self.wallet_balance, 2),
+            leverage=pos.leverage,
+        )
 
         pos.size = 0.0
         pos.position_value = 0.0
@@ -443,6 +475,7 @@ class FuturesAccount:
     def to_dict(self) -> dict:
         pos = self.position
         return {
+            "initial_balance": round(self.initial_wallet, 2),
             "wallet_balance": round(self.wallet_balance, 2),
             "available_balance": round(self.available_balance, 2),
             "used_margin": round(self.used_margin, 2),
@@ -457,6 +490,9 @@ class FuturesAccount:
             "liquidation_price": round(pos.liquidation_price, 2) if pos and pos.is_active else 0.0,
             "position_value": round(pos.position_value, 2) if pos and pos.is_active else 0.0,
             "margin_rate": round(pos.margin_rate(self.last_price), 4) if pos and pos.is_active else 0.0,
+            "funding_fee_total": round(self.funding_fee_total, 2),
+            "funding_events": self.funding_events[-20:],
+            "total_trades": len(self.trades),
             "trades": self.trades[-50:],
             "equity_history": self.equity_history[-200:],
         }
@@ -491,12 +527,68 @@ class FuturesPaperEngine:
         wallet_balance: float | None = None,
         leverage: int | None = None,
         position_size_pct: float | None = None,
+        exit_params: dict | None = None,
     ):
         self.cfg = cfg
         bal = wallet_balance if wallet_balance is not None else 10000.0
         self.account = FuturesAccount(wallet_balance=bal)
         self.leverage = leverage if leverage is not None else cfg.futures.leverage
         self.position_size_pct = position_size_pct if position_size_pct is not None else cfg.risk.max_single_order_pct
+        # tick 级退出参数覆盖（页面策略参数里的止损/止盈/移动止损），缺省回退 cfg.strategy.*
+        self._exit_params = exit_params or {}
+        # tick 级止损总开关：run_bar 按策略 use_engine_stops 属性逐根更新
+        # （日线趋势等策略声明 False 时，退出由 bar 级信号负责，tick 级不插手）
+        self._stops_enabled = True
+        # 资金费：None 表示不结算（保持纯回测/旧行为）；由驱动方通过 set_funding_rate 注入
+        self._funding_rate: float | None = None
+        self._funding_watermark: pd.Timestamp | None = None  # 已结算到的 bar 开盘时刻
+
+    def set_funding_rate(self, rate: float | None):
+        """设置当前资金费率（小数，0.0001 = 0.01%）。None 则禁用资金费结算。"""
+        self._funding_rate = rate
+
+    @staticmethod
+    def _funding_boundaries(start: pd.Timestamp, end: pd.Timestamp):
+        """生成 (start, end] 内的资金费结算时刻（OKX: UTC 00/08/16 点 = 北京 08/16/00 点）。
+
+        调用方传入的 bar 时间戳为 Asia/Shanghai 时区，直接按本地 0/8/16 点判定即可
+        （UTC+8 且 8 整除 24，两套时区的 8h 网格完全重合）。
+        """
+        day = start.normalize()
+        while day <= end:
+            for hour in (0, 8, 16):
+                b = day + pd.Timedelta(hours=hour)
+                if start < b <= end:
+                    yield b
+            day += pd.Timedelta(days=1)
+
+    def _settle_funding_if_due(self, bar: pd.Series) -> list[dict]:
+        """对本 bar 区间内跨过的每个资金费结算时刻逐次结算（以 bar 开盘价为标记价）。"""
+        events: list[dict] = []
+        if self._funding_rate is None:
+            return events
+        try:
+            bar_open_ts = pd.Timestamp(bar.name)
+        except Exception:
+            return events
+        if self._funding_watermark is None:
+            self._funding_watermark = bar_open_ts  # 首根 bar 只建立水位线
+            return events
+        mark = float(bar["open"]) if "open" in bar.index else float(bar["close"])
+        for boundary in self._funding_boundaries(self._funding_watermark, bar_open_ts):
+            event = self.account.settle_funding(
+                self._funding_rate, mark, ts=boundary.isoformat())
+            if event:
+                events.append(event)
+                logger.info(
+                    f"💱 资金费结算: {event['direction']} 名义 ${event['notional']:,.2f} "
+                    f"× rate {self._funding_rate:+.4%} = ${event['fee']:+.4f}")
+        self._funding_watermark = bar_open_ts
+        return events
+
+    def _exit_cfg(self, key: str) -> float:
+        """退出参数：页面覆盖值优先，回退 cfg.strategy.*"""
+        return self._exit_params.get(key, getattr(self.cfg.strategy, key))
 
     def run_bar(
         self,
@@ -520,29 +612,36 @@ class FuturesPaperEngine:
           Signal.EXIT → 平仓
         """
         close_price = float(bar["close"])
+        bar_ts = bar.name.isoformat() if hasattr(bar.name, "isoformat") else str(bar.name)
 
-        # 1. 更新价格
-        self.account.update_price(close_price)
+        # 1. 更新价格（权益历史按 bar 时间戳记录，回放不塌缩）
+        self.account.update_price(close_price, ts=bar_ts)
 
         # 1b. 强平检查
         liq_event = None
         if self.account.position and self.account.position.is_active:
             if self.account.position.is_liquidated(close_price):
-                liq_event = self.account.liquidate(close_price)
+                liq_event = self.account.liquidate(close_price, ts=bar_ts)
                 logger.warning(
                     f"💥 强平触发! {self.account.position.direction.upper()} "
                     f"@ ${close_price:.2f} (强平价 ${self.account.position.liquidation_price:.2f})"
                 )
 
+        # 1c. 资金费结算（结算时刻落在本 bar 区间内的逐次结算，用持仓中的仓位）
+        funding_events = self._settle_funding_if_due(bar)
+
         # 2. 策略信号
         signal = strategy.on_bar(bar)
+        # 策略可声明 use_engine_stops=False 关闭 tick 级止损（check_tick_exit）
+        self._stops_enabled = getattr(strategy, "use_engine_stops", True)
 
         # 3. 风控审核
         risk_ok = True
         risk_reason = ""
         if risk_engine is not None and signal in (Signal.BUY, Signal.SELL):
             pos_val = self.account.position.position_value if self.account.position and self.account.position.is_active else 0
-            position_pct = pos_val / max(self.account.total_equity, 1) * 100
+            # check_signal 的 max_position_pct 为小数比例（0.50 = 50%），这里保持一致
+            position_pct = pos_val / max(self.account.total_equity, 1)
             try:
                 risk_ok, risk_reason = risk_engine.check_signal(
                     signal, current_equity=self.account.total_equity,
@@ -554,15 +653,16 @@ class FuturesPaperEngine:
 
         # 4. 执行信号
         trade = None
+        _used_margin_before = self.account.used_margin  # 平仓前记录（平仓后归零）
         if risk_ok and not liq_event:
             if signal in (Signal.BUY, Signal.SELL, Signal.EXIT):
-                trade = self._execute_signal(signal, close_price)
+                trade = self._execute_signal(signal, close_price, ts=bar_ts)
 
         # 5. 风控记录
         if trade and risk_engine:
             pnl = trade.get("pnl")
             if pnl is not None:
-                pnl_pct = pnl / max(self.account.used_margin, 1) * 100
+                pnl_pct = pnl / max(_used_margin_before, 1) * 100
                 risk_engine.record_trade_result(pnl_pct)
 
         return {
@@ -573,16 +673,73 @@ class FuturesPaperEngine:
             "risk_reason": risk_reason,
             "trade": trade,
             "liquidation": liq_event,
+            "funding_events": funding_events,
+            "funding_rate": self._funding_rate,
             "account": self.account.to_dict(),
         }
 
-    def _execute_signal(self, signal: Signal, price: float) -> dict | None:
+    def check_tick_exit(self, price: float, ts: str | None = None,
+                        risk_engine: RiskEngine | None = None) -> dict | None:
+        """tick 级强平 + 止损/止盈/移动止损检查（秒级心跳价格驱动）。
+
+        持仓期间每个 tick 调用一次；触及条件立即平仓/强平并返回 trade
+        （trade["reason"] 标明触发原因），否则返回 None。多空均支持。
+        退出参数与回测引擎共用 cfg.strategy.*（止损 > 移动止损 > 止盈）。
+        """
+        ts = _to_bar_tz(ts)  # 与 bar 路径时间串统一时区（Asia/Shanghai）
+        pos = self.account.position
+        if not pos or not pos.is_active:
+            return None
+
+        # tick 价格推进最高/最低跟踪（开仓时初始化，此处持续更新）
+        pos.highest_price = max(pos.highest_price, price)
+        pos.lowest_price = min(pos.lowest_price, price)
+
+        # 1. 强平检查（最优先，同 run_bar 的 bar 级逻辑）
+        if pos.is_liquidated(price):
+            trade = self.account.liquidate(price, ts=ts)
+            if trade:
+                trade["reason"] = "liquidation"
+                self.account.update_price(price, ts=ts)
+                logger.warning(f"💥 tick 级强平触发: {pos.direction} @ ${price:.2f}")
+            return trade
+
+        # 2. 止损/止盈/移动止损（策略声明 use_engine_stops=False 时跳过：
+        #    退出由 bar 级 regime 翻转负责，tick 级分钟噪声止损对周线级
+        #    持仓是干扰；上方强平检查不受此开关影响）
+        reason = (
+            intrabar.check_tick_exit(
+                price, direction=pos.direction, entry_price=pos.entry_price,
+                highest_price=pos.highest_price, lowest_price=pos.lowest_price,
+                stop_loss_pct=self._exit_cfg("stop_loss_pct"),
+                take_profit_pct=self._exit_cfg("take_profit_pct"),
+                trailing_activation_pct=self._exit_cfg("trailing_stop_activation"),
+                trailing_distance_pct=self._exit_cfg("trailing_stop_distance"),
+            )
+            if self._stops_enabled else None
+        )
+        if reason is None:
+            return None
+
+        used_margin = self.account.used_margin  # 平仓前记录（平仓后归零）
+        trade = self.account.close_all(price, ts=ts)
+        if trade:
+            trade["reason"] = reason
+            self.account.update_price(price, ts=ts)  # 记录退出后的真实权益
+            if risk_engine:
+                pnl = trade.get("pnl")
+                if pnl is not None:
+                    risk_engine.record_trade_result(pnl / max(used_margin, 1) * 100)
+            logger.info(f"⚡ tick 级 {reason} 触发: {pos.direction} @ ${price:.2f}")
+        return trade
+
+    def _execute_signal(self, signal: Signal, price: float, ts: str | None = None) -> dict | None:
         """将策略信号映射为合约操作"""
         account = self.account
 
         # ── EXIT: 平所有仓 ──
         if signal == Signal.EXIT:
-            return account.close_all(price)
+            return account.close_all(price, ts=ts)
 
         # ── BUY ──
         if signal == Signal.BUY:
@@ -590,15 +747,15 @@ class FuturesPaperEngine:
                 # 开多
                 pos_value = account.wallet_balance * self.position_size_pct * self.leverage
                 size = pos_value / price
-                return account.open_long(price, size, self.leverage)
+                return account.open_long(price, size, self.leverage, ts=ts)
             elif account.position_side == "short":
                 # 平空 — 全平并开多 (翻转)
-                close_trade = account.close_all(price)
+                close_trade = account.close_all(price, ts=ts)
                 if close_trade and close_trade.get("note", "").startswith("no_"):
                     return close_trade
                 pos_value = account.wallet_balance * self.position_size_pct * self.leverage
                 size = pos_value / price
-                open_trade = account.open_long(price, size, self.leverage)
+                open_trade = account.open_long(price, size, self.leverage, ts=ts)
                 if close_trade and open_trade:
                     return {**close_trade, **{f"next_{k}": v for k, v in open_trade.items()}}
                 return open_trade
@@ -611,15 +768,15 @@ class FuturesPaperEngine:
                 # 开空
                 pos_value = account.wallet_balance * self.position_size_pct * self.leverage
                 size = pos_value / price
-                return account.open_short(price, size, self.leverage)
+                return account.open_short(price, size, self.leverage, ts=ts)
             elif account.position_side == "long":
                 # 平多并开空
-                close_trade = account.close_all(price)
+                close_trade = account.close_all(price, ts=ts)
                 if close_trade and close_trade.get("note", "").startswith("no_"):
                     return close_trade
                 pos_value = account.wallet_balance * self.position_size_pct * self.leverage
                 size = pos_value / price
-                open_trade = account.open_short(price, size, self.leverage)
+                open_trade = account.open_short(price, size, self.leverage, ts=ts)
                 if close_trade and open_trade:
                     return {**close_trade, **{f"next_{k}": v for k, v in open_trade.items()}}
                 return open_trade

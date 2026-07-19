@@ -24,6 +24,7 @@ pytest>=7.4.0
 
 # --- Agent 系统 ---
 websockets>=12.0
+websocket-client>=1.6.0  # 心跳采集器 data/eth_heartbeat.py 同步 WS
 
 # --- 可选 ---
 # polars>=0.18.0     # 替换 pandas 提速

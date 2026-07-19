@@ -133,8 +133,8 @@ def run_walk_forward(
         if data is None:
             data = get_mock_data(cfg)
 
-        analyzer = WalkForwardAnalyzer(cfg, n_windows=n_windows)
-        result = analyzer.run(data, strategy_name)
+        analyzer = WalkForwardAnalyzer(cfg)
+        result = analyzer.run(data, strategy_name, n_windows=n_windows)
         # Convert dataclass to dict
         wf_dict = asdict(result)
         # Convert timestamps in windows
@@ -229,7 +229,15 @@ def _serialize_result(result) -> Dict[str, Any]:
                 "signal": sig.name if isinstance(sig, Signal) else str(sig).upper(),
                 "price": close,
             })
-            price_data.append({"time": str(row.iloc[0]), "close": close})
+            # OHLCV 供 TradingView K 线图使用（volume 可能缺失，兜底 0）
+            price_data.append({
+                "time": str(row.iloc[0]),
+                "open": float(row.get("open", close)),
+                "high": float(row.get("high", close)),
+                "low": float(row.get("low", close)),
+                "close": close,
+                "volume": float(row.get("volume", 0) or 0),
+            })
 
     return {
         "strategy_name": result.strategy_name,

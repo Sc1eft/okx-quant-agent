@@ -114,6 +114,34 @@ class OKXClient:
         self._check_api_response(data)
         return self._parse_klines(data.get("data", []))
 
+    def get_history_klines(
+        self,
+        symbol: str,
+        timeframe: str = "1h",
+        limit: int = 100,
+        after: Optional[int] = None,
+        before: Optional[int] = None,
+    ) -> list[dict]:
+        """获取历史 K 线（/market/candles 只保留最近 1440 根，更早的走这里）
+
+        https://www.okx.com/docs-v5/en/#rest-api-market-data-get-candlesticks-history
+        公开接口，无需签名。单页上限 100 根。
+        """
+        params = {
+            "instId": symbol,
+            "bar": self._tf_to_bar(timeframe),
+            "limit": min(limit, 100),
+        }
+        if after:
+            params["after"] = str(after)
+        if before:
+            params["before"] = str(before)
+
+        resp = self._request("GET", "/api/v5/market/history-candles", params=params)
+        data = resp.json()
+        self._check_api_response(data)
+        return self._parse_klines(data.get("data", []))
+
     def get_ticker(self, symbol: str) -> dict:
         """获取最新 ticker"""
         resp = self._request("GET", "/api/v5/market/ticker", params={"instId": symbol})
@@ -277,6 +305,27 @@ class OKXClient:
             "next_funding_rate": raw.get("nextFundingRate", ""),
             "next_funding_time": raw.get("nextFundingTime", ""),
             "funding_cap": raw.get("fundingCap", ""),
+        }
+
+    def get_open_interest(self, symbol: str = "ETH-USDT-SWAP") -> dict:
+        """获取永续合约持仓量（Open Interest）
+
+        https://www.okx.com/docs-v5/en/#public-data-rest-api-get-open-interest
+        公开接口，无需签名。
+        返回: {"oi": "...", "oi_ccy": "...", "oi_usd": "...", "ts": "..."}
+        """
+        resp = self._request(
+            "GET", "/api/v5/public/open-interest",
+            params={"instType": "SWAP", "instId": symbol},
+        )
+        data = resp.json()
+        self._check_api_response(data)
+        raw = (data.get("data") or [{}])[0]
+        return {
+            "oi": raw.get("oi", ""),
+            "oi_ccy": raw.get("oiCcy", ""),
+            "oi_usd": raw.get("oiUsd", ""),
+            "ts": raw.get("ts", ""),
         }
 
     @staticmethod

@@ -19,6 +19,8 @@ class Signal(Enum):
     SELL = "sell"
     HOLD = "hold"
     EXIT = "exit"  # 强制退出（止盈/止损/超时）
+    SHORT = "short"  # 开空（做空入场）
+    COVER = "cover"  # 平空（做空退出）
 
 
 @dataclass
@@ -103,8 +105,20 @@ def get_available_strategies() -> dict:
     from strategies.ma_cross import MACrossStrategy
     from strategies.rsi_mean_reversion import RSIMeanReversionStrategy
     from strategies.breakout import BreakoutStrategy
+    from strategies.macd_agent import MACDAgentStrategy
+    from strategies.daily_trend import DailyTrendStrategy
 
     return {
+        "daily_trend": {
+            "class": DailyTrendStrategy,
+            "description": "日线趋势 — EMA50 闸门 + 日线突破/KDJ 金叉触发，跌破离场（IC 证据驱动，仅多头）",
+            "params": {"trend_span": 50, "entry_mode": "trigger"},
+        },
+        "macd_agent": {
+            "class": MACDAgentStrategy,
+            "description": "MACD 多周期共振 — 与实盘 Agent 规则决策器同源",
+            "params": {},
+        },
         "ma_cross": {
             "class": MACrossStrategy,
             "description": "MA 均线交叉 — 短线上穿长线买入，下穿卖出",

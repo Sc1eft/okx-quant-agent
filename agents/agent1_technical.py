@@ -31,8 +31,12 @@ from agents.event_bus import EventBus, AgentEvent, AgentEventType
 from agents.config import AgentSystemConfig
 from agents.market_state import format_indicators_table, classify_market
 
-# 复用前端已有的指标计算函数
-from frontend.utils.eth_ai_analysis import _calc_macd, _calc_kdj, _calc_boll
+# 指标计算唯一来源：根目录 indicators.py
+from indicators import (
+    calc_macd_summary as _calc_macd,
+    calc_kdj_summary as _calc_kdj,
+    calc_boll_summary as _calc_boll,
+)
 
 logger = logging.getLogger("agent1")
 

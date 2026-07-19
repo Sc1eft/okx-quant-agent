@@ -157,3 +157,30 @@ def ensure_trades_schema(conn: sqlite3.Connection) -> None:
             except sqlite3.OperationalError:
                 pass  # 列已存在
         conn.commit()
+
+
+def ensure_sandbox_schema(conn: sqlite3.Connection) -> None:
+    """确保 sandbox_decisions 表存在（D12 LLM 影子决策的唯一 schema 权威）
+
+    记录同一决策上下文下规则决策与 LLM 决策的对照，供事后评估一致率。
+    迁移策略与 ensure_trades_schema 一致：CREATE IF NOT EXISTS。
+    """
+    with _schema_lock:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sandbox_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                price REAL,
+                rule_action TEXT,
+                rule_confidence REAL,
+                rule_decision TEXT,
+                llm_action TEXT,
+                llm_confidence REAL,
+                llm_decision TEXT,
+                llm_raw TEXT,
+                llm_latency_ms INTEGER,
+                llm_error TEXT,
+                agree INTEGER
+            )
+        """)
+        conn.commit()

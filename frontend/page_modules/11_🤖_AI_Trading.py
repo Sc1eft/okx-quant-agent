@@ -1198,7 +1198,7 @@ if not _trades_df.empty and "pnl_close" in _trades_df.columns:
 
 st.divider()
 st.caption(
-    f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC | "
+    f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC | "
     f"Agent {'🟢 运行中' if agent_running else '⏸ 已停止'} | "
     f"K线: {tf_label} | 数据延迟 ≤ 5s"
 )

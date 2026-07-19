@@ -1,5 +1,5 @@
 # tests/test_agent3_phase2.py
-"""测试 Agent 3 阶段二集成——风控注入、波动检查、市场深度"""
+"""测试 Agent 3 阶段二集成——风控注入、RuleEngine 两阶段检查、仓位通知"""
 from __future__ import annotations
 
 import sys
@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agents.agent3_trader import Agent3
 from agents.event_bus import EventBus, AgentEvent, AgentEventType
 from agents.config import AgentSystemConfig
+from agents.rule_engine.base import RuleResult
 
 
 @pytest.fixture
@@ -44,9 +45,8 @@ def mock_deepseek():
 @pytest.fixture
 def mock_risk_manager():
     rm = MagicMock()
-    rm.check_layer1.return_value = (True, "")
-    rm.check_layer1_pre.return_value = (True, "")  # Phase 2 快速预检
     rm.is_daily_limit_reached.return_value = False  # 防止进入每日上限暂停睡眠
+    rm.get_position.return_value = (None, 0.0)
     rm.get_position_size_multiplier.return_value = 1.0
     rm.get_status.return_value = {
         "daily_trade_count": 2,
@@ -80,7 +80,41 @@ def mock_root_config():
 
 
 @pytest.fixture
-def agent3(config, event_bus, mock_deepseek, mock_risk_manager, mock_executor, mock_root_config):
+def mock_rule_decider():
+    rd = MagicMock()
+    rd.decide.return_value = {
+        "action": "hold",
+        "confidence": 50,
+        "entry_price_min": "",
+        "entry_price_max": "",
+        "position_size_pct": "",
+        "stop_loss": "",
+        "take_profit": "",
+        "add_to_position": None,
+        "reason": "test",
+    }
+    return rd
+
+
+@pytest.fixture
+def mock_rule_engine():
+    """RuleEngine mock：默认全部通过，market_depth 返回 prefer_limit=False"""
+    engine = MagicMock()
+    engine.check_pre_trade = AsyncMock(return_value=[])
+    engine.check_execution = AsyncMock(return_value=[
+        RuleResult(rule_name="market_depth", passed=True, reason="",
+                   severity="info", data={"prefer_limit": False}),
+    ])
+    engine.all_pass.side_effect = lambda results: all(r.passed for r in results)
+    engine.blocked_by.side_effect = lambda results: next(
+        (r.rule_name for r in results if not r.passed), None
+    )
+    return engine
+
+
+@pytest.fixture
+def agent3(config, event_bus, mock_deepseek, mock_risk_manager, mock_executor,
+           mock_root_config, mock_rule_decider, mock_rule_engine):
     return Agent3(
         config=config,
         event_bus=event_bus,
@@ -88,6 +122,8 @@ def agent3(config, event_bus, mock_deepseek, mock_risk_manager, mock_executor, m
         risk_manager=mock_risk_manager,
         trade_executor=mock_executor,
         root_config=mock_root_config,
+        rule_decider=mock_rule_decider,
+        rule_engine=mock_rule_engine,
     )
 
 
@@ -134,205 +170,113 @@ class TestRiskStatusInjection:
         assert "risk_status" in context
 
 
-class TestDeepSeekPromptUpdate:
-    def test_context_passed_to_deepseek(self, agent3, mock_deepseek):
-        """验证上下文正确传递给 DeepSeek"""
-        events = [
+class TestRuleDeciderContext:
+    @pytest.mark.asyncio
+    async def test_decide_receives_current_price(self, agent3, mock_rule_decider):
+        """_make_decision 把事件中的当前价格传给 RuleDecider"""
+        agent3._event_buffer = [
             AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
                        data={"description": "BOLL上轨突破", "timeframe": "15m", "price": 3510},
                        timestamp=datetime.now(timezone.utc)),
         ]
-        context = agent3._build_context(events)
-
-        # 模拟 _make_decision 中的 analyze 调用
-        agent3.deepseek.analyze(context)
-        mock_deepseek.analyze.assert_called_once()
-        called_context = mock_deepseek.analyze.call_args[0][0]
-        assert called_context["current_price"] == 3510.0
-        assert "risk_status" in called_context
-
-
-class TestVolatilityDepthChecks:
-    @pytest.mark.asyncio
-    async def test_volatility_check_called(self, agent3, mock_risk_manager):
-        """有 okx_client 时波动检查被调用"""
-        mock_client = MagicMock()
-        mock_client.__bool__ = MagicMock(return_value=True)
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
-        agent3.okx_client = mock_client
-        agent3._event_buffer = [
-            AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
-                       data={"description": "测试", "timeframe": "1h", "price": 3500},
-                       timestamp=datetime.now(timezone.utc)),
-        ]
-
-        # Mock analyze to return buy
-        agent3.deepseek.analyze.return_value = {
-            "action": "buy",
-            "confidence": 80,
-            "entry_price_min": "3490",
-            "entry_price_max": "3510",
-            "position_size_pct": "10",
-            "stop_loss": "3450",
-            "take_profit": "3600",
-            "reason": "测试买入",
-        }
-
-        # Make executor execute_safe return success
-        agent3.executor.execute_safe = AsyncMock(return_value={
-            "success": True, "order_id": "order123", "fill_price": 3500.0,
-        })
 
         await agent3._make_decision()
-        mock_risk_manager.check_volatility_async.assert_called_once_with(mock_client, symbol="ETH-USDT")
 
-    @pytest.mark.asyncio
-    async def test_depth_check_called(self, agent3, mock_risk_manager):
-        """有 okx_client 时市场深度检查被调用"""
-        mock_client = MagicMock()
-        mock_client.__bool__ = MagicMock(return_value=True)
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
-        mock_risk_manager.check_layer1.return_value = (True, "")
+        mock_rule_decider.decide.assert_called_once()
+        _, kwargs = mock_rule_decider.decide.call_args
+        assert kwargs["current_price"] == 3510.0
 
-        agent3.okx_client = mock_client
-        agent3._event_buffer = [
-            AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
-                       data={"description": "测试", "timeframe": "1h", "price": 3500},
-                       timestamp=datetime.now(timezone.utc)),
-        ]
 
-        # Mock analyze to return buy
-        agent3.deepseek.analyze.return_value = {
-            "action": "buy",
-            "confidence": 80,
-            "entry_price_min": "3490",
-            "entry_price_max": "3510",
-            "position_size_pct": "10",
-            "stop_loss": "3450",
-            "take_profit": "3600",
-            "reason": "测试买入",
-        }
+class TestRuleEngineChecks:
+    """风控检查统一走 RuleEngine（pre-trade / execution 两阶段）"""
 
-        # Make executor execute_safe return success
-        agent3.executor.execute_safe = AsyncMock(return_value={
-            "success": True, "order_id": "order123", "fill_price": 3500.0,
-        })
-
-        await agent3._make_decision()
-        # check_market_depth_async should have been called with (client, side, size)
-        mock_risk_manager.check_market_depth_async.assert_called_once()
-        args = mock_risk_manager.check_market_depth_async.call_args[0]
-        assert args[0] is mock_client  # client
-        assert args[1] == "buy"  # side
-
-    @pytest.mark.asyncio
-    async def test_volatility_check_blocks_trade(self, agent3, mock_risk_manager):
-        """波动检查不通过时交易被阻止"""
-        mock_client = MagicMock()
-        mock_client.__bool__ = MagicMock(return_value=True)
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(False, "波动过大"))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
-        agent3.okx_client = mock_client
-        agent3._event_buffer = [
-            AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
-                       data={"description": "测试", "timeframe": "1h", "price": 3500},
-                       timestamp=datetime.now(timezone.utc)),
-        ]
-
-        agent3.deepseek.analyze.return_value = {
+    @staticmethod
+    def _buy_decision():
+        return {
             "action": "buy", "confidence": 80,
-            "entry_price_min": "", "entry_price_max": "",
-            "position_size_pct": "", "stop_loss": "", "take_profit": "",
-            "reason": "测试",
-        }
-
-        await agent3._make_decision()
-        assert agent3._stats["trades_skipped"] == 1
-        assert agent3._stats["trades_executed"] == 0
-
-    @pytest.mark.asyncio
-    async def test_depth_check_blocks_trade(self, agent3, mock_risk_manager):
-        """市场深度不通过时交易被阻止"""
-        mock_client = MagicMock()
-        mock_client.__bool__ = MagicMock(return_value=True)
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(False, "深度不足", True))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
-        agent3.okx_client = mock_client
-        agent3._event_buffer = [
-            AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
-                       data={"description": "测试", "timeframe": "1h", "price": 3500},
-                       timestamp=datetime.now(timezone.utc)),
-        ]
-
-        agent3.deepseek.analyze.return_value = {
-            "action": "buy", "confidence": 80,
-            "entry_price_min": "", "entry_price_max": "",
-            "position_size_pct": "", "stop_loss": "", "take_profit": "",
-            "reason": "测试",
-        }
-
-        await agent3._make_decision()
-        assert agent3._stats["trades_skipped"] == 1
-        assert agent3._stats["trades_executed"] == 0
-
-    @pytest.mark.asyncio
-    async def test_no_client_skips_checks(self, agent3, mock_risk_manager):
-        """无 okx_client 时跳过波动/深度检查"""
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
-        agent3.okx_client = None
-        agent3._event_buffer = [
-            AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
-                       data={"description": "测试", "timeframe": "1h", "price": 3500},
-                       timestamp=datetime.now(timezone.utc)),
-        ]
-
-        agent3.deepseek.analyze.return_value = {
-            "action": "hold", "confidence": 50,
-            "entry_price_min": "", "entry_price_max": "",
-            "position_size_pct": "", "stop_loss": "", "take_profit": "",
-            "reason": "无客户端跳过检查",
-        }
-
-        await agent3._make_decision()
-        mock_risk_manager.check_volatility_async.assert_not_called()
-        mock_risk_manager.check_market_depth_async.assert_not_called()
-        # Since action is hold, trades_skipped incremented
-        assert agent3._stats["trades_skipped"] == 1
-
-    @pytest.mark.asyncio
-    async def test_prefer_limit_passed_to_executor(self, agent3, mock_risk_manager):
-        """深度检查返回的 prefer_limit 被传递给执行器"""
-        mock_client = MagicMock()
-        mock_client.__bool__ = MagicMock(return_value=True)
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "价差过大", True))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
-        agent3.okx_client = mock_client
-        agent3._event_buffer = [
-            AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
-                       data={"description": "测试", "timeframe": "1h", "price": 3500},
-                       timestamp=datetime.now(timezone.utc)),
-        ]
-
-        agent3.deepseek.analyze.return_value = {
-            "action": "buy", "confidence": 80,
-            "entry_price_min": "", "entry_price_max": "",
+            "entry_price_min": "3490", "entry_price_max": "3510",
             "position_size_pct": "10", "stop_loss": "3450", "take_profit": "3600",
-            "reason": "测试",
+            "reason": "测试买入",
         }
 
+    @staticmethod
+    def _fill_buffer(agent3):
+        agent3._event_buffer = [
+            AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
+                       data={"description": "测试", "timeframe": "1h", "price": 3500},
+                       timestamp=datetime.now(timezone.utc)),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_pre_trade_check_called(self, agent3, mock_rule_engine):
+        """决策前先过 RuleEngine pre-trade 检查"""
+        agent3.okx_client = MagicMock()
+        self._fill_buffer(agent3)
+        agent3.rule_decider.decide.return_value = self._buy_decision()
+        agent3.executor.execute_safe = AsyncMock(return_value={
+            "success": True, "order_id": "order123", "fill_price": 3500.0,
+        })
+
+        await agent3._make_decision()
+        mock_rule_engine.check_pre_trade.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_execution_check_called(self, agent3, mock_rule_engine):
+        """决策买入后过 RuleEngine execution 检查（上下文含方向/数量）"""
+        agent3.okx_client = MagicMock()
+        self._fill_buffer(agent3)
+        agent3.rule_decider.decide.return_value = self._buy_decision()
+        agent3.executor.execute_safe = AsyncMock(return_value={
+            "success": True, "order_id": "order123", "fill_price": 3500.0,
+        })
+
+        await agent3._make_decision()
+        mock_rule_engine.check_execution.assert_called_once()
+        ctx = mock_rule_engine.check_execution.call_args[0][0]
+        assert ctx["side"] == "buy"
+        assert ctx["size"] > 0
+
+    @pytest.mark.asyncio
+    async def test_pre_trade_rule_blocks_trade(self, agent3, mock_rule_engine):
+        """pre-trade 规则拒绝（如波动过大）→ 不交易、不进入决策"""
+        mock_rule_engine.check_pre_trade.return_value = [
+            RuleResult(rule_name="volatility_check", passed=False,
+                       reason="波动过大", data={"delay_seconds": 300}),
+        ]
+        agent3.okx_client = MagicMock()
+        self._fill_buffer(agent3)
+        agent3.rule_decider.decide.return_value = self._buy_decision()
+
+        await agent3._make_decision()
+        assert agent3._stats["trades_skipped"] == 1
+        assert agent3._stats["trades_executed"] == 0
+        agent3.rule_decider.decide.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execution_rule_blocks_trade(self, agent3, mock_rule_engine):
+        """execution 规则拒绝（如深度不足）→ 不交易"""
+        mock_rule_engine.check_execution.return_value = [
+            RuleResult(rule_name="market_depth", passed=False,
+                       reason="深度不足", data={"prefer_limit": True}),
+        ]
+        agent3.okx_client = MagicMock()
+        self._fill_buffer(agent3)
+        agent3.rule_decider.decide.return_value = self._buy_decision()
+
+        await agent3._make_decision()
+        assert agent3._stats["trades_skipped"] == 1
+        assert agent3._stats["trades_executed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_prefer_limit_passed_to_executor(self, agent3, mock_rule_engine):
+        """market_depth 结果的 prefer_limit 被传递给执行器"""
+        mock_rule_engine.check_execution.return_value = [
+            RuleResult(rule_name="market_depth", passed=True, reason="价差过大",
+                       severity="info", data={"prefer_limit": True}),
+        ]
+        agent3.okx_client = MagicMock()
+        self._fill_buffer(agent3)
+        agent3.rule_decider.decide.return_value = self._buy_decision()
         agent3.executor.execute_safe = AsyncMock(return_value={
             "success": True, "order_id": "order123", "fill_price": 3500.0,
         })
@@ -357,17 +301,13 @@ class TestPositionMonitorNotify:
         }
         agent3.position_monitor = mock_monitor
 
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
         agent3._event_buffer = [
             AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
                        data={"description": "测试", "timeframe": "1h", "price": 3500},
                        timestamp=datetime.now(timezone.utc)),
         ]
 
-        agent3.deepseek.analyze.return_value = {
+        agent3.rule_decider.decide.return_value = {
             "action": "buy", "confidence": 80,
             "entry_price_min": "3490", "entry_price_max": "3510",
             "position_size_pct": "10", "stop_loss": "3450", "take_profit": "3600",
@@ -400,17 +340,13 @@ class TestPositionMonitorNotify:
         }
         agent3.position_monitor = mock_monitor
 
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
         agent3._event_buffer = [
             AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
                        data={"description": "测试", "timeframe": "1h", "price": 3500},
                        timestamp=datetime.now(timezone.utc)),
         ]
 
-        agent3.deepseek.analyze.return_value = {
+        agent3.rule_decider.decide.return_value = {
             "action": "buy", "confidence": 80,
             "entry_price_min": "3490", "entry_price_max": "3510",
             "position_size_pct": "10", "stop_loss": "3450", "take_profit": "3600",
@@ -431,17 +367,13 @@ class TestPositionMonitorNotify:
         agent3.okx_client = mock_client
         agent3.position_monitor = None
 
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
         agent3._event_buffer = [
             AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
                        data={"description": "测试", "timeframe": "1h", "price": 3500},
                        timestamp=datetime.now(timezone.utc)),
         ]
 
-        agent3.deepseek.analyze.return_value = {
+        agent3.rule_decider.decide.return_value = {
             "action": "buy", "confidence": 80,
             "entry_price_min": "", "entry_price_max": "",
             "position_size_pct": "", "stop_loss": "3450", "take_profit": "3600",
@@ -458,7 +390,7 @@ class TestPositionMonitorNotify:
 
 
 class TestSlTpDirectionValidation:
-    """DeepSeek 给出方向错误的 SL/TP 时回退默认值（防开仓即触发止损）"""
+    """决策给出方向错误的 SL/TP 时回退默认值（防开仓即触发止损）"""
 
     @pytest.mark.asyncio
     async def test_wrong_direction_sltp_falls_back_to_defaults(self, agent3, mock_risk_manager):
@@ -470,17 +402,13 @@ class TestSlTpDirectionValidation:
         }
         agent3.position_monitor = mock_monitor
 
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
         agent3._event_buffer = [
             AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
                        data={"description": "测试", "timeframe": "1h", "price": 3500},
                        timestamp=datetime.now(timezone.utc)),
         ]
         # buy（多头）却给了 SL=3600 > 入场、TP=3400 < 入场 — 方向全错
-        agent3.deepseek.analyze.return_value = {
+        agent3.rule_decider.decide.return_value = {
             "action": "buy", "confidence": 80,
             "entry_price_min": "", "entry_price_max": "",
             "position_size_pct": "10", "stop_loss": "3600", "take_profit": "3400",
@@ -508,16 +436,12 @@ class TestSlTpDirectionValidation:
         }
         agent3.position_monitor = mock_monitor
 
-        mock_risk_manager.check_volatility_async = AsyncMock(return_value=(True, ""))
-        mock_risk_manager.check_market_depth_async = AsyncMock(return_value=(True, "", False))
-        mock_risk_manager.check_layer1.return_value = (True, "")
-
         agent3._event_buffer = [
             AgentEvent(type=AgentEventType.TECHNICAL_SIGNAL, source="agent1",
                        data={"description": "测试", "timeframe": "1h", "price": 3500},
                        timestamp=datetime.now(timezone.utc)),
         ]
-        agent3.deepseek.analyze.return_value = {
+        agent3.rule_decider.decide.return_value = {
             "action": "buy", "confidence": 80,
             "entry_price_min": "", "entry_price_max": "",
             "position_size_pct": "10", "stop_loss": "3450", "take_profit": "3600",

@@ -109,3 +109,53 @@ class TestGetOrderBook:
         params = kwargs.get("params", {})
         assert params.get("instId") == "ETH-USDT"
         assert params.get("sz") == "5"
+
+
+class TestGetHistoryKlines:
+    def test_get_history_klines(self, client):
+        """历史 K 线：/history-candles 端点，单页上限 100，周期做 bar 映射"""
+        raw = [["1719200000000", "3400.0", "3410.0", "3390.0", "3405.0", "100.0", "340500.0"]]
+        client._request.return_value = _mock_response(raw)
+        result = client.get_history_klines("ETH-USDT", "4h", limit=200, after=1719190000000)
+        assert len(result) == 1
+        assert result[0]["timestamp"] == 1719200000000
+        assert result[0]["close"] == 3405.0
+        call = client._request.call_args
+        assert call[0][0] == "GET"
+        assert "/api/v5/market/history-candles" in call[0][1]
+        kwargs = call[1] if len(call) > 1 else {}
+        params = kwargs.get("params", {})
+        assert params.get("instId") == "ETH-USDT"
+        assert params.get("bar") == "4H"
+        assert params.get("limit") == 100  # 超出单页上限被截断
+        assert params.get("after") == "1719190000000"
+
+
+class TestGetOpenInterest:
+    def test_get_open_interest(self, client):
+        """OI：/public/open-interest 端点，SWAP instType + instId，字段解析"""
+        raw = [{
+            "instType": "SWAP", "instId": "ETH-USDT-SWAP",
+            "oi": "1234567", "oiCcy": "1234567.89", "oiUsd": "4123456789.01",
+            "ts": "1719200000000",
+        }]
+        client._request.return_value = _mock_response(raw)
+        result = client.get_open_interest("ETH-USDT-SWAP")
+        assert result["oi"] == "1234567"
+        assert result["oi_ccy"] == "1234567.89"
+        assert result["oi_usd"] == "4123456789.01"
+        assert result["ts"] == "1719200000000"
+        call = client._request.call_args
+        assert call[0][0] == "GET"
+        assert "/api/v5/public/open-interest" in call[0][1]
+        kwargs = call[1] if len(call) > 1 else {}
+        params = kwargs.get("params", {})
+        assert params.get("instType") == "SWAP"
+        assert params.get("instId") == "ETH-USDT-SWAP"
+
+    def test_get_open_interest_empty(self, client):
+        """空 data 兜底为空字符串"""
+        client._request.return_value = _mock_response([])
+        result = client.get_open_interest()
+        assert result["oi"] == ""
+        assert result["oi_usd"] == ""

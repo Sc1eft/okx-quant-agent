@@ -15,6 +15,7 @@ from frontend.utils.session_state import get_config
 from frontend.utils.backtest_runner import (
     run_walk_forward, run_param_sweep, run_oos_test,
 )
+from frontend.utils.data_provider import fetch_okx_data
 from frontend.components.charts import sharpe_drop_chart
 from strategies.base import get_available_strategies
 
@@ -35,11 +36,41 @@ strategy_names = list(strategies.keys())
 st.session_state.setdefault("wf_results", {})
 st.session_state.setdefault("param_sweep_results", {})
 st.session_state.setdefault("oos_results", {})
-selected_strategy = st.selectbox(
-    "选择策略",
-    strategy_names,
-    key="wf_strategy",
-)
+
+sel_cols = st.columns([2, 2, 1, 1])
+with sel_cols[0]:
+    selected_strategy = st.selectbox(
+        "选择策略",
+        strategy_names,
+        key="wf_strategy",
+    )
+with sel_cols[1]:
+    data_source = st.radio(
+        "数据来源", ["真实 OKX 数据", "Mock 数据"],
+        index=0, horizontal=True, key="wf_data_source",
+    )
+with sel_cols[2]:
+    data_limit = st.slider("K 线数量", 500, 2000, 1000, step=100, key="wf_data_limit")
+with sel_cols[3]:
+    data_tf = st.selectbox("周期", ["1h", "15m", "4h", "1d"], index=0, key="wf_data_tf")
+
+
+def _get_data():
+    """按数据源选择取数；真实数据失败时回退 Mock（runner 内置）。"""
+    if st.session_state.get("wf_data_source", "真实 OKX 数据") != "真实 OKX 数据":
+        return None
+    try:
+        df = fetch_okx_data(
+            cfg,
+            limit=st.session_state.get("wf_data_limit", 1000),
+            timeframe=st.session_state.get("wf_data_tf", "1h"),
+        )
+        if df is not None and not df.empty:
+            return df
+        st.warning("OKX 数据为空，回退使用 Mock 数据")
+    except Exception as e:
+        st.error(f"获取 OKX 数据失败: {e}，回退使用 Mock 数据")
+    return None
 
 # ============ Tabs for three analysis types ============
 tab1, tab2, tab3 = st.tabs(["Walk-Forward", "参数扫描", "样本外测试 (OOS)"])
@@ -64,7 +95,7 @@ with tab1:
 
     if run_wf_btn:
         with st.spinner(f"正在运行 {selected_strategy} Walk-Forward 分析..."):
-            result = run_walk_forward(selected_strategy, cfg, n_windows=n_windows)
+            result = run_walk_forward(selected_strategy, cfg, n_windows=n_windows, data=_get_data())
             if result:
                 st.session_state.wf_results[selected_strategy] = result
                 st.success("Walk-Forward 分析完成!")
@@ -158,7 +189,7 @@ with tab2:
 
     if run_ps_btn:
         with st.spinner(f"正在运行 {selected_strategy} 参数扫描 ({n_iter} 次迭代)..."):
-            result = run_param_sweep(selected_strategy, cfg, n_iter)
+            result = run_param_sweep(selected_strategy, cfg, n_iter, data=_get_data())
             if result:
                 st.session_state.param_sweep_results[selected_strategy] = result
                 st.success("参数扫描完成!")
@@ -189,19 +220,26 @@ with tab2:
                       delta_color="inverse")
 
         # Top params
+        n_valid = ps_result.get("n_valid", 0)
+        n_skipped = ps_result.get("n_skipped_low_trades", 0)
+        if n_skipped:
+            st.caption(f"有效参数组合 {n_valid} 组（{n_skipped} 组因交易次数不足被排除）")
         top_params = ps_result.get("top_10pct_params", [])
         if top_params:
-            st.subheader("🏆 Top 10% 参数组合")
+            st.subheader("🏆 Top 10% 参数组合（含样本外复验）")
             rows = []
             for i, p in enumerate(top_params):
                 row = {"排名": i + 1}
                 row.update(p.get("params", {}))
                 row.update({
-                    "收益%": f"{(p.get('return', 0) or 0):+.2f}",
+                    "IS 收益%": f"{(p.get('return', 0) or 0):+.2f}",
                     "Sharpe": f"{(p.get('sharpe', 0) or 0):.2f}",
                     "回撤%": f"{(p.get('max_dd', 0) or 0):.2f}",
                     "交易": p.get("trades", 0),
                 })
+                if "oos_return" in p:
+                    row["OOS 收益%"] = f"{(p.get('oos_return', 0) or 0):+.2f}"
+                    row["保留率%"] = p.get("oos_retention", "-")
                 rows.append(row)
             if rows:
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -226,7 +264,7 @@ with tab3:
 
     if run_oos_btn:
         with st.spinner(f"正在运行 {selected_strategy} 样本外测试..."):
-            result = run_oos_test(selected_strategy, cfg)
+            result = run_oos_test(selected_strategy, cfg, data=_get_data())
             if result:
                 st.session_state.oos_results[selected_strategy] = result
                 st.success("OOS 测试完成!")
@@ -254,7 +292,7 @@ with tab3:
                       f"{(oos_result.get('out_of_sample_sharpe', 0) or 0):.2f}")
         with oos_cols[3]:
             retention = oos_result.get("retention_ratio", 0) or 0
-            st.metric("收益保留率", f"{retention:.0%}")
+            st.metric("收益保留率", f"{retention:.0f}%")
 
         # Simple bar chart
         theme = st.session_state.get("theme_mode", "light")

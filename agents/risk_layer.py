@@ -1,21 +1,12 @@
 """
-三层风控系统（阶段一基础版）
+风控管理器（RiskManager）— 交易后状态与记录
 
-Layer 1 — 交易前检查:
-  - 最小交易间隔（距上次交易 > 5 分钟）
-  - 单笔上限 ≤ 0.5 ETH
-  - 每日交易次数 ≤ 10
-  - 每日亏损上限 ≤ 100 USDT
-  - 连续亏损 ≤ 3 次（连亏后仓位减半）
-  - 方向冲突（已有同方向仓位时累加不超上限）
-
-Layer 2 — 交易中保护:
-  - 限价单优先
-  - 滑点 > 0.3% 取消
-
-Layer 3 — 交易后监控:
-  - 记录交易到 SQLite
-  - 更新风控状态
+交易前/交易中检查已统一收敛到 agents/rule_engine/（RuleEngine 唯一风控入口）。
+本模块保留：
+  - 仓位查询（委托 PositionMonitor，唯一仓位事实源）
+  - API 错误熔断计数
+  - 交易后记录：写入 SQLite、连亏/日亏损统计、仓位乘数
+  - 每日状态重置（北京时间 00:00）与启动状态恢复
 """
 from __future__ import annotations
 
@@ -65,83 +56,7 @@ class RiskManager:
         # 启动恢复：从 DB 重建当日风控状态（重启不清零，防绕过日内限制）
         self._restore_daily_state()
 
-    # ── Layer 1: 交易前检查 ──
-
-    def _check_common_pre(
-        self,
-        now: datetime,
-    ) -> Tuple[bool, str]:
-        """通用前置检查（方向无关项），供 check_layer1_pre / check_layer1 共用
-
-        检查项:
-          1. API 熔断
-          2. 每日交易次数上限
-          3. 每日亏损上限
-          4. 连续亏损
-          5. 最小交易间隔
-          6. HFT 防护（每小时频率上限）
-
-        返回 (通过?, 原因)
-        """
-        # 1. API 熔断
-        if self._api_breaker_until and now < self._api_breaker_until:
-            remaining = (self._api_breaker_until - now).total_seconds()
-            return False, f"API 熔断中，剩余 {remaining:.0f}s"
-
-        # 2. 每日交易次数
-        if self._daily_trade_count >= self.config.agent3_max_daily_trades:
-            return False, f"今日交易已达上限 ({self._daily_trade_count} 次)"
-
-        # 3. 每日亏损上限
-        if self._daily_loss_usdt >= self.config.agent3_max_daily_loss_usdt:
-            return False, f"今日亏损已达上限 ({self._daily_loss_usdt:.2f} USDT)"
-
-        # 4. 连续亏损
-        if self._consecutive_losses >= self.config.agent3_max_consecutive_losses:
-            return False, f"连续亏损 {self._consecutive_losses} 次，交易暂停"
-
-        # 5. 最小交易间隔
-        if self._last_trade_time:
-            elapsed = (now - self._last_trade_time).total_seconds()
-            if elapsed < self.config.agent3_min_interval_between_trades:
-                remaining = self.config.agent3_min_interval_between_trades - int(elapsed)
-                return False, f"交易间隔未到，还需 {remaining}s"
-
-        # 6. HFT 防护
-        if not self._check_hft(now):
-            return False, f"交易频率过高（每小时上限 {self.config.max_trades_per_hour} 笔）"
-
-        return True, ""
-
-    def check_layer1(
-        self,
-        side: str,  # "buy" / "sell"
-        size_eth: float,
-        price: float,
-        now: Optional[datetime] = None,
-    ) -> Tuple[bool, str]:
-        """交易前全项检查，返回 (通过?, 原因)"""
-        now = now or datetime.now(timezone.utc)
-        self._check_date_reset(now)
-
-        # 1-6. 通用前置检查
-        ok, reason = self._check_common_pre(now)
-        if not ok:
-            return False, reason
-
-        # 7. 单笔上限
-        if size_eth > self.config.agent3_max_position_eth:
-            return False, f"单笔 {size_eth:.4f} ETH 超过上限 {self.config.agent3_max_position_eth} ETH"
-
-        # 8. 方向冲突（同方向累加检查）— 仓位以 PositionMonitor 为准
-        direction = "long" if side == "buy" else "short"
-        pos_side, pos_eth = self.get_position()
-        if pos_side == direction:
-            new_total = pos_eth + size_eth
-            if new_total > self.config.agent3_max_position_eth:
-                return False, f"同方向累加 {new_total:.4f} ETH 超过上限"
-
-        return True, ""
+    # ── Layer 1: 交易前检查已迁移至 agents/rule_engine/（波动/深度/限额/频率规则） ──
 
     def get_position(self) -> Tuple[Optional[str], float]:
         """当前持仓 (side, size_eth)，side 为 None 表示无持仓
@@ -158,36 +73,7 @@ class RiskManager:
             return side, size
         return None, 0.0
 
-    def _check_hft(self, now: datetime) -> bool:
-        """检查过去一小时内交易是否超过上限"""
-        if not self._db_conn:
-            return True  # 无数据库时不拦截
-        try:
-            hour_ago = (now - timedelta(hours=1)).isoformat()
-            cur = self._db_conn.execute(
-                "SELECT COUNT(*) FROM trades WHERE timestamp >= ? AND trade_type = 'open'",
-                (hour_ago,)
-            )
-            count = cur.fetchone()[0] or 0
-            return count < self.config.max_trades_per_hour
-        except Exception as e:
-            logger.warning(f"HFT 检查异常，保守拦截: {e}")
-            return False  # DB 异常时保守拦截，不放行
-
     # ── Layer 2: 交易中保护 ──
-
-    def check_layer1_pre(
-        self,
-        now: Optional[datetime] = None,
-    ) -> Tuple[bool, str]:
-        """交易前快速预检（方向无关项，在 DeepSeek API 调用前执行）
-
-        内部委托给 _check_common_pre，避免与 check_layer1 代码重复。
-        返回 (通过?, 原因)
-        """
-        now = now or datetime.now(timezone.utc)
-        self._check_date_reset(now)
-        return self._check_common_pre(now)
 
     def report_api_error(self):
         """报告 API 错误（用于熔断）"""
@@ -275,8 +161,8 @@ class RiskManager:
     @staticmethod
     def _utc_to_cst_date(utc_dt: datetime) -> date:
         """UTC 时间转北京时间（CST, UTC+8）的日期"""
-        cst_dt = utc_dt + timedelta(hours=8)
-        return cst_dt.date()
+        from time_utils import utc_to_cst
+        return utc_to_cst(utc_dt).date()
 
     def _check_date_reset(self, now: datetime):
         """每日重置（北京时间午夜 00:00 CST = UTC 16:00）"""
@@ -315,116 +201,6 @@ class RiskManager:
             "max_trades_per_hour": self.config.max_trades_per_hour,
         }
 
-    # ── Phase 2: 波动检查 ──
-
-    async def check_volatility_async(self, okx_client, symbol: str = "ETH-USDT") -> tuple[bool, str]:
-        """检查交易品种 15m 波动率，超阈值则拒绝交易
-
-        Args:
-            okx_client: OKXClient 实例（用于获取 K线）
-            symbol: 交易品种，默认 ETH-USDT
-
-        Returns:
-            (通过?, 原因)
-        """
-        # 先检查是否在延迟期内
-        now = datetime.now(timezone.utc)
-        if hasattr(self, '_volatility_delay_until') and self._volatility_delay_until and now < self._volatility_delay_until:
-            remaining = (self._volatility_delay_until - now).total_seconds()
-            return False, f"波动延迟中，剩余 {remaining:.0f}s"
-
-        # 获取最后两根 15m K线
-        try:
-            import asyncio
-            klines = await asyncio.to_thread(
-                okx_client.get_klines, symbol, "15m", 2
-            )
-        except Exception as e:
-            logger.warning(f"波动检查失败（API 异常）: {e}")
-            return True, ""  # API 异常不阻塞交易
-
-        if len(klines) < 2:
-            return True, ""
-
-        prev_close = klines[0]["close"] if isinstance(klines[0], dict) else float(klines[0][4])
-        curr_close = klines[1]["close"] if isinstance(klines[1], dict) else float(klines[1][4])
-
-        if prev_close <= 0:
-            return True, ""
-
-        change_pct = abs(curr_close - prev_close) / prev_close * 100
-        if change_pct > self.config.volatility_threshold_pct:
-            self._volatility_delay_until = now + timedelta(seconds=self.config.volatility_delay_seconds)
-            logger.warning(
-                f"{symbol} 15m 波动 {change_pct:.1f}% > {self.config.volatility_threshold_pct}%"
-                f"，延迟 {self.config.volatility_delay_seconds}s"
-            )
-            return False, f"{symbol} 15m 波动 {change_pct:.1f}%，超过阈值 {self.config.volatility_threshold_pct}%"
-
-        # 波动恢复正常 → 清除延迟
-        self._volatility_delay_until = None
-        return True, ""
-
-    # ── Phase 2: 市场深度检查 ──
-
-    async def check_market_depth_async(
-        self,
-        okx_client,
-        side: str,       # "buy" / "sell"
-        size_eth: float,  # 交易数量（ETH）
-    ) -> tuple[bool, str, bool]:
-        """检查市场深度是否足够
-
-        Args:
-            okx_client: OKXClient 实例
-            side: 交易方向
-            size_eth: 交易数量（ETH）
-
-        Returns:
-            (检查通过?, 消息, 是否强制限价单)
-        """
-        try:
-            import asyncio
-            order_book = await asyncio.to_thread(
-                okx_client.get_order_book, self.config.ws_symbol, depth=5
-            )
-        except Exception as e:
-            logger.warning(f"市场深度检查失败: {e}")
-            return True, "深度检查跳过", True  # 失败则保守地走限价单
-
-        asks = order_book.get("asks", [])
-        bids = order_book.get("bids", [])
-
-        if not asks or not bids:
-            return True, "深度数据为空", True
-
-        # 计算买卖价差（基点）
-        best_ask = float(asks[0][0])
-        best_bid = float(bids[0][0])
-        mid_price = (best_ask + best_bid) / 2
-
-        if mid_price <= 0:
-            return True, "", True
-
-        spread_bps = (best_ask - best_bid) / mid_price * 10000
-
-        # 检查深度是否足够完成交易
-        if side == "buy":
-            available_depth = sum(float(ask[1]) for ask in asks if float(ask[0]) <= best_ask * 1.005)
-        else:
-            available_depth = sum(float(bid[1]) for bid in bids if float(bid[0]) >= best_bid * 0.995)
-
-        if available_depth < size_eth:
-            return False, (
-                f"卖方深度不足: 可用 {available_depth:.4f} ETH < 需求 {size_eth} ETH"
-            ), True
-
-        # 价差过大 → 强制走限价单
-        if spread_bps > self.config.market_depth_spread_bps:
-            return True, f"价差 {spread_bps:.1f}bps > {self.config.market_depth_spread_bps}bps，走限价单", True
-
-        return True, "", False  # 深度充足，可以市价单
-
     # ── SQLite 持久化 ──
 
     def _init_db(self):
@@ -454,9 +230,10 @@ class RiskManager:
         if not self._db_conn:
             return
         try:
-            cst_now = datetime.now(timezone.utc) + timedelta(hours=8)
+            from time_utils import now_cst
+            cst_now = now_cst()
             cst_midnight = cst_now.replace(hour=0, minute=0, second=0, microsecond=0)
-            utc_cutoff = (cst_midnight - timedelta(hours=8)).isoformat()
+            utc_cutoff = cst_midnight.astimezone(timezone.utc).isoformat()
 
             rows = self._db_conn.execute(
                 "SELECT * FROM trades WHERE timestamp >= ? ORDER BY id",

@@ -463,6 +463,41 @@ class TestFuturesPaperEngine:
         assert "margin_rate" in account
         assert "total_realized_pnl" in account
 
+    def test_trade_and_equity_use_bar_timestamp(self, cfg, bar):
+        """回放场景：trade 和 equity_history 时间戳必须来自 bar，而非墙钟（否则图表 x 轴塌缩）"""
+        engine = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        strategy = MockStrategy(signals=[Signal.BUY, Signal.EXIT])
+
+        state1 = engine.run_bar(bar, strategy)
+        assert state1["trade"]["time"].startswith("2025-01-01T00:00:00")
+        assert engine.account.equity_history[-1]["time"].startswith("2025-01-01T00:00:00")
+
+        bar2 = bar.copy()
+        bar2.name = pd.Timestamp("2025-01-01 01:00:00")
+        state2 = engine.run_bar(bar2, strategy)
+        assert state2["trade"]["time"].startswith("2025-01-01T01:00:00")
+        assert engine.account.equity_history[-1]["time"].startswith("2025-01-01T01:00:00")
+
+    def test_tick_exit_respects_use_engine_stops(self, cfg, bar):
+        """策略声明 use_engine_stops=False 时 tick 级止损不触发（强平不受影响）"""
+        entry = float(bar["close"])  # 3020，默认止损线 3020×0.95=2869
+        stop_breach_price = 2800.0  # 低于止损线 2869、高于 10x 强平价 ~2733
+
+        # 声明关闭引擎止损的策略：同一跌幅不触发平仓
+        engine = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        strategy = MockStrategy(signals=[Signal.BUY])
+        strategy.use_engine_stops = False
+        engine.run_bar(bar, strategy)
+        assert engine.check_tick_exit(stop_breach_price, ts="2025-01-01 02:00:00") is None
+        assert not engine.account.is_flat
+
+        # 对照：默认策略（未声明）同一跌幅触发 stop_loss
+        engine2 = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        engine2.run_bar(bar, MockStrategy(signals=[Signal.BUY]))
+        trade2 = engine2.check_tick_exit(stop_breach_price, ts="2025-01-01 02:00:00")
+        assert trade2 is not None
+        assert trade2["reason"] == "stop_loss"
+
 
 # ═══════════════════════════════════════════
 # Config 校验
@@ -488,3 +523,166 @@ class TestFuturesConfig:
         cfg = Config()
         assert cfg.futures.leverage == 10
         assert cfg.futures.margin_mode == "isolated"
+
+
+# ═══════════════════════════════════════════
+# 资金费结算（永续合约每 8h）
+# ═══════════════════════════════════════════
+
+
+def _make_bar(ts: str, price: float = 3000.0) -> pd.Series:
+    return pd.Series(
+        {"open": price, "high": price * 1.01, "low": price * 0.99,
+         "close": price, "volume": 1000},
+        name=pd.Timestamp(ts),
+    )
+
+
+class TestFundingSettlement:
+    @pytest.fixture
+    def cfg(self) -> Config:
+        cfg = Config()
+        cfg.futures = FuturesConfig(leverage=10, margin_mode="isolated")
+        cfg.trading.symbol = "ETH-USDT"
+        cfg.trading.taker_fee = 0.001
+        cfg.risk.max_single_order_pct = 0.1
+        return cfg
+
+    # ── 账户级 ──
+
+    def test_account_long_pays_positive_rate(self):
+        """多仓 + 正费率 → 付费（钱包减少）"""
+        acc = FuturesAccount(wallet_balance=10000, taker_fee_rate=0.001)
+        acc.open_long(3000, size=1.0, leverage=10)  # 名义 3000，手续费 3
+        wallet_before = acc.wallet_balance          # 9997
+        event = acc.settle_funding(0.0001, mark_price=3000)
+        assert event is not None
+        assert event["fee"] == pytest.approx(-0.3)  # -3000 × 0.0001
+        assert acc.wallet_balance == pytest.approx(wallet_before - 0.3)
+        assert acc.funding_fee_total == pytest.approx(-0.3)
+
+    def test_account_short_receives_positive_rate(self):
+        """空仓 + 正费率 → 收费（钱包增加）"""
+        acc = FuturesAccount(wallet_balance=10000, taker_fee_rate=0.001)
+        acc.open_short(3000, size=1.0, leverage=10)
+        wallet_before = acc.wallet_balance
+        event = acc.settle_funding(0.0001, mark_price=3000)
+        assert event["fee"] == pytest.approx(0.3)
+        assert acc.wallet_balance == pytest.approx(wallet_before + 0.3)
+
+    def test_account_negative_rate_flips_sign(self):
+        """负费率 → 多仓收费、空仓付费"""
+        acc = FuturesAccount(wallet_balance=10000)
+        acc.open_long(3000, size=1.0, leverage=10)
+        event = acc.settle_funding(-0.0002, mark_price=3000)
+        assert event["fee"] == pytest.approx(0.6)
+
+    def test_account_flat_no_settlement(self):
+        """无持仓 → 不结算"""
+        acc = FuturesAccount(wallet_balance=10000)
+        assert acc.settle_funding(0.0001, mark_price=3000) is None
+        assert acc.funding_fee_total == 0.0
+        assert acc.funding_events == []
+
+    def test_account_event_fields(self):
+        """结算事件包含费率/方向/名义/费用/钱包快照"""
+        acc = FuturesAccount(wallet_balance=10000)
+        acc.open_long(3000, size=1.0, leverage=10)
+        event = acc.settle_funding(0.0001, mark_price=3100, ts="2025-01-01T08:00:00")
+        assert event["time"] == "2025-01-01T08:00:00"
+        assert event["rate"] == 0.0001
+        assert event["direction"] == "long"
+        assert event["notional"] == pytest.approx(3100)
+        assert "wallet_after" in event
+
+    # ── 引擎级（bar 边界驱动） ──
+
+    def test_engine_settles_at_boundary(self, cfg):
+        """07:00 开多 → 08:00 bar 跨过结算点 → 产生一次结算"""
+        engine = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        engine.set_funding_rate(0.0001)
+        strategy = MockStrategy(signals=[Signal.BUY, Signal.HOLD])
+
+        engine.run_bar(_make_bar("2025-01-01 07:00:00"), strategy)   # 开多（首根只建水位线）
+        state = engine.run_bar(_make_bar("2025-01-01 08:00:00"), strategy)  # 跨 08:00 边界
+
+        assert len(state["funding_events"]) == 1
+        # 名义 = 仓位 × bar 开盘价 = (10000×0.1×10/3000) × 3000 = 10000
+        assert state["funding_events"][0]["fee"] == pytest.approx(-1.0)
+        assert state["account"]["funding_fee_total"] == pytest.approx(-1.0)
+
+    def test_engine_no_double_settlement(self, cfg):
+        """同一根边界 bar 喂两次 → 只结算一次"""
+        engine = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        engine.set_funding_rate(0.0001)
+        strategy = MockStrategy(signals=[Signal.BUY, Signal.HOLD, Signal.HOLD])
+
+        engine.run_bar(_make_bar("2025-01-01 07:00:00"), strategy)
+        engine.run_bar(_make_bar("2025-01-01 08:00:00"), strategy)
+        state = engine.run_bar(_make_bar("2025-01-01 08:00:00"), strategy)  # 重复
+
+        assert state["funding_events"] == []
+        assert engine.account.funding_fee_total == pytest.approx(-1.0)
+
+    def test_engine_multiple_boundaries(self, cfg):
+        """持仓 26 小时 → 结算 4 次（08/16/00/08）"""
+        engine = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        engine.set_funding_rate(0.0001)
+        signals = [Signal.BUY] + [Signal.HOLD] * 30
+        strategy = MockStrategy(signals=signals)
+
+        start = pd.Timestamp("2025-01-01 07:00:00")
+        for i in range(26):  # 07:00 → 次日 08:00
+            ts = start + pd.Timedelta(hours=i)
+            engine.run_bar(_make_bar(str(ts)), strategy)
+
+        assert len(engine.account.funding_events) == 4
+        assert engine.account.funding_fee_total == pytest.approx(-4.0)
+
+    def test_engine_disabled_when_rate_none(self, cfg):
+        """未设置费率（None）→ 不结算（向后兼容）"""
+        engine = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        strategy = MockStrategy(signals=[Signal.BUY, Signal.HOLD, Signal.HOLD])
+
+        engine.run_bar(_make_bar("2025-01-01 07:00:00"), strategy)
+        state = engine.run_bar(_make_bar("2025-01-01 08:00:00"), strategy)
+
+        assert state["funding_events"] == []
+        assert engine.account.funding_fee_total == 0.0
+
+    def test_engine_flat_crosses_boundary(self, cfg):
+        """空仓状态跨过边界 → 无结算事件"""
+        engine = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        engine.set_funding_rate(0.0001)
+        strategy = MockStrategy(signals=[Signal.HOLD, Signal.HOLD])
+
+        engine.run_bar(_make_bar("2025-01-01 07:00:00"), strategy)
+        state = engine.run_bar(_make_bar("2025-01-01 08:00:00"), strategy)
+
+        assert state["funding_events"] == []
+        assert engine.account.funding_events == []
+
+    def test_engine_short_receives(self, cfg):
+        """空仓（做空）+ 正费率 → 资金费为正"""
+        engine = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        engine.set_funding_rate(0.0001)
+        strategy = MockStrategy(signals=[Signal.SELL, Signal.HOLD])
+
+        engine.run_bar(_make_bar("2025-01-01 07:00:00"), strategy)
+        state = engine.run_bar(_make_bar("2025-01-01 08:00:00"), strategy)
+
+        assert state["funding_events"][0]["fee"] == pytest.approx(1.0)
+        assert state["account"]["funding_fee_total"] == pytest.approx(1.0)
+
+    def test_engine_state_exposes_funding(self, cfg):
+        """run_bar 返回与 account.to_dict 均含资金费字段"""
+        engine = FuturesPaperEngine(cfg, wallet_balance=10000, leverage=10, position_size_pct=0.1)
+        engine.set_funding_rate(0.0001)
+        strategy = MockStrategy(signals=[Signal.BUY, Signal.HOLD])
+
+        engine.run_bar(_make_bar("2025-01-01 07:00:00"), strategy)
+        state = engine.run_bar(_make_bar("2025-01-01 08:00:00"), strategy)
+
+        assert state["funding_rate"] == 0.0001
+        assert "funding_fee_total" in state["account"]
+        assert "funding_events" in state["account"]

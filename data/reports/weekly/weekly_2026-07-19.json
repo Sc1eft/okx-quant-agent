@@ -1,0 +1,64 @@
+{
+  "type": "weekly",
+  "date": "2026-07-19",
+  "generated_at": "2026-07-19T09:04:53.790892+00:00",
+  "stats": {
+    "trades": 3,
+    "wins": 2,
+    "losses": 1,
+    "win_rate": 66.7,
+    "total_pnl": 12.0,
+    "total_fee": 0.0,
+    "avg_pnl": 4.0,
+    "best_trade": 10.0,
+    "worst_trade": -3.0,
+    "max_drawdown_pct": 0.0,
+    "by_side": {
+      "short": {
+        "trades": 3,
+        "win_rate": 66.7,
+        "pnl": 12.0
+      }
+    }
+  },
+  "summary": "共 3 笔交易 | 胜率 66.7% (2胜/1负) | 总盈亏 +12.00 USDT | 最大回撤 0.00% | 🔴 short: 3笔 胜率67% 盈亏+12.0",
+  "period": {
+    "start": "2026-07-12T09:04:53.788154+00:00",
+    "end": "2026-07-19T09:04:53.790892+00:00"
+  },
+  "trades": {
+    "wins": [
+      {
+        "trade_id": 1,
+        "pnl": 10.0,
+        "side": "short",
+        "entry_price": 0,
+        "exit_price": 3500.0,
+        "reason": "",
+        "time": "2026-07-19T09:04:53.785872+00:00"
+      },
+      {
+        "trade_id": 2,
+        "pnl": 5.0,
+        "side": "short",
+        "entry_price": 0,
+        "exit_price": 3500.0,
+        "reason": "",
+        "time": "2026-07-19T09:04:53.786874+00:00"
+      }
+    ],
+    "losses": [
+      {
+        "trade_id": 3,
+        "pnl": -3.0,
+        "side": "short",
+        "entry_price": 0,
+        "exit_price": 3500.0,
+        "reason": "",
+        "time": "2026-07-19T09:04:53.786874+00:00"
+      }
+    ]
+  },
+  "pushed": false,
+  "push_time": null
+}

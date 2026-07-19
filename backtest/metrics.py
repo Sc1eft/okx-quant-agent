@@ -34,12 +34,27 @@ def compute_metrics(
 
     # Sharpe 比率（假设年化无风险利率 2%）
     period_returns = equity_curve.pct_change().dropna()
+    sharpe_se = 0.0
+    psr = 0.0
     if len(period_returns) > 1:
         spacing_seconds = equity_curve.index.to_series().diff().dropna().dt.total_seconds().median()
         periods_per_year = 365.25 * 86400 / spacing_seconds if spacing_seconds and spacing_seconds > 0 else 365.25
         risk_free_per_period = (1.02 ** (1 / periods_per_year)) - 1
         excess_returns = period_returns - risk_free_per_period
         sharpe = float(np.sqrt(periods_per_year) * excess_returns.mean() / excess_returns.std()) if excess_returns.std() > 0 else 0
+
+        # ── Sharpe 显著性（防过拟合：小样本 Sharpe 不可信）──
+        n_periods = len(excess_returns)
+        if n_periods > 2 and excess_returns.std() > 0:
+            sr_p = float(excess_returns.mean() / excess_returns.std())
+            # Sharpe 标准误（Lo 2002 近似，IID 假设）
+            sharpe_se = float(np.sqrt(periods_per_year * (1 + 0.5 * sr_p ** 2) / n_periods))
+            # PSR: 真实 Sharpe > 0 的概率（Bailey & López de Prado），
+            # 校正偏度/峰度；scipy kurtosis 为超额峰度（正态=0），公式项 (γ4-1)/4 = (excess+2)/4
+            g3 = float(stats.skew(excess_returns))
+            g4x = float(stats.kurtosis(excess_returns))
+            denom = max(1 - g3 * sr_p + (g4x + 2) / 4 * sr_p ** 2, 1e-12)
+            psr = float(stats.norm.cdf(sr_p * np.sqrt(n_periods - 1) / np.sqrt(denom)))
     else:
         sharpe = 0.0
 
@@ -86,6 +101,9 @@ def compute_metrics(
         "annual_return_pct": round(annual_return, 2),
         "max_drawdown_pct": round(max_drawdown, 2),
         "sharpe": round(sharpe, 2),
+        "sharpe_se": round(sharpe_se, 2),
+        "psr": round(psr, 3),
+        "min_trades_ok": total_trades >= 20,
         "calmar": round(calmar, 2),
         "win_rate": round(win_rate, 1),
         "profit_factor": round(profit_factor, 2),

@@ -1,6 +1,6 @@
 """共享前端工具函数
 
-从 pages/8-11 提取的重复函数（_ss, _fmt_change, _fmt_uptime, _fmt_price）
+从 page_modules/8-11 提取的重复函数（_ss, _fmt_change, _fmt_uptime, _fmt_price）
 以及共享的图表主题色常量。
 """
 from __future__ import annotations

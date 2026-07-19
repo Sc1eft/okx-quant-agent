@@ -6,8 +6,8 @@ Agent 3 — 资深交易员
   2. 在时间窗口内缓冲合并事件
   3. 高优先级事件立即处理，低优先级攒批
   4. Layer 1 风控检查
-  5. 构建上下文 → 调用 DeepSeek 综合分析
-  6. DeepSeek 返回交易决策
+  5. 构建上下文 → 规则决策器（RuleDecider）综合评分
+  6. 规则决策器返回交易决策
   7. Layer 2 执行保护（限价单/滑点保护）
   8. 执行交易（通过 TradeExecutor）
   9. Layer 3 记录交易到风控系统 + SQLite
@@ -108,6 +108,8 @@ class Agent3:
         review_generator=None,  # Phase 4: 复盘报告生成器
         agent4_reviewer=None,  # Agent 4 复盘改进（替代 param_adapter）
         notifier=None,        # 交易报告推送器（ServerChan）
+        rule_decider=None,     # 规则决策器（替代 DeepSeek 实时决策；None 时自动创建）
+        llm_shadow=None,       # D12: LLM 影子决策记录器（只记录不执行）
     ):
         self.config = config
         self.bus = event_bus
@@ -118,7 +120,14 @@ class Agent3:
         self.position_monitor = position_monitor
         self.okx_client = okx_client
         self.rule_engine = rule_engine
+        self.llm_shadow = llm_shadow
         self._btc_checked = False
+
+        # 规则决策器（实时交易决策；DeepSeek 仅用于盘后复盘/报告）
+        if rule_decider is None:
+            from agents.rule_decider import RuleDecider
+            rule_decider = RuleDecider(config)
+        self.rule_decider = rule_decider
 
         # Phase 4
         self.confidence_scorer = ConfidenceScorer(config) if config.confidence_scorer_enabled else None
@@ -293,7 +302,7 @@ class Agent3:
             await self._make_decision()
 
     async def _idle_decision_loop(self):
-        """空闲定时决策循环 — 长时间无事件时强制触发 DeepSeek 评估"""
+        """空闲定时决策循环 — 长时间无事件时强制触发规则评估"""
         interval = self.config.agent3_idle_decision_interval_seconds
         while self._running:
             await asyncio.sleep(30)  # 每 30s 检查一次
@@ -348,8 +357,8 @@ class Agent3:
         if self.risk.is_daily_limit_reached():
             if not self._paused_for_daily_limit:
                 self._paused_for_daily_limit = True
-                now_utc = datetime.now(timezone.utc)
-                cst_now = now_utc + timedelta(hours=8)
+                from time_utils import now_cst
+                cst_now = now_cst()
                 next_midnight = cst_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
                 sleep_sec = (next_midnight - cst_now).total_seconds()
                 logger.warning(
@@ -400,46 +409,39 @@ class Agent3:
                     self._stats["trades_skipped"] += 1
                     return
             else:
-                # ── 旧版回退（RuleEngine 未配置时） ──
-                if self.okx_client and hasattr(self.risk, 'check_volatility_async'):
-                    self._current_activity = "🔍 检查波动…"
-                    self._last_activity_time = time.time()
-                    ok, reason = await self.risk.check_volatility_async(self.okx_client, symbol=self.executor.symbol)
-                    if not ok:
-                        self._current_activity = f"⏭ 波动检查跳过: {reason[:40]}"
-                        self._last_activity_time = time.time()
-                        logger.info(f"波动检查拒绝: {reason}")
-                        self._stats["trades_skipped"] += 1
-                        return
-
-                ok, reason = self.risk.check_layer1_pre()
-                if not ok:
-                    self._current_activity = f"⏭ 风控预检跳过: {reason[:40]}"
-                    self._last_activity_time = time.time()
-                    logger.info(f"风控预检拒绝: {reason}")
-                    self._stats["trades_skipped"] += 1
-                    return
+                # RuleEngine 是唯一风控入口（main.py 始终配置）；缺失属配置错误
+                logger.error("RuleEngine 未配置，跳过 pre-trade 风控检查！")
+                self._current_activity = "⚠️ RuleEngine 未配置"
+                self._last_activity_time = time.time()
 
             # ── 1. 构建上下文摘要（不含方向） ──
-            self._current_activity = "🧠 构建 DeepSeek 上下文 ({len(events)} 事件)"
+            self._current_activity = "🧠 构建决策上下文 ({len(events)} 事件)"
             self._last_activity_time = time.time()
             context = self._build_context(events)
 
-            # ── 2. 调用 DeepSeek ──
-            self._current_activity = "🤔 等待 DeepSeek 决策…"
+            # ── 2. 规则决策（DeepSeek 已移出实时决策环，仅用于盘后复盘/报告） ──
+            self._current_activity = "🧮 规则评分…"
             self._last_activity_time = time.time()
-            self._stats["deepseek_calls"] += 1
-            decision = await asyncio.to_thread(self.deepseek.analyze, context)
+            decision = self.rule_decider.decide(
+                events, current_price=context.get("current_price", 0)
+            )
+
+            # ── 2b. LLM 影子决策（D12：后台线程落盘对比，不影响执行；hold 也记录）──
+            if self.llm_shadow:
+                try:
+                    self.llm_shadow.maybe_record(context, decision)
+                except Exception as e:
+                    logger.warning(f"LLM 影子决策发起失败: {e}")
 
             if decision["action"] == "hold":
                 reason = decision.get('reason', '')
-                self._current_activity = f"⏭ DeepSeek 建议持有: {reason[:40]}"
+                self._current_activity = f"⏭ 规则决策持有: {reason[:40]}"
                 self._last_activity_time = time.time()
-                logger.info(f"DeepSeek 建议持有: {reason}")
+                logger.info(f"规则决策持有: {reason}")
                 self._stats["trades_skipped"] += 1
                 return
 
-            # ── 3. 从 DeepSeek 输出获取交易方向 ──
+            # ── 3. 从决策输出获取交易方向 ──
             trade_side = "buy" if decision["action"] == "buy" else "sell"
             size_eth = self._suggested_size(context, decision)
             self._current_activity = f"📐 决策: {decision['action']} {size_eth:.4f} ETH (信心 {decision['confidence']}%)"
@@ -534,37 +536,16 @@ class Agent3:
                     self._stats["trades_skipped"] += 1
                     return
             else:
-                # ── 旧版回退（RuleEngine 未配置时） ──
+                # RuleEngine 是唯一风控入口（main.py 始终配置）；缺失属配置错误
                 prefer_limit = True
-                if self.okx_client and hasattr(self.risk, 'check_market_depth_async'):
-                    self._current_activity = "🔍 检查市场深度…"
-                    self._last_activity_time = time.time()
-                    ok, reason, prefer_limit = await self.risk.check_market_depth_async(
-                        self.okx_client, trade_side, size_eth
-                    )
-                    if not ok:
-                        self._current_activity = f"⏭ 深度检查跳过: {reason[:40]}"
-                        self._last_activity_time = time.time()
-                        logger.info(f"市场深度拒绝: {reason}")
-                        self._stats["trades_skipped"] += 1
-                        return
-                    if prefer_limit:
-                        logger.info(f"市场深度检查: {reason}")
-
-                self._current_activity = "🛡️ 风控检查中…"
+                logger.error("RuleEngine 未配置，跳过 execution 风控检查！")
+                self._current_activity = "⚠️ RuleEngine 未配置"
                 self._last_activity_time = time.time()
-                ok, reason = self.risk.check_layer1(trade_side, size_eth, context.get("current_price", 0))
-                if not ok:
-                    self._current_activity = f"⏭ 风控拒绝: {reason[:40]}"
-                    self._last_activity_time = time.time()
-                    logger.info(f"Layer 1 拒绝: {reason}")
-                    self._stats["trades_skipped"] += 1
-                    return
 
             # ── 5. 执行交易 ──
             self._current_activity = f"💱 执行 {trade_side} {size_eth:.4f} ETH…"
             self._last_activity_time = time.time()
-            logger.info(f"DeepSeek 决策: {decision['action']} (信心 {decision['confidence']}%)")
+            logger.info(f"规则决策: {decision['action']} (信心 {decision['confidence']}%)")
 
             trade_result = await self.executor.execute_safe(
                 side=trade_side,
@@ -583,7 +564,7 @@ class Agent3:
                     fill_price = context.get("current_price", 0)
                     logger.warning(f"成交价缺失，用当前价 ${fill_price:.2f} 兜底入账")
                 trade_group_id = str(uuid.uuid4())[:8]
-                # 止损止盈：取 DeepSeek 值并做方向校验（多头 SL<入场<TP，空头相反），
+                # 止损止盈：取决策值并做方向校验（多头 SL<入场<TP，空头相反），
                 # 方向错误回退配置默认百分比——错误值会让 PositionMonitor 立即触发。
                 # 校验后的最终值随开仓记录入库，重启恢复时原样还原。
                 stop_loss = _safe_float(decision.get("stop_loss"), 0)
@@ -602,14 +583,14 @@ class Agent3:
                 if not sl_ok:
                     if stop_loss != 0:
                         logger.warning(
-                            f"DeepSeek 止损方向错误: {trade_side} SL=${stop_loss:.2f} "
+                            f"决策止损方向错误: {trade_side} SL=${stop_loss:.2f} "
                             f"入场=${fill_price:.2f}，回退默认 {self.config.agent3_default_stop_loss_pct}%"
                         )
                     stop_loss = default_sl
                 if not tp_ok:
                     if take_profit != 0:
                         logger.warning(
-                            f"DeepSeek 止盈方向错误: {trade_side} TP=${take_profit:.2f} "
+                            f"决策止盈方向错误: {trade_side} TP=${take_profit:.2f} "
                             f"入场=${fill_price:.2f}，回退默认 {self.config.agent3_default_take_profit_pct}%"
                         )
                     take_profit = default_tp
@@ -712,7 +693,7 @@ class Agent3:
                 logger.error(f"交易失败: {trade_result['error']}")
 
     def _build_context(self, events: list[AgentEvent]) -> TradingContext:
-        """从事件列表构建 DeepSeek 上下文（返回类型为 TradingContext TypedDict）"""
+        """从事件列表构建决策上下文（返回类型为 TradingContext TypedDict）"""
         agent1_lines = []
         agent2_lines = []
         # 从缓存开始（如果没有事件提供价格，沿用上次已知价格）
@@ -754,6 +735,8 @@ class Agent3:
             elif e.source == "agent2_funding":
                 agent2_lines.append(d.get("description", ""))
                 funding_rate_pct = d.get("funding_rate_pct", funding_rate_pct)
+            elif e.source == "agent2_oi":
+                agent2_lines.append(d.get("description", ""))
 
         # Phase 2: 注入风控状态
         risk_status = self.risk.get_status()
@@ -891,7 +874,7 @@ class Agent3:
         return "暂无技术面信号"
 
     def _load_recent_trades_summary(self, n: int = 5) -> str:
-        """Step 5: 加载最近 N 笔已平仓交易摘要（供 DeepSeek 上下文注入）"""
+        """Step 5: 加载最近 N 笔已平仓交易摘要（供决策上下文注入）"""
         if self.review_gen and hasattr(self.review_gen, 'get_recent_trades_summary'):
             try:
                 return self.review_gen.get_recent_trades_summary(n)
@@ -952,9 +935,9 @@ class Agent3:
         return ""
 
     def _suggested_size(self, context: dict, decision: dict = None) -> float:
-        """根据 DeepSeek 把握程度 + 风控建议仓位大小
+        """根据决策信心（position_size_pct）+ 风控建议仓位大小
 
-        DeepSeek 返回 position_size_pct (0-100)：
+        决策器返回 position_size_pct (0-100)：
           - 高把握 (70-100) → 接近打满 max_position
           - 中等 (30-70)  → 正常仓位
           - 低把握 (5-30)  → 小仓试水
@@ -963,14 +946,14 @@ class Agent3:
         """
         max_pos = self.config.agent3_max_position_eth  # 默认 0.5 ETH
 
-        # DeepSeek 把握程度 → 仓位比例
+        # 决策把握程度 → 仓位比例
         deepseek_pct_str = "50"
         if decision and decision.get("position_size_pct"):
             deepseek_pct_str = str(decision["position_size_pct"])
         deepseek_pct = _safe_float(deepseek_pct_str, 50)
         deepseek_pct = max(5, min(100, deepseek_pct))  # 钳位 5%~100%
 
-        base = max_pos * (deepseek_pct / 100)  # DeepSeek 决定基础比例
+        base = max_pos * (deepseek_pct / 100)  # 决策器决定基础比例
 
         # Agent 4 长期乘数 / 风控连亏递减
         agent4_mult = self.config.agent3_position_size_multiplier
@@ -1037,11 +1020,11 @@ class Agent3:
         """判断是否应该补仓
 
         优先级：
-        1. DeepSeek 显式指定 add_to_position
+        1. 决策器显式指定 add_to_position
         2. 信心足够高（≥65）且仓位未满
         3. 仓位很小（<30% max）且信心 ≥50
         """
-        # 1. DeepSeek 显式指定
+        # 1. 决策器显式指定
         add_flag = decision.get("add_to_position")
         if add_flag is True:
             return True
@@ -1255,6 +1238,8 @@ class Agent3:
             "adjusted_debounce": self.config.agent3_debounce_seconds,
             "adjusted_trade_interval": self.config.agent3_min_interval_between_trades,
             "deepseek_stats": self.deepseek.get_stats(),
+            "rule_decider_stats": self.rule_decider.get_stats(),
+            "decision_engine": "rule",
             "executor_stats": self.executor.get_stats(),
             "risk_status": self.risk.get_status(),
             "phase4": {

@@ -149,7 +149,7 @@ class SignalAligner:
         score = 0.0
         count = 0
         for ev in events:
-            if ev.source not in ("agent2_gas", "agent2_whale", "agent2_taker", "agent2_funding"):
+            if ev.source not in ("agent2_gas", "agent2_whale", "agent2_taker", "agent2_funding", "agent2_oi"):
                 continue
             d = ev.data
             if not isinstance(d, dict):
@@ -179,10 +179,11 @@ class SignalAligner:
 
             elif ev.source == "agent2_taker":
                 sentiment = d.get("sentiment", "")
+                s = 0.6 if d.get("extreme") else 0.5  # 分位极端加权
                 if sentiment == "bullish":
-                    score += 0.5
+                    score += s
                 elif sentiment == "bearish":
-                    score += -0.5
+                    score += -s
                 else:
                     continue
                 count += 1
@@ -190,12 +191,23 @@ class SignalAligner:
             elif ev.source == "agent2_funding":
                 is_high = d.get("is_high", False)
                 rate = d.get("funding_rate_pct", 0)
+                s = 0.5 if d.get("extreme") else 0.4  # 分位极端加权
                 if is_high and rate > 0:
-                    score += -0.4  # 正费率过高 = 多头过热
+                    score += -s  # 正费率过高 = 多头过热
                 elif is_high and rate < 0:
-                    score += 0.4  # 负费率过低 = 空头过热
+                    score += s  # 负费率过低 = 空头过热
                 else:
                     continue
+                count += 1
+
+            elif ev.source == "agent2_oi":
+                sentiment = d.get("sentiment", "")
+                if sentiment == "bullish":
+                    score += 0.4  # OI 激增 + 买方主导 = 新多进场
+                elif sentiment == "bearish":
+                    score += -0.4  # OI 激增 + 卖方主导 = 新空进场
+                else:
+                    continue  # 去杠杆（neutral）只做上下文，不定方向
                 count += 1
 
         if count == 0:

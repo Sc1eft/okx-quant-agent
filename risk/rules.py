@@ -72,8 +72,10 @@ class RiskEngine:
                 else:
                     return False, f"风控暂停中: {self.state.pause_reason}"
 
-        # 仓位检查
-        if current_position_pct >= self.config.max_position_pct:
+        # 仓位检查（仅买入/开仓信号；卖出平仓豁免 —— 仓位超限时更应允许平仓）
+        # signal 可能是 str 或 Signal enum，统一取值比较
+        sig_val = getattr(signal, "value", signal)
+        if sig_val == "buy" and current_position_pct >= self.config.max_position_pct:
             return False, f"已达最大仓位 ({self.config.max_position_pct:.0%})"
 
         # 日内交易次数限制

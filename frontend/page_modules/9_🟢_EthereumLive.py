@@ -1,0 +1,671 @@
+"""Ethereum Live Data — real-time ETH-USDT market data from OKX.
+
+Always-on candlestick chart (like stock K-line) with expanded timeframe options
+from second-level (via heartbeat WebSocket collector) through 15-day candles.
+
+No "start monitoring" button needed — data loads automatically.
+AI 自动交易执行已迁移至「🤖 AI 交易」页，本页只保留行情与 AI 多空分析。
+Refactored: shared modules extracted to utils/ and components/.
+"""
+
+from __future__ import annotations
+
+import sys
+import time as _time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import streamlit as st
+import pandas as pd
+
+# 项目路径必须在所有 frontend.* 模块导入前设置
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from frontend.components.layout import (
+    inject_mask_hider_js, page_header, section_card, status_bar, ticker_bar,
+)
+from frontend.components.metrics_display import render_metric_card
+from frontend.utils.data_provider import fetch_klines_with_agg, fetch_ticker
+from frontend.utils.helpers import ss as _ss, fmt_change as _fmt_change, ETH_SYMBOL
+from frontend.utils.session_state import get_config
+
+# ── Extracted shared modules ──
+from frontend.utils.eth_news import _fetch_crypto_news, _fmt_relative_time
+from frontend.utils.eth_ai_analysis import (
+    _call_ai_analysis,
+    _call_ai_chat,
+    _sanitize_ai_text,
+    _ticker_summary,
+    _summarize_klines,
+)
+from frontend.components.eth_charts import (
+    TIMEFRAMES,
+    TIMEFRAME_REFRESH_S,
+    _build_sparkline,
+    _friendly_tf,
+    _fmt_uptime,
+)
+
+# ── Page-specific constants ──
+DEFAULT_TF_LABEL = "15分钟"
+
+
+# ════════════════════════════════════════════════════════════════
+# PAGE
+# ════════════════════════════════════════════════════════════════
+
+page_header(
+    "🟢 以太坊行情",
+    "ETH-USDT 实时行情 · K 线图表 · 秒级~15天 多周期 · 自动刷新",
+    badge="OKX 实时",
+    badge_type="green",
+)
+
+inject_mask_hider_js()
+
+cfg = get_config()
+
+# ── Session state init ──
+_ss("eth_ticker", None)
+_ss("eth_data", None)
+_ss("eth_timeframe", DEFAULT_TF_LABEL)
+_ss("eth_data_count", 120)
+_ss("eth_last_refresh", None)
+_ss("eth_auto_refresh", True)
+
+# ════════════════════════════════════════════════════════════════
+# TICKER BAR — 贴 header 展示实时价（独立 fragment 周期重渲染；
+# 数据由页面末尾 fragment 统一拉取，此处只读 session，不产生额外请求）
+# ════════════════════════════════════════════════════════════════
+
+@st.fragment(run_every=TIMEFRAME_REFRESH_S.get(
+    TIMEFRAMES.get(st.session_state.eth_timeframe, "1d"), 5))
+def _ticker_display_fragment():
+    _ticker_data_display = st.session_state.get("eth_ticker")
+    _last_refresh_display = st.session_state.get("eth_last_refresh", "")
+
+    if _ticker_data_display:
+        _tk = _ticker_data_display
+        _change_24h = _tk.get("change_24h", 0) or 0
+        _price_color = "green" if _change_24h >= 0 else "red"
+        _bid = _tk.get("bid", 0) or 0
+        _ask = _tk.get("ask", 0) or 0
+
+        ticker_bar([
+            {"label": "ETH-USDT",
+             "value": f"${_tk.get('last', 0) or 0:,.2f} {_fmt_change(_change_24h)}",
+             "color": _price_color},
+            {"label": "买一 / 卖一",
+             "value": f"{f'${_bid:,.2f}' if _bid else 'N/A'} / {f'${_ask:,.2f}' if _ask else 'N/A'}"},
+            {"label": "24h 最高 / 最低",
+             "value": f"{f'${_tk.get('high_24h', 0) or 0:,.2f}' if _tk.get('high_24h') else 'N/A'} / {f'${_tk.get('low_24h', 0) or 0:,.2f}' if _tk.get('low_24h') else 'N/A'}"},
+            {"label": "24h 成交量",
+             "value": f"{_tk.get('volume_24h', 0) or 0:,.0f} ETH"},
+        ], badge=f"✅ 实时数据 · {_last_refresh_display}" if _last_refresh_display else "✅ 实时数据")
+    elif st.session_state.get("eth_data") is None:
+        st.info("💡 加载后将显示实时行情")
+
+_ticker_display_fragment()
+
+# K 线卡展示块用的 ticker 快照（module 级；顶部行情条 fragment 内也各自读取 session）
+_ticker_data_display = st.session_state.get("eth_ticker")
+
+# ════════════════════════════════════════════════════════════════
+# K 线卡 — 控制件内联在卡片顶部，下方是图表与数据
+# ════════════════════════════════════════════════════════════════
+
+with section_card("K 线", "📈"):
+    tf_labels = list(TIMEFRAMES.keys())
+    cur_label = st.session_state.eth_timeframe
+    default_idx = tf_labels.index(
+        cur_label) if cur_label in tf_labels else tf_labels.index(DEFAULT_TF_LABEL)
+
+    ctrl_cols = st.columns([1.8, 1.5, 0.8, 1.0])
+
+    with ctrl_cols[0]:
+        selected_tf = st.selectbox(
+            "K 线周期",
+            tf_labels,
+            index=default_idx,
+            key="eth_tf_sel")
+
+    with ctrl_cols[1]:
+        dc = st.slider(
+            "K 线数量",
+            20,
+            300,
+            st.session_state.eth_data_count,
+            step=10,
+            key="eth_dc_slider")
+
+    with ctrl_cols[2]:
+        st.caption("")
+        if st.button("🔄", use_container_width=True):
+            st.session_state.eth_data = None
+            st.rerun()
+
+    with ctrl_cols[3]:
+        auto = st.checkbox(
+            "自动刷新",
+            key="eth_auto_refresh")
+
+    # ── Detect widget changes → reset data ──
+    tf_changed = selected_tf != st.session_state.eth_timeframe
+    count_changed = dc != st.session_state.eth_data_count
+    if tf_changed or count_changed:
+        st.session_state.eth_timeframe = selected_tf
+        st.session_state.eth_data_count = dc
+        st.session_state.eth_data = None
+        st.rerun()
+
+    # Resolve keys
+    tf_label = st.session_state.eth_timeframe
+    tf_key = TIMEFRAMES.get(tf_label, "1d")
+    data_count = st.session_state.eth_data_count
+    is_seconds_mode = tf_key == "1s"
+
+    # ── 展示数据（由 fragment 写入 session_state，刷新不闪烁）──
+    _t_key_display = TIMEFRAMES.get(st.session_state.eth_timeframe, "1d")
+    _sec_mode_display = _t_key_display == "1s"
+    _cached_df_display = st.session_state.get("eth_data")
+
+    if _sec_mode_display:
+        # ── 心跳模式显示 ──
+        from data.heartbeat_db import HeartbeatDB as _HB, is_collector_running as _hb_running, read_status as _hb_status
+
+        _running = _hb_running()
+        _status = _hb_status() if _running else None
+        _tick_count = _status.get("tick_count", 0) if _status else 0
+        _uptime_str = _fmt_uptime(_status.get("started_at") if _status else None)
+        _tps = "0"
+        _sa = _status.get("started_at") if _status else None
+        if _sa and _tick_count:
+            try:
+                _elapsed = max(1, (datetime.now(timezone.utc) - datetime.fromisoformat(_sa)).total_seconds())
+                _tps = f"{_tick_count / _elapsed:.1f}"
+            except Exception:
+                pass
+
+        status_bar(
+            "💓 心跳采集运行中" if _running else "⏸ 心跳采集已停止",
+            [("心跳", f"{_tick_count:,}"),
+             ("速率", f"{_tps} /s"),
+             ("运行时长", _uptime_str),
+             ("周期", "1 秒")],
+            state="ok" if _running else "off",
+        )
+
+        if not _running:
+            st.warning("💓 心跳采集器未运行。秒级数据需要 WebSocket 心跳采集器。")
+
+        if _cached_df_display is not None and not _cached_df_display.empty:
+            _last_price_hb = float(_cached_df_display["close"].iloc[-1])
+            _prev_price_hb = st.session_state.get("eth_hb_prev_price", _last_price_hb)
+            st.session_state.eth_hb_prev_price = _last_price_hb
+            _price_dir = "up" if _last_price_hb >= _prev_price_hb else "down"
+            _prev_close_hb = float(_cached_df_display["close"].iloc[-2]) if len(_cached_df_display) > 1 else _last_price_hb
+            _chg_hb = (_last_price_hb - _prev_close_hb) / _prev_close_hb * 100 if _prev_close_hb else 0
+            _price_color_hb = "#059669" if _price_dir == "up" else "#dc2626"
+            _bg_chg = "#d1fae5" if _chg_hb >= 0 else "#fee2e2"
+            _fg_chg = "#065f46" if _chg_hb >= 0 else "#991b1b"
+            _bid_hb = _ticker_data_display.get("bid") if _ticker_data_display else None
+            _ask_hb = _ticker_data_display.get("ask") if _ticker_data_display else None
+            _spread_hb = (_ask_hb - _bid_hb) / _bid_hb * 100 if _bid_hb and _ask_hb else 0
+
+            st.markdown(f"""
+            <div style="text-align:center;padding:1.5rem 1rem 1rem;background:var(--bg-card);border-radius:12px;border:1px solid var(--border);margin-bottom:1rem;">
+            <div style="font-size:3rem;font-weight:700;color:{_price_color_hb};font-variant-numeric:tabular-nums;line-height:1.1;">
+            ${_last_price_hb:,.2f}
+            </div>
+            <div style="display:flex;justify-content:center;gap:1.5rem;margin-top:0.5rem;">
+            <span style="font-size:0.95rem;color:var(--text-muted);">24h <span style="display:inline-block;padding:1px 12px;border-radius:999px;background:{_bg_chg};color:{_fg_chg};font-weight:600;">{_chg_hb:+.2f}%</span></span>
+            <span style="font-size:0.95rem;color:var(--text-muted);">💓 {_tps} ticks/s</span>
+            </div>
+            <div style="display:flex;justify-content:center;gap:1rem;margin-top:0.75rem;font-size:0.85rem;color:var(--text-secondary);">
+            <span style="background:var(--bg-input);padding:2px 10px;border-radius:6px;">买一 <strong>${_bid_hb:,.2f}</strong></span>
+            <span style="background:var(--bg-input);padding:2px 10px;border-radius:6px;">卖一 <strong>${_ask_hb:,.2f}</strong></span>
+            <span style="background:var(--bg-input);padding:2px 10px;border-radius:6px;">价差 <strong>{_spread_hb:.3f}%</strong></span>
+            </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Sparkline
+            _hb_db = _HB()
+            try:
+                _recent_ticks = _hb_db.get_recent_ticks(limit=120)
+            finally:
+                _hb_db.close()
+            if _recent_ticks:
+                _spark_fig = _build_sparkline(_recent_ticks, height=110, theme=st.session_state.get("theme_mode", "light"))
+                st.plotly_chart(_spark_fig, use_container_width=True, config={"displayModeBar": False})
+
+                _prices_hb = [t["price"] for t in _recent_ticks if t.get("price")]
+                if _prices_hb:
+                    _kpi_cols = st.columns(5)
+                    with _kpi_cols[0]:
+                        st.metric("时段最高", f"${max(_prices_hb):,.2f}")
+                    with _kpi_cols[1]:
+                        st.metric("时段最低", f"${min(_prices_hb):,.2f}")
+                    with _kpi_cols[2]:
+                        st.metric("时段波幅", f"${max(_prices_hb) - min(_prices_hb):,.2f}")
+                    with _kpi_cols[3]:
+                        st.metric("心跳总数", f"{_tick_count:,}")
+                    with _kpi_cols[4]:
+                        st.metric("采集速率", f"{_tps}/s")
+
+                    with st.expander("📋 最近心跳记录", expanded=False):
+                        _rows = []
+                        for t in _recent_ticks[:50]:
+                            try:
+                                _ts_str = datetime.fromisoformat(t["ts"]).strftime("%H:%M:%S.%f")[:10]
+                            except Exception:
+                                _ts_str = str(t.get("ts", ""))[:10]
+                            _rows.append({
+                                "时间": _ts_str,
+                                "价格": f"${t['price']:,.2f}",
+                                "买一": f"${t.get('bid', 0):,.2f}" if t.get("bid") else "-",
+                                "卖一": f"${t.get('ask', 0):,.2f}" if t.get("ask") else "-",
+                                "24h涨跌": f"{t.get('change_24h', 0):+.2f}%" if t.get("change_24h") is not None else "-",
+                            })
+                        st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+                        st.caption(f"显示最近 {min(50, len(_recent_ticks))} / 共 {_HB().count_ticks():,} 条心跳记录")
+
+                    if _cached_df_display is not None and not _cached_df_display.empty:
+                        with st.expander("📄 秒级 K 线数据"):
+                            _dd = _cached_df_display.copy()
+                            _dd.index = _dd.index.strftime("%Y-%m-%d %H:%M:%S")
+                            _dd = _dd.rename(columns={"open": "开盘", "high": "最高", "low": "最低", "close": "收盘", "volume": "笔数"})
+                            st.dataframe(_dd.iloc[::-1], use_container_width=True)
+                            st.download_button("📥 导出 CSV", _cached_df_display.to_csv(index=True).encode("utf-8"),
+                                               "eth_heartbeat_candles.csv", "text/csv", use_container_width=True)
+
+    else:
+        # ── OKX 模式：TradingView 图表 + 状态条 + 折叠详情 ──
+        import streamlit.components.v1 as components
+
+        _TV_INTERVALS = {
+            "1m": "1", "2m": "2", "15m": "15",
+            "1h": "60", "6h": "360", "12h": "720",
+            "1d": "1D", "2d": "2D", "15d": "1W",
+        }
+        tv_interval = _TV_INTERVALS.get(tf_key, "15")
+        tv_theme = st.session_state.get("theme_mode", "light")
+
+        tv_html = f"""
+        <div class="tradingview-widget-container" style="margin:0;line-height:1;">
+            <div id="tv-eth-chart"></div>
+            <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+            <script type="text/javascript">
+            new TradingView.widget({{
+                "width": "100%",
+                "height": 420,
+                "symbol": "OKX:ETHUSDT",
+                "interval": "{tv_interval}",
+                "timezone": "Asia/Shanghai",
+                "theme": "{tv_theme}",
+                "style": "1",
+                "locale": "zh_CN",
+                "toolbar_bg": "#f1f3f6",
+                "enable_publishing": false,
+                "allow_symbol_change": false,
+                "hide_top_toolbar": false,
+                "save_image": false,
+                "container_id": "tv-eth-chart",
+                "studies": [
+                    "MASimple@tv-basicstudies"
+                ]
+            }});
+            </script>
+        </div>
+        """
+        components.html(tv_html, height=450)
+
+        if _cached_df_display is not None and not _cached_df_display.empty:
+            _df = _cached_df_display
+            _tf_display = _t_key_display
+            _ticker_last = _ticker_data_display.get("last") if _ticker_data_display else None
+            _last_price_val = _ticker_last if _ticker_last else float(_df["close"].iloc[-1])
+            _prev_val = float(_df["close"].iloc[-2]) if len(_df) > 1 else _last_price_val
+            _chg = (_last_price_val - _prev_val) / _prev_val * 100 if _prev_val else 0
+            _hv = _ticker_data_display.get("high_24h", float(_df["high"].max())) if _ticker_data_display else float(_df["high"].max())
+            _lv = _ticker_data_display.get("low_24h", float(_df["low"].min())) if _ticker_data_display else float(_df["low"].min())
+            _ch24 = _ticker_data_display.get("change_24h") if _ticker_data_display else _chg
+
+            status_bar("自动刷新", [
+                ("数据源", "OKX · TradingView"),
+                ("周期", _friendly_tf(_tf_display)),
+                ("K 线数", str(len(_df))),
+                ("刷新间隔", f"{TIMEFRAME_REFRESH_S.get(_tf_display, 10)}s"),
+            ], state="ok")
+
+            with st.expander("📊 数据统计与市场详情", expanded=False):
+                _kpi_cols = st.columns(6)
+                with _kpi_cols[0]: render_metric_card("eth_price", _last_price_val)
+                with _kpi_cols[1]: render_metric_card("eth_high_24h", _hv)
+                with _kpi_cols[2]: render_metric_card("eth_low_24h", _lv)
+                with _kpi_cols[3]: render_metric_card("eth_volume_24h", float(_df["volume"].sum()))
+                with _kpi_cols[4]: render_metric_card("eth_change_24h", _ch24)
+                with _kpi_cols[5]: render_metric_card("eth_range_24h", f"${float(_df['low'].min()):,.2f} ~ ${float(_df['high'].max()):,.2f}")
+
+                st.divider()
+                _b = _ticker_data_display.get("bid") if _ticker_data_display else None
+                _a = _ticker_data_display.get("ask") if _ticker_data_display else None
+                _cols = st.columns(4)
+                with _cols[0]: st.metric("最新价", f"${_last_price_val:,.2f}", f"{_chg:+.2f}%" if abs(_chg) > 0.01 else None)
+                with _cols[1]: st.metric("买一价", f"${_b:,.2f}" if _b else "N/A")
+                with _cols[2]: st.metric("卖一价", f"${_a:,.2f}" if _a else "N/A")
+                with _cols[3]:
+                    _spread = (_a - _b) / _b * 100 if (_a and _b and _b) else 0
+                    st.metric("价差", f"{_spread:.4f}%" if _spread > 0 else "N/A")
+                _cp = ((_last_price_val - float(_df["close"].iloc[0])) / float(_df["close"].iloc[0]) * 100) if len(_df) > 1 else 0
+                _cols2 = st.columns(4)
+                with _cols2[0]: st.metric("总成交量 (时段)", f"{float(_df['volume'].sum()):,.0f}")
+                with _cols2[1]: st.metric("平均成交量", f"{float(_df['volume'].mean()):,.1f}")
+                with _cols2[2]: st.metric("期间涨跌幅", f"{_cp:+.2f}%" if len(_df) > 1 else "N/A", delta_color="normal" if _cp >= 0 else "inverse")
+                with _cols2[3]: st.metric("K 线数量", len(_df))
+
+            with st.expander("📄 查看原始 K 线数据"):
+                _dd = _df.copy()
+                _dd.index = _dd.index.strftime("%Y-%m-%d %H:%M:%S")
+                _dd = _dd.rename(columns={"open": "开盘", "high": "最高", "low": "最低", "close": "收盘", "volume": "成交量"})
+                st.dataframe(_dd.iloc[::-1], use_container_width=True)
+                st.download_button("📥 导出 CSV", _df.to_csv(index=True).encode("utf-8"), "eth_usdt_klines.csv", "text/csv", use_container_width=True)
+
+# ════════════════════════════════════════════════════════════════
+# DATA FRAGMENT — 仅获取数据写入 session_state，run_every 周期自行刷新
+# ════════════════════════════════════════════════════════════════
+
+refresh_interval_s = TIMEFRAME_REFRESH_S.get(tf_key, 5) if auto else None
+
+
+@st.fragment(run_every=refresh_interval_s)
+def _data_fragment():
+    """仅获取数据写入 session_state，由 run_every 周期自动刷新。
+    显示代码在 fragment 外，读取 session_state 渲染，刷新期间旧数据显示不变，不产生蒙版。
+    """
+    _tf_label = st.session_state.eth_timeframe
+    _t_key = TIMEFRAMES.get(_tf_label, "1d")
+    _d_count = st.session_state.eth_data_count
+    _sec_mode = _t_key == "1s"
+
+    # Ticker
+    try:
+        _ticker_data = fetch_ticker(cfg, symbol=ETH_SYMBOL)
+        st.session_state.eth_ticker = _ticker_data
+    except Exception:
+        if st.session_state.get("eth_data") is None:
+            st.warning("获取 ticker 失败")
+
+    # K 线
+    if _sec_mode:
+        from data.heartbeat_db import HeartbeatDB, is_collector_running, start_collector
+        if not is_collector_running():
+            ok = start_collector()
+            if ok:
+                _time.sleep(1.5)
+        _db = HeartbeatDB()
+        try:
+            _new_df = _db.get_second_candles(limit=_d_count)
+            if _new_df is not None and not _new_df.empty:
+                st.session_state.eth_data = _new_df
+        except Exception as e:
+            if st.session_state.get("eth_data") is None:
+                st.error(f"读取心跳数据失败: {e}")
+        finally:
+            _db.close()
+    else:
+        try:
+            _new_df = fetch_klines_with_agg(cfg, limit=_d_count, timeframe=_t_key, symbol=ETH_SYMBOL)
+            if _new_df is not None and not _new_df.empty:
+                st.session_state.eth_data = _new_df
+        except Exception as e:
+            if st.session_state.get("eth_data") is None:
+                st.error(f"获取数据失败: {e}")
+
+    st.session_state.eth_last_refresh = datetime.now().strftime("%H:%M:%S")
+
+
+# ════════════════════════════════════════════════════════════════
+# AI 多空分析 — 基于多维度数据的智能分析（默认折叠，展开使用）
+# ════════════════════════════════════════════════════════════════
+
+_ss("ai_analysis_result", None)
+_ss("ai_analysis_error", None)
+_ss("ai_news", None)
+_ss("ai_chat_context", None)
+_ss("ai_chat_messages", [])
+_ss("ai_chat_loading", False)
+
+with st.expander("🤖 AI 多空分析（技术面 + 新闻面综合判断）", expanded=False):
+    st.markdown(
+        "基于K线数据、成交量、历史走势、关联币种表现及最新新闻政策综合判断，"
+        "点击按钮后自动采集数据+新闻并调用AI给出多空建议。"
+    )
+
+    btn_cols = st.columns([3, 1.5, 1.5])
+    with btn_cols[1]:
+        analyze_btn = st.button("📊 开始分析", type="primary", use_container_width=True)
+    with btn_cols[2]:
+        if st.button("🗑 清除结果", use_container_width=True):
+            st.session_state.ai_analysis_result = None
+            st.session_state.ai_analysis_error = None
+            st.session_state.ai_news = None
+            st.session_state.ai_chat_context = None
+            st.session_state.ai_chat_messages = []
+            st.session_state.ai_chat_loading = False
+            st.rerun()
+
+    # ── 执行分析 ──
+    if analyze_btn:
+        st.session_state.ai_analysis_result = None
+        st.session_state.ai_analysis_error = None
+        st.session_state.ai_chat_loading = False
+        try:
+            with st.status("🤖 正在分析…", expanded=True) as _status:
+                _status.update(label="📡 获取 ETH 行情数据…")
+                _tk = fetch_ticker(cfg, symbol="ETH-USDT")
+
+                _status.update(label="📊 获取技术指标数据…")
+                _k15 = fetch_klines_with_agg(cfg, limit=30, timeframe="15m", symbol="ETH-USDT")
+                _k1h = fetch_klines_with_agg(cfg, limit=20, timeframe="1h", symbol="ETH-USDT")
+                _k1d = fetch_klines_with_agg(cfg, limit=60, timeframe="1d", symbol="ETH-USDT")
+
+                _status.update(label="🔄 获取关联币种行情…")
+                _btc = fetch_ticker(cfg, symbol="BTC-USDT")
+                _sol = fetch_ticker(cfg, symbol="SOL-USDT")
+                _doge = fetch_ticker(cfg, symbol="DOGE-USDT")
+
+                _status.update(label="📰 采集新闻与政策信息…")
+                _news = _fetch_crypto_news()
+                st.session_state.ai_news = _news
+
+                # 保存对话上下文（市场数据快照）
+                _mk = (
+                    f"### 实时行情\n{_ticker_summary('ETH', _tk)}\n\n"
+                    f"{_summarize_klines(_k15, '短期(15分钟)')}\n"
+                    f"{_summarize_klines(_k1h, '中期(1小时)')}\n"
+                    f"{_summarize_klines(_k1d, '长期(日线)')}\n\n"
+                    f"### 关联币种\n{_ticker_summary('BTC', _btc)}\n"
+                    f"{_ticker_summary('SOL', _sol)}\n"
+                    f"{_ticker_summary('DOGE', _doge)}"
+                )
+                st.session_state.ai_chat_context = {
+                    "market_summary": _mk,
+                    "news": _news,
+                    "analysis_result": None,
+                }
+                st.session_state.ai_chat_messages = []
+
+                _status.update(label="🧠 AI 正在综合分析（技术面+基本面）…")
+                _result = _call_ai_analysis(
+                    ticker=_tk,
+                    klines_15m=_k15,
+                    klines_1h=_k1h,
+                    klines_1d=_k1d,
+                    btc_ticker=_btc,
+                    sol_ticker=_sol,
+                    doge_ticker=_doge,
+                    cfg=cfg,
+                    news=_news,
+                )
+                st.session_state.ai_analysis_result = _result
+                if st.session_state.get("ai_chat_context"):
+                    st.session_state.ai_chat_context["analysis_result"] = _result
+
+                _status.update(label="✅ 分析完成", state="complete")
+        except Exception as e:
+            st.session_state.ai_analysis_error = str(e)
+        st.rerun()
+
+    # ── 错误状态 ──
+    _err = st.session_state.get("ai_analysis_error")
+    if _err:
+        st.error(f"❌ 分析失败: {_err}")
+
+    # ── 结果显示 ──
+    _raw_news = st.session_state.get("ai_news", [])
+    _res = st.session_state.get("ai_analysis_result")
+    if _res:
+        _dir = _res.get("direction", "neutral")
+        _conf = _res.get("confidence", 0)
+        if _dir == "long":
+            _dir_color = "#059669"
+            _dir_icon = "📈"
+            _dir_text = "看多"
+        elif _dir == "short":
+            _dir_color = "#dc2626"
+            _dir_icon = "📉"
+            _dir_text = "看空"
+        else:
+            _dir_color = "#64748b"
+            _dir_icon = "⚖️"
+            _dir_text = "中性"
+        _conf_color = "#059669" if _conf >= 70 else "#f59e0b" if _conf >= 40 else "#94a3b8"
+        _ev_html = "".join(
+            f'<li style="margin-bottom:0.3rem;">{_sanitize_ai_text(e)}</li>' for e in _res.get("key_evidence", []))
+        _risk_html = "".join(
+            f'<li style="margin-bottom:0.3rem;">{_sanitize_ai_text(r)}</li>' for r in _res.get("risk_warnings", []))
+
+        _fund_news_html = ""
+        if _raw_news:
+            _news_items = "".join(
+                f'<li style="margin-bottom:0.25rem;color:var(--text-muted);font-size:0.85rem;">'
+                f'<span style="color:var(--text-primary);font-weight:500;">[{_sanitize_ai_text(n["source"])}]</span>'
+                f'<span style="color:var(--text-muted);font-size:0.75rem;">{_fmt_relative_time(n.get("timestamp", ""))}</span> '
+                f'{_sanitize_ai_text(n["title"])}</li>'
+                for n in _raw_news
+            )
+            _fund_news_html = "\n".join([
+                '<details style="margin-top:0.75rem;">',
+                '<summary style="color:var(--text-muted);font-size:0.85rem;cursor:pointer;">',
+                f'  📡 参考新闻（{len(_raw_news)}条）',
+                '</summary>',
+                f'<ul style="margin:0.5rem 0 0 0;padding-left:1.2rem;">{_news_items}</ul>',
+                '</details>',
+            ])
+
+        st.markdown(f"""
+        <div style="border:1px solid var(--border);border-radius:12px;padding:1.25rem;background:var(--bg-card);margin-top:0.5rem;">
+            <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;">
+                <span style="font-size:1.8rem;">{_dir_icon}</span>
+                <span style="font-size:1.5rem;font-weight:700;color:{_dir_color};">{_dir_text}</span>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:0.5rem;">
+                    <span style="color:var(--text-muted);font-size:0.85rem;">信心指数</span>
+                    <span style="font-size:1.3rem;font-weight:700;color:{_conf_color};">{_conf}%</span>
+                </div>
+            </div>
+            <p style="color:var(--text-secondary);font-size:0.95rem;margin-bottom:1rem;">{_sanitize_ai_text(_res.get("summary", ""))}</p>
+            <div style="margin-bottom:1rem;">
+                <p style="font-weight:600;color:var(--text-primary);margin-bottom:0.4rem;">📌 关键依据</p>
+                <ul style="margin:0;padding-left:1.2rem;color:var(--text-secondary);font-size:0.9rem;">{_ev_html}</ul>
+            </div>
+            <div style="margin-bottom:1rem;">
+                <p style="font-weight:600;color:var(--text-primary);margin-bottom:0.4rem;">⚠️ 风险提示</p>
+                <ul style="margin:0;padding-left:1.2rem;color:var(--red);font-size:0.9rem;">{_risk_html}</ul>
+            </div>
+            <div style="display:flex;gap:1rem;flex-wrap:wrap;">
+                <div style="flex:1;min-width:200px;background:var(--bg-card-hover);border-radius:8px;padding:0.75rem;">
+                    <p style="font-weight:600;color:var(--text-primary);font-size:0.85rem;margin-bottom:0.3rem;">🔬 技术面</p>
+                    <p style="color:var(--text-secondary);font-size:0.85rem;margin:0;">{_sanitize_ai_text(_res.get("technical_analysis", "")) or "—"}</p>
+                </div>
+                <div style="flex:1;min-width:200px;background:var(--bg-card-hover);border-radius:8px;padding:0.75rem;">
+                    <p style="font-weight:600;color:var(--text-primary);font-size:0.85rem;margin-bottom:0.3rem;">🌊 市场情绪</p>
+                    <p style="color:var(--text-secondary);font-size:0.85rem;margin:0;">{_sanitize_ai_text(_res.get("market_sentiment", "")) or "—"}</p>
+                </div>
+                <div style="flex:1;min-width:200px;background:var(--bg-card-hover);border-radius:8px;padding:0.75rem;">
+                    <p style="font-weight:600;color:var(--text-primary);font-size:0.85rem;margin-bottom:0.3rem;">📰 基本面</p>
+                    <p style="color:var(--text-secondary);font-size:0.85rem;margin:0;">{_sanitize_ai_text(_res.get("fundamental_analysis", "")) or "—"}</p>
+                </div>
+            </div>
+            {_fund_news_html}
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── AI 信号 → 交易执行（已迁移至「AI 交易」页）──
+        st.page_link(
+            "page_modules/11_🤖_AI_Trading.py",
+            label="⚡ 想让 AI 按信号自动交易？前往「AI 交易」页 →",
+        )
+
+    # ── 💬 AI 追问对话 ──
+    if _res:
+        st.markdown("---")
+        st.markdown("#### 💬 追问分析")
+
+        chat_container = st.container()
+        with chat_container:
+            for i, msg in enumerate(st.session_state.ai_chat_messages):
+                with st.chat_message(msg["role"]):
+                    if msg["role"] == "assistant" and i == len(st.session_state.ai_chat_messages) - 1:
+                        # 最新回答 — 带滑入动效
+                        st.markdown(
+                            f'<div class="fade-in-answer">{_sanitize_ai_text(msg["content"])}</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(_sanitize_ai_text(msg["content"]))
+
+        if st.session_state.ai_chat_loading:
+            with st.chat_message("assistant"):
+                st.markdown(
+                    '<div style="display:flex;align-items:center;gap:8px;">'
+                    '<span>🤔</span>'
+                    '<span class="typing-indicator">'
+                    '<span class="dot"></span>'
+                    '<span class="dot"></span>'
+                    '<span class="dot"></span>'
+                    '</span>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
+        user_input = st.chat_input("对当前市场分析提问…（例如：为什么看空？ETH支撑位在哪？）",
+                                   disabled=st.session_state.ai_chat_loading)
+        if user_input and not st.session_state.ai_chat_loading:
+            st.session_state.ai_chat_messages.append(
+                {"role": "user", "content": user_input}
+            )
+            st.session_state.ai_chat_loading = True
+            st.rerun()
+
+        # 两步渲染：问题先展示，回答好了再滑入
+        if st.session_state.ai_chat_loading and st.session_state.ai_chat_messages and st.session_state.ai_chat_messages[-1]["role"] == "user":
+            pending_question = st.session_state.ai_chat_messages[-1]["content"]
+            context = st.session_state.get("ai_chat_context")
+            answer = _call_ai_chat(
+                pending_question, context,
+                st.session_state.ai_chat_messages, cfg,
+            )
+            st.session_state.ai_chat_messages.append(
+                {"role": "assistant", "content": answer}
+            )
+            st.session_state.ai_chat_loading = False
+            st.rerun()
+
+
+# ════════════════════════════════════════════════════════════════
+# DATA FRAGMENT — 放在页面末尾，周期获取数据写入 session_state
+# ════════════════════════════════════════════════════════════════
+_data_fragment()

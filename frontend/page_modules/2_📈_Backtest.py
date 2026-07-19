@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -18,6 +19,7 @@ from frontend.components.charts import (
     equity_curve_chart, drawdown_chart, signal_price_chart,
     pnl_distribution_chart, cumulative_pnl_chart,
 )
+from frontend.components.tv_lightweight import build_kline_tv_html
 from frontend.components.metrics_display import render_metric_grid
 from strategies.base import get_available_strategies
 
@@ -91,6 +93,55 @@ def _get_data():
             st.info("将使用回测引擎内置的数据")
             return None
     return None  # 让 runner 用 get_mock_data()
+
+
+def _render_heuristic_analysis(metrics: dict, strategy_name: str):
+    """本地启发式回测分析（原 7_🤖_AgentAnalysis 页并入，不调用任何外部 API）"""
+    warnings = []
+
+    sharpe = metrics.get("sharpe", 0)
+    if sharpe > 3:
+        warnings.append("⚠️ **Sharpe > 3**: 可能存在过拟合，建议用 Walk-Forward 验证")
+    elif sharpe > 2:
+        warnings.append("✅ Sharpe > 2: 表现优秀")
+    elif sharpe > 1:
+        warnings.append("👍 Sharpe > 1: 表现良好")
+    else:
+        warnings.append("⚠️ Sharpe < 1: 策略风险调整后收益偏低")
+
+    win_rate = metrics.get("win_rate", 0)
+    if win_rate > 80:
+        warnings.append("⚠️ **胜率 > 80%**: 对趋势跟踪策略来说偏高，需验证样本外表现")
+    elif win_rate < 40:
+        warnings.append("📉 胜率偏低，但若盈亏比较高则可以接受")
+
+    total_trades = metrics.get("total_trades", 0)
+    if total_trades < 20:
+        warnings.append("⚠️ **交易次数 < 20**: 统计样本不足，结论置信度低")
+    elif total_trades < 50:
+        warnings.append("📊 交易次数适中，建议增加更多数据")
+
+    max_dd = metrics.get("max_drawdown_pct", 0)
+    if max_dd < 2:
+        warnings.append("⚠️ **最大回撤 < 2%**: 异常偏低，请检查回测逻辑")
+    elif max_dd > 20:
+        warnings.append(f"🔴 **最大回撤 {max_dd:.1f}%**: 风险较高，建议缩小仓位")
+
+    total_return = metrics.get("total_return_pct", 0)
+    if total_return > 500:
+        warnings.append("⚠️ **收益 > 500%**: 极度异常，请检查是否有计算错误")
+    elif total_return > 100:
+        warnings.append("🔥 收益较高，但需确认是否包含幸存者偏差")
+
+    if not warnings:
+        warnings.append("✅ 所有基础检查通过")
+
+    for w in warnings:
+        st.markdown(f"- {w}")
+    st.caption(
+        "改进方向: ① 滚动优化页做参数扫描与样本外验证 ② 仪表盘对比多策略 "
+        "③ 模拟交易页检查风控配置。本分析由本地启发式规则生成，不调用 AI API。"
+    )
 
 
 # ============ Run Backtest ============
@@ -177,6 +228,10 @@ else:
     with extra_cols[3]:
         st.metric("平均持仓", f"{metrics.get('avg_hold_hours', 0):.1f}h")
 
+    # ============ 智能分析（本地启发式） ============
+    with st.expander("🤖 智能分析（本地启发式规则）", expanded=False):
+        _render_heuristic_analysis(metrics, selected_strategy)
+
     st.divider()
 
     # ============ Charts ============
@@ -198,11 +253,30 @@ else:
             st.info("暂无回撤数据")
 
     with tab3:
-        signals = result.get("signals", [])
-        if signals:
-            # 使用回测真实 K 线收盘价序列定位信号
-            price_data = result.get("price_data", [])
-            fig = signal_price_chart(price_data, signals, title=f"{selected_strategy} - 信号标记", theme=st.session_state.get("theme_mode", "light"))
+        price_data = result.get("price_data", [])
+        if price_data and "open" in price_data[0]:
+            # TradingView K 线 + 成交标记（入场 B / 出场 S），可拖动查看全部历史
+            _bt_df = pd.DataFrame(price_data)
+            _bt_df["time"] = pd.to_datetime(_bt_df["time"])
+            _bt_df = _bt_df.set_index("time")
+            _bt_markers = []
+            for _t in result.get("trades", []):
+                _bt_markers.append({"time": _t["entry_time"], "side": "buy", "price": _t["entry_price"]})
+                _bt_markers.append({"time": _t["exit_time"], "side": "sell", "price": _t["exit_price"]})
+            components.html(
+                build_kline_tv_html(
+                    _bt_df,
+                    trades=_bt_markers,
+                    symbol=result.get("symbol", cfg.trading.symbol),
+                    timeframe=st.session_state.get("bt_data_tf", "1h"),
+                    theme=st.session_state.get("theme_mode", "light"),
+                    height=520,
+                ),
+                height=536,
+            )
+        elif result.get("signals"):
+            # 旧格式结果（无 OHLC）回退 plotly 折线图
+            fig = signal_price_chart(price_data, result["signals"], title=f"{selected_strategy} - 信号标记", theme=st.session_state.get("theme_mode", "light"))
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("暂无信号数据")

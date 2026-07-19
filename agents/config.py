@@ -4,6 +4,7 @@ Agent 系统配置 — 三 Agent 的独立参数
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -57,6 +58,17 @@ class AgentSystemConfig:
     agent3_idle_decision_interval_seconds: int = 900  # 空闲定时决策：15分钟（原 600）
     agent3_idle_decision_price_change_pct: float = 0.5  # 空闲决策触发所需的最小价格变化 %
 
+    # ── 规则决策器（RuleDecider，替代 DeepSeek 实时决策）──
+    # 2026-07 参数扫描（OKX ETH 1h）：mc 0.6→0.8 落入收益高原区（与 th=0.4 等效），
+    # 过滤低一致性共振信号，样本内 9→7 笔、胜率 33%→43%、收益由负转正
+    agent3_rule_score_threshold: float = 0.3   # 综合评分超过 ±此值才交易
+    agent3_rule_min_confidence: float = 0.8    # 方向一致性信心下限（0~1）
+    agent3_rule_base_position_pct: float = 50.0  # 基础仓位 %（按信心缩放，钳位 5~100）
+
+    # ── LLM 影子决策（D12：与规则决策并行记录对比，不参与执行）──
+    llm_shadow_enabled: bool = False
+    llm_shadow_min_interval_s: int = 300  # 影子调用最小间隔（成本控制）
+
     # ── 手续费率（OKX 标准费率）──
     # Spot: maker 0.08%, taker 0.10%（ETH-USDT Group 1）
     taker_fee_rate: float = 0.001    # 0.10%
@@ -86,7 +98,19 @@ class AgentSystemConfig:
 
     # 资金费率
     agent2_funding_rate_enabled: bool = True
-    agent2_funding_rate_high_threshold: float = 0.01  # 0.01% = 高费率信号
+    agent2_funding_rate_high_threshold: float = 0.01  # 高费率信号阈值（百分数：0.01 = 0.01%）
+
+    # OI 持仓量（OKX 永续，事件触发层）
+    agent2_oi_enabled: bool = True
+    agent2_oi_min_change_pct: float = 0.5  # |ΔOI%| 低于此值视为噪声，不入分布不触发
+
+    # 事件触发层：历史分位极端检测（资金费率/吃单比/OI 共用）
+    agent2_percentile_enabled: bool = True
+    agent2_percentile_window: int = 2016       # 300s × 2016 ≈ 7 天滚动窗口
+    agent2_percentile_min_samples: int = 200   # ≈ 17h 预热，不足不判极端
+    agent2_percentile_upper: float = 0.95
+    agent2_percentile_lower: float = 0.05
+    agent2_percentile_state_path: str = "data/onchain_percentiles.json"
 
     # ── WebSocket ──
     ws_symbol: str = "ETH-USDT"
@@ -161,7 +185,9 @@ class AgentSystemConfig:
     report_dir: str = "data/reports"
     report_min_trades_for_analysis: int = 1  # 最少几笔交易才做 AI 分析
     serverchan_enabled: bool = False
-    serverchan_sendkey: str = ""
+    serverchan_sendkey: str = field(
+        default_factory=lambda: os.getenv("SERVERCHAN_SENDKEY", "")
+    )
 
     # ── Agent 1（新增可调参数，原写死在 change_detector.py）──
     agent1_change_cooldown: float = 60.0
@@ -181,13 +207,6 @@ class AgentSystemConfig:
     # SignalAligner（信号对齐）
     signal_aligner_enabled: bool = True
     signal_aligner_conflict_threshold: float = 0.5
-
-    # ── ParamAdapter（参数自适应，被 Agent 4 替代但保留兼容）──
-    param_adapter_enabled: bool = False
-    param_adapter_min_trades_for_adjust: int = 3
-    param_adapter_adjust_interval_hours: int = 24
-    param_adapter_max_trades_range: list = field(default_factory=lambda: [5, 20])
-    param_adapter_win_rate_target: float = 0.50
 
     # ── 市场模式（决定 TradeExecutor 使用现货还是合约模拟）──
     market_mode: str = "futures"  # "spot" | "futures"

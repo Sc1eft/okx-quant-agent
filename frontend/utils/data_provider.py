@@ -4,8 +4,10 @@ Handles fetching K-line data from OKX public API (no API key required).
 """
 
 import sys
+import time
 from pathlib import Path
 from typing import Optional
+import httpx
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -13,6 +15,23 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import Config
+
+
+def _retry_429(fn):
+    """OKX 限频（429）本地重试。
+
+    OKXClient._request 只重试网络错误，不重试 HTTP 状态码；
+    深度分页容易撞上 20次/2s 的限频（尤其前端心跳在同 IP 轮询时）。
+    """
+    for wait in (0, 2, 4, 8, 16, 30):
+        if wait:
+            time.sleep(wait)
+        try:
+            return fn()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 429:
+                raise
+    raise RuntimeError("OKX 限频（429）重试耗尽")
 
 
 def fetch_okx_data(
@@ -25,7 +44,8 @@ def fetch_okx_data(
 
     Args:
         cfg: Config 实例
-        limit: K 线数量（最多 300）
+        limit: K 线数量；/market/candles 仅保留最近 1440 根，
+            超出部分自动改用 /history-candles 继续向历史分页
         timeframe: 时间周期，为空则使用 cfg.trading.primary_timeframe
         symbol: 交易对，为空则使用 cfg.trading.symbol
 
@@ -40,18 +60,41 @@ def fetch_okx_data(
     sym = symbol or cfg.trading.symbol
     client = OKXClient(cfg.exchange)
 
+    # 分页拉取：OKX 单次上限 300 根，after=当前最旧 ts 可向历史翻页
+    all_raw: list[dict] = []
+    after = None
     try:
-        raw = client.get_klines(sym, tf, limit=min(limit, 300))
+        # 阶段 1: 最近窗口 —— /market/candles 只保留最近 1440 根
+        while len(all_raw) < limit:
+            want = min(limit - len(all_raw), 300)
+            batch = _retry_429(lambda: client.get_klines(sym, tf, limit=want, after=after))
+            if not batch:
+                break
+            all_raw.extend(batch)
+            after = min(int(k["timestamp"]) for k in batch)
+            if len(batch) < want:
+                break  # 到达 /candles 1440 根窗口边界（或历史耗尽）
+        # 阶段 2: 历史窗口 —— 超出 1440 根的部分走 /history-candles（单页 100）
+        while len(all_raw) < limit:
+            want = min(limit - len(all_raw), 100)
+            batch = _retry_429(lambda: client.get_history_klines(sym, tf, limit=want, after=after))
+            if not batch:
+                break
+            all_raw.extend(batch)
+            after = min(int(k["timestamp"]) for k in batch)
+            if len(batch) < want:
+                break  # 历史数据耗尽
+            time.sleep(0.1)  # 节流，避开 20次/2s 限频
     except Exception as e:
         client.close()
         raise RuntimeError(f"网络波动 - 从 OKX 获取数据失败 ({sym} {tf}): {e}")
 
     client.close()
 
-    if not raw:
+    if not all_raw:
         raise RuntimeError("OKX 返回了空数据")
 
-    df = pd.DataFrame(raw)
+    df = pd.DataFrame(all_raw[:limit])
     # OKX 返回的时间戳是 UTC 毫秒 → 转为 Asia/Shanghai 时区
     # pandas ≥3.0 中 Series.tz_convert() 需要 DatetimeIndex，用 .dt.tz_convert() 操作值
     df["timestamp"] = (
@@ -60,6 +103,7 @@ def fetch_okx_data(
     )
     df = df.set_index("timestamp")
     df = df.sort_index()  # OKX 返回 newest-first，统一升序
+    df = df[~df.index.duplicated(keep="first")]  # 分页边界去重
     df = df.rename(columns={"vol": "volume"})
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     df.index.name = "timestamp"

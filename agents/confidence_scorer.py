@@ -19,6 +19,97 @@ from agents.config import AgentSystemConfig
 logger = logging.getLogger("confidence_scorer")
 
 
+def score_signals(
+    signals: list[dict],
+    directions: dict[str, float],
+    tf_weights: dict[str, float],
+) -> dict[str, Any]:
+    """纯函数：将一组信号字典聚合为综合方向性评分。
+
+    供 ConfidenceScorer（实时事件）、RuleDecider（规则决策器）和
+    strategies/macd_agent（回测）三处共用，保证实盘与回测评分一致。
+
+    Args:
+        signals: [{"signal": str, "timeframe": str, "confidence": float(0~1)}]
+        directions: 信号类型 → 方向值 [-1.0, +1.0]
+        tf_weights: 时间帧 → 权重
+
+    Returns:
+        与 ConfidenceScorer.compute 相同的结构：
+        composite_score / composite_confidence / individual_scores /
+        timeframe_breakdown / signal_count
+    """
+    scores: list[dict] = []
+    tf_scores: dict[str, list[float]] = {}
+
+    for s in signals:
+        sig = s.get("signal", "")
+        tf = s.get("timeframe", "")
+        sig_conf = float(s.get("confidence", 0.5))
+
+        direction = directions.get(sig, 0.0)
+        tf_weight = tf_weights.get(tf, 0.3)
+
+        if direction == 0.0:
+            continue  # 中性信号或未知类型不参与计算
+
+        weighted = direction * sig_conf * tf_weight
+        scores.append({
+            "signal": sig,
+            "timeframe": tf,
+            "direction": direction,
+            "signal_confidence": sig_conf,
+            "tf_weight": tf_weight,
+            "weighted_score": round(weighted, 4),
+        })
+
+        if tf not in tf_scores:
+            tf_scores[tf] = []
+        tf_scores[tf].append(direction * sig_conf)
+
+    if not scores:
+        return {
+            "composite_score": 0.0,
+            "composite_confidence": 0.0,
+            "raw_score": 0.0,
+            "individual_scores": [],
+            "timeframe_breakdown": {},
+            "signal_count": 0,
+        }
+
+    total_weighted = sum(s["weighted_score"] for s in scores)
+    # 分子是有符号的, 分母是无符号的归一化权重, 使得结果在 [-1, +1]
+    abs_weights = sum(
+        abs(s["direction"]) * s["signal_confidence"] * s["tf_weight"]
+        for s in scores
+    )
+    composite_score = total_weighted / abs_weights if abs_weights > 0 else 0.0
+    composite_score = max(-1.0, min(1.0, composite_score))
+
+    # 一致性信心: 信号越一致→越高
+    # 如果所有信号同方向, 接近 1; 互相抵消则接近 0
+    max_possible = abs_weights
+    agreement_ratio = abs(total_weighted) / max_possible if max_possible > 0 else 0.0
+    composite_confidence = round(agreement_ratio * 0.9 + 0.1, 4)  # 保底 0.1
+    composite_confidence = min(1.0, composite_confidence)
+
+    # 各时间帧均分
+    tf_breakdown = {}
+    for tf, vals in tf_scores.items():
+        tf_breakdown[tf] = round(sum(vals) / len(vals), 4)
+
+    return {
+        "composite_score": round(composite_score, 4),
+        "composite_confidence": composite_confidence,
+        # 未归一化的加权和：反映信号强度本身（单条弱信号≈0，多周期共振→绝对值大），
+        # 供规则决策器做入场阈值判断；composite_score 只反映方向一致性
+        "raw_score": round(total_weighted, 4),
+        "individual_scores": scores,
+        "timeframe_breakdown": tf_breakdown,
+        "signal_count": len(scores),
+    }
+
+
 class ConfidenceScorer:
     """多周期信心分计算器
 
@@ -45,71 +136,13 @@ class ConfidenceScorer:
                 timeframe_breakdown: dict[str, float]  各时间帧平均分
                 signal_count:       int                参与计算的信号数
         """
-        scores: list[dict] = []
-        tf_scores: dict[str, list[float]] = {}
-
-        for ev in events:
-            if ev.source != "agent1" or not isinstance(ev.data, dict):
-                continue
-
-            sig = ev.data.get("signal", "")
-            tf = ev.data.get("timeframe", "")
-            sig_conf = ev.confidence  # 0~1, 来自 ChangeDetector
-
-            direction = self._signal_directions.get(sig, 0.0)
-            tf_weight = self._tf_weights.get(tf, 0.3)
-
-            if direction == 0.0:
-                continue  # 中性信号或未知类型不参与计算
-
-            weighted = direction * sig_conf * tf_weight
-            scores.append({
-                "signal": sig,
-                "timeframe": tf,
-                "direction": direction,
-                "signal_confidence": sig_conf,
-                "tf_weight": tf_weight,
-                "weighted_score": round(weighted, 4),
-            })
-
-            if tf not in tf_scores:
-                tf_scores[tf] = []
-            tf_scores[tf].append(direction * sig_conf)
-
-        if not scores:
-            return {
-                "composite_score": 0.0,
-                "composite_confidence": 0.0,
-                "individual_scores": [],
-                "timeframe_breakdown": {},
-                "signal_count": 0,
+        signal_dicts = [
+            {
+                "signal": ev.data.get("signal", ""),
+                "timeframe": ev.data.get("timeframe", ""),
+                "confidence": ev.confidence,
             }
-
-        total_weighted = sum(s["weighted_score"] for s in scores)
-        # 分子是有符号的, 分母是无符号的归一化权重, 使得结果在 [-1, +1]
-        abs_weights = sum(
-            abs(s["direction"]) * s["signal_confidence"] * s["tf_weight"]
-            for s in scores
-        )
-        composite_score = total_weighted / abs_weights if abs_weights > 0 else 0.0
-        composite_score = max(-1.0, min(1.0, composite_score))
-
-        # 一致性信心: 信号越一致→越高
-        # 如果所有信号同方向, 接近 1; 互相抵消则接近 0
-        max_possible = abs_weights
-        agreement_ratio = abs(total_weighted) / max_possible if max_possible > 0 else 0.0
-        composite_confidence = round(agreement_ratio * 0.9 + 0.1, 4)  # 保底 0.1
-        composite_confidence = min(1.0, composite_confidence)
-
-        # 各时间帧均分
-        tf_breakdown = {}
-        for tf, vals in tf_scores.items():
-            tf_breakdown[tf] = round(sum(vals) / len(vals), 4)
-
-        return {
-            "composite_score": round(composite_score, 4),
-            "composite_confidence": composite_confidence,
-            "individual_scores": scores,
-            "timeframe_breakdown": tf_breakdown,
-            "signal_count": len(scores),
-        }
+            for ev in events
+            if ev.source == "agent1" and isinstance(ev.data, dict)
+        ]
+        return score_signals(signal_dicts, self._signal_directions, self._tf_weights)

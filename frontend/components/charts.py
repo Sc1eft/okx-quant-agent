@@ -121,6 +121,31 @@ def equity_curve_chart(
     return fig
 
 
+def multi_equity_chart(
+    equity_map: Dict[str, List[Dict[str, float]]],
+    title: str = "权益曲线对比",
+    theme: str = "light",
+) -> go.Figure:
+    """多策略权益曲线叠加（每个 slot 一条 trace，按 time 对齐）。"""
+    fig = go.Figure()
+    colors = [GREEN, BLUE, AMBER, PURPLE, RED]
+
+    for i, (label, curve) in enumerate(equity_map.items()):
+        if not curve:
+            continue
+        df = pd.DataFrame(curve)
+        fig.add_trace(go.Scatter(
+            x=df["time"], y=df["equity"],
+            mode="lines",
+            name=label,
+            line=dict(color=colors[i % len(colors)], width=2),
+        ))
+
+    fig.update_layout(**_default_layout(title=title, theme=theme))
+    _update_axes(fig, theme=theme)
+    return fig
+
+
 def drawdown_chart(
     equity_curve: List[Dict[str, float]],
     title: str = "回撤曲线",

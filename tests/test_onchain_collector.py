@@ -45,6 +45,10 @@ def config():
         agent2_taker_volume_buy_ratio_threshold=0.6,
         agent2_funding_rate_enabled=True,
         agent2_funding_rate_high_threshold=0.01,
+        # OI 默认关：生产默认为开，但 test_run_disabled_modules 要求"全禁用即无协程"
+        agent2_oi_enabled=False,
+        # 测试默认关闭分位层，避免把测试分布写进生产状态文件
+        agent2_percentile_enabled=False,
     )
 
 
@@ -454,3 +458,162 @@ class TestAgent2WithOnchain:
         event_bus = EventBus()
         agent = Agent2(config=config, event_bus=event_bus, okx_client=MagicMock())
         assert agent._onchain is None
+
+
+# ── 事件触发层：分位极端 + OI 监控 ──
+
+def _pct_config(tmp_path):
+    """启用分位检测的 config：小窗口快速预热，状态文件指向 tmp（不碰生产数据）"""
+    return AgentSystemConfig(
+        agent2_percentile_enabled=True,
+        agent2_percentile_window=50,
+        agent2_percentile_min_samples=5,
+        agent2_percentile_state_path=str(tmp_path / "pct.json"),
+        agent2_oi_enabled=True,
+        agent2_oi_min_change_pct=0.5,
+    )
+
+
+def _drain_b(event_bus) -> list:
+    """非阻塞掏空 Queue B"""
+    out = []
+    while event_bus.qsize_b():
+        out.append(event_bus.queue_b.get_nowait())
+    return out
+
+
+class TestPercentileTrigger:
+    @pytest.mark.asyncio
+    async def test_taker_extreme_event(self, tmp_path):
+        """吃单比突破历史 P95 → 高优 extreme 事件（去抖不拦截）"""
+        event_bus = EventBus()
+        okx = _mock_okx_client()
+        collector = OnchainCollector(
+            okx_client=okx, config=_pct_config(tmp_path),
+            event_bus=event_bus, http_client=_mock_http_client(),
+        )
+        # 预热：买方占比在 0.50~0.525 内震荡（单调递增会自己成为新高=P95 极端，
+        # 必须用「内部震荡」序列；变化 <0.05 被去抖，但分布照常累计）
+        for i, r in enumerate([0.50, 0.52, 0.505, 0.525, 0.51,
+                               0.515, 0.50, 0.52, 0.505, 0.515]):
+            okx.get_taker_volume.return_value = {
+                "buy_vol_ccy": str(r * 100), "sell_vol_ccy": str((1 - r) * 100),
+                "buy_vol": "1", "sell_vol": "1", "ts": str(i),
+            }
+            await collector._fetch_and_push_taker()
+        assert collector._stats["extreme_events"] == 0
+
+        # 极端：买方占比 0.75（远高于 0.50~0.545 的分布 → rank=1.0 ≥ P95）
+        okx.get_taker_volume.return_value = {
+            "buy_vol_ccy": "75", "sell_vol_ccy": "25",
+            "buy_vol": "1", "sell_vol": "1", "ts": "x",
+        }
+        await collector._fetch_and_push_taker()
+
+        assert collector._stats["extreme_events"] == 1
+        events = _drain_b(event_bus)
+        assert events, "极端事件应突破去抖被推送"
+        ev = events[-1]
+        assert ev.source == "agent2_taker"
+        assert ev.urgency == "high"
+        assert ev.data["extreme"] is True
+        assert ev.data["sentiment"] == "bullish"
+
+    @pytest.mark.asyncio
+    async def test_oi_extreme_event(self, tmp_path):
+        """OI 激增突破 P95 → agent2_oi 高优事件，方向跟随吃单比"""
+        event_bus = EventBus()
+        okx = _mock_okx_client()
+        collector = OnchainCollector(
+            okx_client=okx, config=_pct_config(tmp_path),
+            event_bus=event_bus, http_client=_mock_http_client(),
+        )
+        cur = 100000.0
+        okx.get_open_interest.return_value = {
+            "oi": str(cur), "oi_ccy": "", "oi_usd": "", "ts": "0",
+        }
+        await collector._fetch_and_push_oi()  # 首个样本只建基准
+        assert event_bus.qsize_b() == 0
+
+        # 预热：±0.5~0.7% 内部震荡（单调或创新低会自触发 P95/P5，必须内部震荡；
+        # ≥0.5 噪声线才入分布）
+        for c in [0.6, -0.6, 0.7, -0.7, 0.55, -0.55, 0.65, -0.65, 0.5, -0.5]:
+            cur *= 1 + c / 100
+            okx.get_open_interest.return_value = {
+                "oi": str(cur), "oi_ccy": "", "oi_usd": "", "ts": "x",
+            }
+            await collector._fetch_and_push_oi()
+        assert collector._stats["extreme_events"] == 0
+
+        # 极端：+3% 激增；吃单比 0.55（买方主导）→ 新多进场 = bullish
+        collector._last_taker_ratio = 0.55
+        cur *= 1.03
+        okx.get_open_interest.return_value = {
+            "oi": str(cur), "oi_ccy": "", "oi_usd": "", "ts": "y",
+        }
+        await collector._fetch_and_push_oi()
+
+        assert collector._stats["extreme_events"] == 1
+        events = _drain_b(event_bus)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.source == "agent2_oi"
+        assert ev.urgency == "high"
+        assert ev.data["extreme"] == "high"
+        assert ev.data["sentiment"] == "bullish"
+
+    @pytest.mark.asyncio
+    async def test_oi_plunge_is_neutral(self, tmp_path):
+        """OI 骤降（去杠杆）→ 事件方向中性"""
+        event_bus = EventBus()
+        okx = _mock_okx_client()
+        collector = OnchainCollector(
+            okx_client=okx, config=_pct_config(tmp_path),
+            event_bus=event_bus, http_client=_mock_http_client(),
+        )
+        cur = 100000.0
+        okx.get_open_interest.return_value = {
+            "oi": str(cur), "oi_ccy": "", "oi_usd": "", "ts": "0",
+        }
+        await collector._fetch_and_push_oi()
+        for c in [0.6, -0.6, 0.7, -0.7, 0.55, -0.55]:
+            cur *= 1 + c / 100
+            okx.get_open_interest.return_value = {
+                "oi": str(cur), "oi_ccy": "", "oi_usd": "", "ts": "x",
+            }
+            await collector._fetch_and_push_oi()
+
+        cur *= 0.97  # -3% 骤降
+        okx.get_open_interest.return_value = {
+            "oi": str(cur), "oi_ccy": "", "oi_usd": "", "ts": "y",
+        }
+        await collector._fetch_and_push_oi()
+
+        events = _drain_b(event_bus)
+        assert len(events) == 1
+        assert events[0].data["extreme"] == "low"
+        assert events[0].data["sentiment"] == "neutral"
+
+    @pytest.mark.asyncio
+    async def test_state_persisted(self, tmp_path):
+        """分位状态落盘 → 新实例加载后免预热"""
+        cfg = _pct_config(tmp_path)
+        okx = _mock_okx_client()
+        c1 = OnchainCollector(
+            okx_client=okx, config=cfg,
+            event_bus=EventBus(), http_client=_mock_http_client(),
+        )
+        for i in range(6):
+            r = 0.50 + i * 0.01
+            okx.get_taker_volume.return_value = {
+                "buy_vol_ccy": str(r * 100), "sell_vol_ccy": str((1 - r) * 100),
+                "buy_vol": "1", "sell_vol": "1", "ts": str(i),
+            }
+            await c1._fetch_and_push_taker()
+
+        c2 = OnchainCollector(
+            okx_client=okx, config=cfg,
+            event_bus=EventBus(), http_client=_mock_http_client(),
+        )
+        assert c2._trackers["taker"].n == c1._trackers["taker"].n
+        assert c2._trackers["taker"].rank(0.5) is not None  # 已预热

@@ -8,6 +8,9 @@ from config import (
     RiskConfig, DataConfig, AgentConfig, NotificationConfig,
 )
 
+# 存储为小数比例（0.10 = 10%）、UI 按百分比数值展示/编辑的字段: name -> (min%, max%)
+_PCT_FRACTION_FIELDS = {"max_position_pct": (5, 100), "max_single_order_pct": (1, 50)}
+
 
 def render_config_section(
     section_name: str,
@@ -85,6 +88,12 @@ def _render_field(name: str, value: Any, field_type, key: str) -> Optional[Any]:
 
     # Float
     if isinstance(value, float):
+        # 仓位比例字段：存储为小数（0.10 = 10%），UI 按百分比数值展示/编辑
+        if name in _PCT_FRACTION_FIELDS:
+            lo, hi = _PCT_FRACTION_FIELDS[name]
+            pct = st.number_input(friendly, min_value=float(lo), max_value=float(hi),
+                                  value=round(value * 100, 2), step=1.0, format="%.1f", key=key)
+            return pct / 100.0
         min_v, max_v = _get_range(name, value)
         step = 0.01 if max_v - min_v < 1 else 0.1
         return st.number_input(friendly, min_value=min_v, max_value=max_v,

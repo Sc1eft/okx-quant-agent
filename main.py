@@ -184,7 +184,8 @@ async def _preflight_check(root_config, okx_rest, mode: str) -> bool:
             f"OKX 权限为 '{ex.permissions}'，live 模式会静默走模拟成交，必须改为 'trade'"
         )
     if not root_config.agent.api_key:
-        problems.append("DeepSeek API key 未设置 (DEEPSEEK_API_KEY)")
+        # DeepSeek 已移出实时交易决策环，仅用于盘后复盘/报告——缺失不阻断启动
+        logger.warning("DeepSeek API key 未设置 (DEEPSEEK_API_KEY)，Agent 4 复盘/报告功能将不可用")
 
     # 账户连通性 + 签名验证（真实请求一次）
     if not problems:
@@ -298,13 +299,17 @@ async def main():
     if position_monitor:
         risk_manager.position_monitor = position_monitor
 
-    # DeepSeek 决策器
+    # DeepSeek 决策器（仅用于 Agent 4 复盘/交易报告，不参与实时交易决策）
     deepseek = DeepSeekTrader(
         api_key=root_config.agent.api_key,
         model=root_config.agent.model,
         base_url=root_config.agent.base_url,
         temperature=root_config.agent.temperature,
     )
+
+    # 规则决策器（实时交易决策的唯一来源；与回测策略 macd_agent 共用评分逻辑）
+    from agents.rule_decider import RuleDecider
+    rule_decider = RuleDecider(agent_config)
 
     # ── Phase 4: 复盘报告生成器 + Agent 4 复盘改进 ──
     from agents.review_generator import ReviewGenerator
@@ -339,6 +344,19 @@ async def main():
         agent2=agent2,
     ) if agent_config.agent4_enabled else None
 
+    # LLM 影子决策（D12：与规则决策并行记录对比，不参与执行；需配置 API key）
+    llm_shadow = None
+    if agent_config.llm_shadow_enabled and root_config.agent.api_key:
+        from agents.llm_shadow import LLMShadow
+        llm_shadow = LLMShadow(
+            deepseek=deepseek,
+            db_path=agent_config.db_path,
+            min_interval_s=agent_config.llm_shadow_min_interval_s,
+        )
+        logger.info(
+            f"LLM 影子决策已启用 (间隔≥{agent_config.llm_shadow_min_interval_s}s，只记录不执行)"
+        )
+
     agent3 = Agent3(
         config=agent_config,
         event_bus=event_bus,
@@ -353,6 +371,8 @@ async def main():
         review_generator=review_gen,  # Phase 4
         agent4_reviewer=agent4_reviewer,  # Agent 4（替代 param_adapter）
         notifier=notifier,
+        rule_decider=rule_decider,  # 规则决策器（替代 DeepSeek 实时决策）
+        llm_shadow=llm_shadow,  # D12: LLM 影子决策（只记录不执行）
     ) if agent_config.agent3_enabled else None
 
     logger.info(f"Agent 1 (技术)={'✅' if agent1 else '❌'}")

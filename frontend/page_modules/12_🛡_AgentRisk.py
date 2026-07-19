@@ -37,7 +37,8 @@ if has_live_status:
     agent3 = status_data.get("agent3", {})
     risk_status = agent3.get("risk_status", {})
     pm_status = status_data.get("position_monitor", {})
-    deepseek_stats = agent3.get("deepseek_stats", {})
+    rule_stats = agent3.get("rule_decider_stats", {})
+    decision_engine = agent3.get("decision_engine", "rule")
     executor_stats = agent3.get("executor_stats", {})
     agent_mode = status_data.get("mode", "—")
 else:
@@ -158,20 +159,17 @@ with tab2:
         exec_stats = executor_stats or {}
         total = agent3.get("trades_executed", 0)
         failed = exec_stats.get("failed_orders", 0)
-        deepseek_calls = deepseek_stats.get("total_calls", 0)
-        deepseek_errors = deepseek_stats.get("total_errors", 0)
+        rule_calls = rule_stats.get("total_calls", 0)
     else:
-        total, failed, deepseek_calls, deepseek_errors = 2, 0, 5, 0
+        total, failed, rule_calls = 2, 0, 5
 
-    stat_cols = st.columns(4)
+    stat_cols = st.columns(3)
     with stat_cols[0]:
         st.metric("成交次数", str(total))
     with stat_cols[1]:
         st.metric("失败订单", str(failed))
     with stat_cols[2]:
-        st.metric("DeepSeek 调用", str(deepseek_calls))
-    with stat_cols[3]:
-        st.metric("DeepSeek 错误", str(deepseek_errors))
+        st.metric("规则决策次数", str(rule_calls))
 
 
 with tab3:
@@ -378,16 +376,13 @@ with tab5:
         adb = agent3.get("adjusted_debounce", "—")
         ait = agent3.get("adjusted_trade_interval", "—")
 
-        acols = st.columns(4)
+        acols = st.columns(3)
         with acols[0]:
             st.metric("最大日交易", amt, help=f"Config 默认: {_cfg.agent3_max_daily_trades}")
         with acols[1]:
             st.metric("信号采集间隔", f"{adb}s", help=f"Config 默认: {_cfg.agent3_debounce_seconds}s")
         with acols[2]:
             st.metric("最小交易间隔", f"{ait}s", help=f"Config 默认: {_cfg.agent3_min_interval_between_trades}s")
-        with acols[3]:
-            wr_limit = f"{_cfg.param_adapter_win_rate_target:.0%}"
-            st.metric("胜率目标", wr_limit, help=f"调整间隔: {_cfg.param_adapter_adjust_interval_hours}h")
 
         # 参数调整历史
         param_changes = p4.get("param_changes", [])
@@ -403,21 +398,16 @@ with tab5:
         else:
             st.info("暂无参数调整记录（需至少 10 笔交易后才会触发自适应调整）")
 
-        # DeepSeek 统计
+        # 决策引擎统计
         st.divider()
-        st.subheader("📡 DeepSeek 调用统计")
-        ds = deepseek_stats or {}
-        dcols = st.columns(4)
+        st.subheader("🧭 决策引擎统计")
+        rs = rule_stats or {}
+        dcols = st.columns(2)
         with dcols[0]:
-            st.metric("总调用", ds.get("total_calls", 0))
+            engine_label = "规则决策 (RuleDecider)" if decision_engine == "rule" else str(decision_engine)
+            st.metric("决策引擎", engine_label)
         with dcols[1]:
-            st.metric("总错误", ds.get("total_errors", 0))
-        with dcols[2]:
-            d_nodata = ds.get("no_data_count", 0)
-            st.metric("无信号返回", d_nodata)
-        with dcols[3]:
-            d_avg = ds.get("avg_duration_ms", 0)
-            st.metric("平均耗时", f"{d_avg:.0f}ms" if d_avg else "—")
+            st.metric("决策次数", rs.get("total_calls", 0))
 
     else:
         demo_p4 = {
@@ -426,7 +416,7 @@ with tab5:
             "月度盈亏": "$0.00",
             "月度胜率": "0.0%",
             "自适应参数": "日交易 10 / 采集 30s / 间隔 300s",
-            "DeepSeek": "调用 0 / 错误 0",
+            "决策引擎": "规则决策 / 0 次",
         }
         cols = st.columns(3)
         for i, (k, v) in enumerate(demo_p4.items()):

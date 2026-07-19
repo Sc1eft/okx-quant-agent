@@ -209,6 +209,8 @@ class BacktestEngine:
         self._last_long_bar = -999
         self._last_short_bar = -999
         self._prev_trade_loss = False
+        # 当前 bar 的索引时间（回测成交时间必须用 bar 时间，不是墙上时钟）
+        self._current_bar_ts = None
 
         # Stats
         self.total_signals = 0
@@ -228,8 +230,16 @@ class BacktestEngine:
             return self.balance + unrealized
         return self.balance
 
+    def _bar_now_iso(self) -> str:
+        """当前 bar 的时间（回测成交时间必须是 bar 时间，不是墙上时钟）"""
+        ts = self._current_bar_ts
+        if ts is not None and hasattr(ts, "isoformat"):
+            return ts.isoformat()
+        return datetime.now(timezone.utc).isoformat()
+
     def on_bar(self, bar: pd.Series) -> dict:
         """Process one K-line bar, return state."""
+        self._current_bar_ts = bar.name
         self._append_bar(bar)
         ind = self._calc()
         self.last_price = float(bar["close"])
@@ -474,7 +484,7 @@ class BacktestEngine:
             self.position -= half
             self.position_cost *= (1 - 0.5)
             self.trades.append({
-                "time": datetime.now(timezone.utc).isoformat(),
+                "time": self._bar_now_iso(),
                 "side": "partial_close_long",
                 "price": price,
                 "size": half,
@@ -490,7 +500,7 @@ class BacktestEngine:
             self.short_position -= half
             self.short_position_cost *= (1 - 0.5)
             self.trades.append({
-                "time": datetime.now(timezone.utc).isoformat(),
+                "time": self._bar_now_iso(),
                 "side": "partial_close_short",
                 "price": price,
                 "size": half,
@@ -509,7 +519,7 @@ class BacktestEngine:
             self.position += size
             self.position_cost += cost
             self.trades.append({
-                "time": datetime.now(timezone.utc).isoformat(),
+                "time": self._bar_now_iso(),
                 "side": "buy",
                 "price": price,
                 "size": size,
@@ -522,7 +532,7 @@ class BacktestEngine:
             self.short_position += size
             self.short_position_cost += revenue
             self.trades.append({
-                "time": datetime.now(timezone.utc).isoformat(),
+                "time": self._bar_now_iso(),
                 "side": "sell",
                 "price": price,
                 "size": size,
@@ -534,7 +544,7 @@ class BacktestEngine:
         self.in_position = True
         self.position_side = direction
         self.entry_price = price
-        self.entry_time = datetime.now(timezone.utc).isoformat()
+        self.entry_time = self._bar_now_iso()
         self.highest_since_entry = price
         self.lowest_since_entry = price
         self.bars_since_entry = 0
@@ -553,7 +563,7 @@ class BacktestEngine:
             proceed = self.position * price * (1 - fee)
             pnl = proceed - self.position_cost
             self.trades.append({
-                "time": datetime.now(timezone.utc).isoformat(),
+                "time": self._bar_now_iso(),
                 "side": "sell",
                 "price": price,
                 "size": self.position,
@@ -568,7 +578,7 @@ class BacktestEngine:
             cost = self.short_position * price * (1 + fee)
             pnl = self.short_position_cost - cost
             self.trades.append({
-                "time": datetime.now(timezone.utc).isoformat(),
+                "time": self._bar_now_iso(),
                 "side": "buy",
                 "price": price,
                 "size": self.short_position,
